@@ -1,0 +1,25 @@
+[project]
+name = "tarkin"
+version = "0.0.1"
+description = "Governance compiler for PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    { name = "Brent Pollard" }
+]
+
+dependencies = [
+    "typer",
+    "pydantic",
+    "sqlalchemy",
+    "psycopg[binary]",
+    "ruamel.yaml"
+]
+
+[project.scripts]
+tarkin = "tarkin.cli:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
