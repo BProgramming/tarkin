@@ -10,6 +10,7 @@ venv/
 # Build artifacts
 build/
 dist/
+tarkin_archive/
 *.egg-info/
 
 # IDE
@@ -24,3 +25,4 @@ Thumbs.db
 .env
 *.pem
 *.key
+*.token
