@@ -220,7 +220,7 @@ class SemanticValidator:
         errors = []
         for schema in project.schemas:
             for table in schema.tables:
-                req_min = min(table.clearance, schema.clearance)
+                req_min = max(table.clearance, schema.clearance)
                 for col in table.columns:
                     if col.clearance < req_min:
                         errors.append(
