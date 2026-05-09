@@ -1,10 +1,12 @@
 from __future__ import annotations
 from pathlib import Path
 from ruamel.yaml import YAML
+
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig, DatabaseEngine, MaskingStrategy,
+    GeneratedColumnStorage, IndexType,
 )
 
 
@@ -23,14 +25,14 @@ class YamlLoader:
     """
 
     @classmethod
-    def load(cls, path: Path) -> GovernanceProject:
+    def load(cls, path: Path) -> GovernanceProject | None:
         y = _yaml()
         with path.open("r", encoding="utf-8") as f:
             doc = y.load(f)
         return cls._parse_project(doc, path)
 
     @classmethod
-    def loads(cls, text: str) -> GovernanceProject:
+    def loads(cls, text: str) -> GovernanceProject | None:
         """Parse from a YAML string (useful for testing)."""
         y = _yaml()
         doc = y.load(text)
@@ -41,16 +43,18 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_project(cls, doc: dict, source: object = None) -> GovernanceProject:
-        if "database" not in doc:
+    def _parse_project(cls, doc: dict, source: Path | str | None = None) -> GovernanceProject | None:
+        if not source:
+            raise ValueError(f"No YAML to load.")
+        elif "database" not in doc:
             raise ValueError(f"Tarkin YAML at {source!r} is missing required key 'database'.")
-
-        return GovernanceProject(
-            database=cls._parse_database(doc["database"]),
-            schemas=[cls._parse_schema(s) for s in doc.get("schemas", [])],
-            roles=[cls._parse_role(r) for r in doc.get("roles", [])],
-            users=[cls._parse_user(u) for u in doc.get("users", [])],
-        )
+        else:
+            return GovernanceProject(
+                database=cls._parse_database(doc["database"]),
+                schemas=[cls._parse_schema(s) for s in doc.get("schemas", [])],
+                roles=[cls._parse_role(r) for r in doc.get("roles", [])],
+                users=[cls._parse_user(u) for u in doc.get("users", [])],
+            )
 
     # =====================================================
     # DATABASE
@@ -65,7 +69,7 @@ class YamlLoader:
             host=d.get("host", "localhost"),
             port=d.get("port", 5432),
             database=d.get("database", "postgres"),
-            engine=d.get("engine", "postgresql"),
+            engine=DatabaseEngine(d.get("engine", "postgres")),
             profile=d.get("profile"),
         )
 
@@ -118,7 +122,7 @@ class YamlLoader:
             description=d.get("description"),
             clearance=d.get("clearance", 0),
             audit_enabled=d.get("audit_enabled", True),
-            data_type=d.get("data_type", "str"),
+            type=d.get("type", "str"),
             default=d.get("default"),
             unique=d.get("unique", False),
             nullable=d.get("nullable", True),
@@ -126,9 +130,9 @@ class YamlLoader:
             versioned=d.get("versioned", False),
             sensitive=d.get("sensitive", False),
             encrypted=d.get("encrypted", False),
-            masking_strategy=d.get("masking_strategy", "none"),
+            masking_strategy=MaskingStrategy(d.get("masking_strategy", "none")),
             generated_expression=d.get("generated_expression"),
-            generated_storage=d.get("generated_storage", "stored"),
+            generated_storage=GeneratedColumnStorage(d.get("generated_storage", "stored")),
         )
 
     # =====================================================
@@ -140,7 +144,7 @@ class YamlLoader:
         return IndexConfig(
             name=d.get("name", "default_index"),
             columns=list(d.get("columns", [])),
-            index_type=d.get("index_type", "btree"),
+            index_type=IndexType(d.get("index_type", "btree")),
             unique=d.get("unique", False),
             primary_key=d.get("primary_key", False),
             partial_filter=d.get("partial_filter"),
@@ -167,7 +171,7 @@ class YamlLoader:
     @classmethod
     def _parse_table_permission(cls, d: dict) -> TablePermissionConfig:
         return TablePermissionConfig(
-            table=d.get("table", "-"),
+            name=d.get("table", "-"),
             select=d.get("select", True),
             insert=d.get("insert", False),
             update=d.get("update", False),
@@ -181,7 +185,7 @@ class YamlLoader:
     @classmethod
     def _parse_schema_permission(cls, d: dict) -> SchemaPermissionConfig:
         return SchemaPermissionConfig(
-            schema_name=d.get("schema", "-"),
+            name=d.get("schema", "-"),
             usage=d.get("usage", True),
             create=d.get("create", False),
             tables=[cls._parse_table_permission(t) for t in d.get("tables", [])],

@@ -1,7 +1,7 @@
 from __future__ import annotations
+
 from .model import (
     GovernanceProject, SchemaConfig, TableConfig, ColumnConfig,
-    IndexConfig, ForeignKeyConfig, RoleConfig, UserConfig,
 )
 
 
@@ -21,17 +21,18 @@ class SemanticValidator:
 
     @classmethod
     def validate(cls, project: GovernanceProject) -> bool:
-        errors = []
-        errors.append(cls._validate_project_structure(project))
-        errors.append(cls._validate_schemas(project))
-        errors.append(cls._validate_tables(project))
-        errors.append(cls._validate_columns(project))
-        errors.append(cls._validate_cross_references(project))
-        errors.append(cls._validate_clearance_rules(project))
-        errors.append(cls._validate_roles(project))
-        errors.append(cls._validate_users(project))
+        errors = [
+            cls._validate_project_structure(project),
+            cls._validate_schemas(project),
+            cls._validate_tables(project),
+            cls._validate_columns(project),
+            cls._validate_cross_references(project),
+            cls._validate_clearance_rules(project),
+            cls._validate_roles(project),
+            cls._validate_users(project),
+        ]
 
-        errors = [e for e in errors if e]
+        errors = [str(e) for e in errors if e]
 
         if errors:
             raise ValidationError("\n".join(errors))
@@ -46,6 +47,8 @@ class SemanticValidator:
     def _validate_project_structure(cls, project: GovernanceProject) -> str | None:
         if not project.schemas:
             return "Database must have at least one schema."
+        else:
+            return None
 
     # =====================================================
     # SCHEMA RULES
@@ -66,6 +69,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # TABLE RULES
@@ -93,6 +98,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # COLUMN RULES
@@ -109,6 +116,8 @@ class SemanticValidator:
                         errors.append(vld)
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     @classmethod
     def _validate_column_constraints(
@@ -118,10 +127,10 @@ class SemanticValidator:
         path = f"{schema_name}.{table_name}.{col.name}"
 
         if col.generated_expression and col.default:
-            errors.append(f"Column '{path}' cannot have both default and generated expression.")
+            errors.append(f"Column '{path}' cannot have both a default value and a generated expression.")
 
         if col.versioned and col.generated_expression:
-            errors.append(f"Column '{path}' cannot be versioned and generated.")
+            errors.append(f"Column '{path}' cannot be versioned and have a generated expression.")
 
         if col.versioned and col.immutable:
             errors.append(f"Column '{path}' cannot be both versioned and immutable.")
@@ -133,6 +142,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # CROSS REFERENCES
@@ -197,6 +208,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # CLEARANCE RULES
@@ -232,6 +245,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # ROLE RULES
@@ -251,13 +266,15 @@ class SemanticValidator:
             if not role.on:
                 errors.append(f"Role '{role.name}' has no assigned schemas or tables.")
             for sp in role.on:
-                if sp.schema_name not in schema_names:
+                if sp.name not in schema_names:
                     errors.append(
-                        f"Role '{role.name}' references schema '{sp.schema_name}' which does not exist."
+                        f"Role '{role.name}' references schema '{sp.name}' which does not exist."
                     )
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # USER RULES
@@ -285,6 +302,8 @@ class SemanticValidator:
 
         if errors:
             return "\n".join(errors)
+        else:
+            return None
 
     # =====================================================
     # UTILS
@@ -318,3 +337,5 @@ class SemanticValidator:
             if trim_suffix:
                 msg += f" (Suffix '{trim_suffix}' is ignored)."
             return msg
+        else:
+            return None

@@ -1,10 +1,5 @@
-"""
-Reusable test fixtures for Tarkin.
-
-These replace the old test_model() function that lived in model.py.
-Import what you need; build_minimal_project() is the safest baseline.
-"""
 from __future__ import annotations
+
 from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
@@ -16,8 +11,8 @@ def make_database(**kwargs) -> DatabaseConfig:
     return DatabaseConfig(**kwargs)
 
 
-def make_column(name: str = "id", data_type: str = "bigint", **kwargs) -> ColumnConfig:
-    return ColumnConfig(name=name, data_type=data_type, **kwargs)
+def make_column(name: str = "id", type: str = "bigint", **kwargs) -> ColumnConfig:
+    return ColumnConfig(name=name, type=type, **kwargs)
 
 
 def make_index(name: str = "pk_id", columns: list[str] | None = None, **kwargs) -> IndexConfig:
@@ -25,26 +20,18 @@ def make_index(name: str = "pk_id", columns: list[str] | None = None, **kwargs) 
 
 
 def make_table(name: str = "users", **kwargs) -> TableConfig:
-    return TableConfig(
-        name=name,
-        columns=[make_column()],
-        **kwargs,
-    )
+    return TableConfig(name=name, columns=[make_column()], **kwargs)
 
 
 def make_schema(name: str = "public", **kwargs) -> SchemaConfig:
-    return SchemaConfig(
-        name=name,
-        tables=[make_table()],
-        **kwargs,
-    )
+    return SchemaConfig(name=name, tables=[make_table()], **kwargs)
 
 
 def make_role(name: str = "reader", schema: str = "public", **kwargs) -> RoleConfig:
     perm = SchemaPermissionConfig(
-        schema_name=schema,
+        name=schema,
         usage=True,
-        tables=[TablePermissionConfig(table="users", select=True)],
+        tables=[TablePermissionConfig(name="users", select=True)],
     )
     return RoleConfig(name=name, on=[perm], **kwargs)
 
@@ -71,7 +58,7 @@ def build_cross_schema_project() -> GovernanceProject:
     Two schemas with a cross-schema foreign key.
     Useful for testing FK validation logic.
     """
-    orders_col = make_column(name="user_id", data_type="bigint")
+    orders_col = make_column(name="user_id", type="bigint")
     fk = ForeignKeyConfig(
         name="fk_orders_user_id",
         column="user_id",
@@ -84,21 +71,19 @@ def build_cross_schema_project() -> GovernanceProject:
 
     public_schema = make_schema(name="public")
 
-    role = make_role(name="reader", schema="public")
-    sales_perm = SchemaPermissionConfig(schema_name="sales", usage=True)
-    role_with_sales = RoleConfig(
+    roles = RoleConfig(
         name="reader",
         on=[
-            SchemaPermissionConfig(schema_name="public", usage=True,
-                                   tables=[TablePermissionConfig(table="users", select=True)]),
-            sales_perm,
+            SchemaPermissionConfig(name="public", usage=True,
+                                   tables=[TablePermissionConfig(name="users", select=True)]),
+            SchemaPermissionConfig(name="sales", usage=True),
         ],
     )
 
     return GovernanceProject(
         database=make_database(),
         schemas=[public_schema, orders_schema],
-        roles=[role_with_sales],
+        roles=[roles],
         users=[make_user()],
     )
 
@@ -111,7 +96,7 @@ def build_clearance_project() -> GovernanceProject:
     normal_col = make_column(name="id")
     phi_col = ColumnConfig(
         name="ssn",
-        data_type="text",
+        type="text",
         clearance=2,
         sensitive=True,
         encrypted=True,
@@ -125,9 +110,9 @@ def build_clearance_project() -> GovernanceProject:
         clearance=2,
         can_read_sensitive=True,
         on=[SchemaPermissionConfig(
-            schema_name="clinical",
+            name="clinical",
             usage=True,
-            tables=[TablePermissionConfig(table="patients", select=True)],
+            tables=[TablePermissionConfig(name="patients", select=True)],
         )],
     )
 

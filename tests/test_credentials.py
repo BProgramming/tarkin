@@ -15,11 +15,10 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from tarkin.credentials import (
-    CredentialsFile, ConnectionProfile, ConnectionResult,
-    test_connection, test_all_connections,
-    DEFAULT_CREDENTIALS_PATH,
+    CredentialsFile, ConnectionProfile, ConnectionResult, test_connection,
 )
 
 
@@ -130,7 +129,7 @@ def test_missing_required_field_raises(tmp_path):
 def test_dsn_does_not_expose_password():
     prof = ConnectionProfile(
         profile="dev", host="localhost", port=5432,
-        database="db", username="user", password="s3cr3t",
+        database="db", username="user", password=SecretStr("s3cr3t"),
     )
     # DSN itself will contain the password (it's passed to the driver) —
     # but safe_repr() must not
@@ -140,7 +139,7 @@ def test_dsn_does_not_expose_password():
 def test_safe_repr_contains_key_fields():
     prof = ConnectionProfile(
         profile="dev", host="pg.example.com", port=5433,
-        database="mydb", username="alice", password="pw",
+        database="mydb", username="alice", password=SecretStr("pw"),
     )
     s = prof.safe_repr()
     assert "alice" in s
@@ -183,7 +182,7 @@ def test_bad_host_returns_failed_result():
         port=5432,
         database="db",
         username="u",
-        password="pw",
+        password=SecretStr("pw"),
     )
     result = test_connection(prof)
     assert result.success is False
@@ -204,17 +203,17 @@ def _integration_profile() -> ConnectionProfile | None:
     username = os.environ.get("TARKIN_TEST_USER")
     password = os.environ.get("TARKIN_TEST_PASSWORD")
 
-    if not all([host, database, username, password]):
+    if not host or not database or not username or not password:
         return None
-
-    return ConnectionProfile(
-        profile="integration",
-        host=host,
-        port=int(os.environ.get("TARKIN_TEST_PORT", "5432")),
-        database=database,
-        username=username,
-        password=password,
-    )
+    else:
+        return ConnectionProfile(
+            profile="integration",
+            host=host,
+            port=int(os.environ.get("TARKIN_TEST_PORT", "5432")),
+            database=database,
+            username=username,
+            password=SecretStr(password),
+        )
 
 
 @pytest.mark.integration

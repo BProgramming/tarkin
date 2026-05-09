@@ -3,7 +3,6 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
-
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -56,10 +55,7 @@ class ConnectionProfile(BaseModel):
 
     def safe_repr(self) -> str:
         """Human-readable representation with password redacted."""
-        return (
-            f"{self.username}@{self.host}:{self.port}/{self.database} "
-            f"[profile={self.profile!r}]"
-        )
+        return f"{self.username}@{self.host}:{self.port}/{self.database} [profile={self.profile!r}]"
 
 
 class CredentialsFile(BaseModel):
@@ -72,7 +68,7 @@ class CredentialsFile(BaseModel):
     profiles: dict[str, ConnectionProfile]
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "CredentialsFile":
+    def load(cls, path: Path | None = None) -> CredentialsFile:
         """
         Load and parse a credentials.toml file.
 
@@ -92,7 +88,7 @@ class CredentialsFile(BaseModel):
 
         if not resolved.exists():
             raise FileNotFoundError(
-                f"Credentials file not found: {resolved}\n"
+                f"Credentials file not found: {resolved}.\n"
                 f"Create it at {resolved} or pass --credentials <path>."
             )
 
@@ -102,9 +98,7 @@ class CredentialsFile(BaseModel):
         profiles: dict[str, ConnectionProfile] = {}
         for name, values in raw.items():
             if not isinstance(values, dict):
-                raise ValueError(
-                    f"Credentials file section [{name}] must be a table, got {type(values).__name__}."
-                )
+                raise ValueError(f"Credentials file section [{name}] must be a table, got {type(values).__name__}.")
             try:
                 profiles[name] = ConnectionProfile(profile=name, **values)
             except Exception as exc:
@@ -114,10 +108,10 @@ class CredentialsFile(BaseModel):
 
     def get(self, profile_name: str) -> ConnectionProfile:
         if profile_name not in self.profiles:
-            available = ", ".join(repr(k) for k in self.profiles)
+            available = "\n\t".join(repr(k) for k in self.profiles)
             raise KeyError(
-                f"Profile {profile_name!r} not found in {self.path}. "
-                f"Available profiles: {available}."
+                f"Profile {profile_name!r} not found in {self.path}.\n"
+                f"Available profiles:{available}"
             )
         return self.profiles[profile_name]
 
@@ -141,11 +135,9 @@ class ConnectionResult(BaseModel):
     def __str__(self) -> str:
         if self.success:
             return (
-                f"[ok] {self.profile!r} — "
-                f"PostgreSQL {self.server_version}, "
-                f"connected as {self.db_user!r}"
+                f"PASS: {self.profile!r} connected to PostgreSQL {self.server_version} instance as {self.db_user!r}."
             )
-        return f"[fail] {self.profile!r} — {self.error}"
+        return f"FAIL: {self.profile!r}, {self.error}"
 
 
 def test_connection(profile: ConnectionProfile) -> ConnectionResult:
@@ -159,8 +151,12 @@ def test_connection(profile: ConnectionProfile) -> ConnectionResult:
             row = conn.execute(text(
                 "SELECT current_user, version()"
             )).fetchone()
-            db_user        = row[0]
-            server_version = _parse_pg_version(row[1])
+            if row:
+                db_user        = row[0]
+                server_version = _parse_pg_version(row[1])
+            else:
+                db_user = None
+                server_version = None
         engine.dispose()
         return ConnectionResult(
             profile=profile.profile,

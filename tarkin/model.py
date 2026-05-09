@@ -9,68 +9,46 @@ from pydantic import BaseModel, ConfigDict, Field
 # =========================================================
 
 
-class DatabaseEngine(str, Enum):
-    POSTGRESQL = "postgresql"
+class StrEnum(str, Enum):
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return self.value
+
+
+class DatabaseEngine(str, StrEnum):
+    POSTGRES = "postgres"
     MYSQL = "mysql"
     MARIADB = "mariadb"
     SQLITE = "sqlite"
     MSSQL = "mssql"
     ORACLE = "oracle"
 
-    def __str__(self):
-        return self.value
 
-    def __repr__(self):
-        return self.value
-
-
-class MaskingStrategy(str, Enum):
+class MaskingStrategy(str, StrEnum):
     NONE = "none"
     FULL = "full"
     PARTIAL = "partial"
     HASH = "hash"
 
-    def __str__(self):
-        return self.value
 
-    def __repr__(self):
-        return self.value
-
-
-class PartialMaskVisibleSide(str, Enum):
+class PartialMaskVisibleSide(str, StrEnum):
     LEFT = "left"
     RIGHT = "right"
 
-    def __str__(self):
-        return self.value
 
-    def __repr__(self):
-        return self.value
-
-
-class GeneratedColumnStorage(str, Enum):
+class GeneratedColumnStorage(str, StrEnum):
     STORED = "stored"
     VIRTUAL = "virtual"
 
-    def __str__(self):
-        return self.value
 
-    def __repr__(self):
-        return self.value
-
-
-class IndexType(str, Enum):
+class IndexType(str, StrEnum):
     BTREE = "btree"
     HASH = "hash"
     GIN = "gin"
     GIST = "gist"
     BRIN = "brin"
-
-    def __str__(self):
-        return self.value
-
-    def __repr__(self):
-        return self.value
 
 
 # =========================================================
@@ -115,7 +93,7 @@ class DatabaseConfig(TarkinBaseModel):
     host: str = "localhost"
     port: int = 5432
     database: str = "postgres"
-    engine: DatabaseEngine = DatabaseEngine.POSTGRESQL
+    engine: DatabaseEngine = DatabaseEngine.POSTGRES
 
     # The credentials profile name from credentials.toml used to connect.
     # Credentials themselves never appear in the governance YAML.
@@ -133,7 +111,7 @@ class ColumnConfig(TarkinBaseModel):
     description: Optional[str] = None
     audit_enabled: bool = True
 
-    data_type: str = "str"
+    type: str = "str"
     default: Optional[str] = None
 
     unique:    bool = False
@@ -257,7 +235,7 @@ class SchemaConfig(TarkinBaseModel):
 
 
 class TablePermissionConfig(TarkinBaseModel):
-    table: str = "-"
+    name: str = "-"
     select: bool = True
     insert: bool = False
     update: bool = False
@@ -269,7 +247,7 @@ class TablePermissionConfig(TarkinBaseModel):
 
 
 class SchemaPermissionConfig(TarkinBaseModel):
-    schema_name: str = "-"  # renamed from 'schema' to avoid shadowing BaseModel attribute
+    name: str = "-"  # renamed from 'schema' to avoid shadowing BaseModel attribute
     tables: list[TablePermissionConfig] = Field(default_factory=list)
     usage: bool = True
     create: bool = False
@@ -294,7 +272,6 @@ class RoleConfig(TarkinBaseModel):
 
 class UserConfig(TarkinBaseModel):
     username: str = "default_user"
-    # Roles are referenced by name; resolved against the project's role list at validation time.
     roles: list[str] = Field(default_factory=list)
     active: bool = True
 

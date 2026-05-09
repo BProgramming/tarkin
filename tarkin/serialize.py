@@ -2,11 +2,11 @@ from __future__ import annotations
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from io import StringIO
-from enum import Enum
+
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig, StrEnum,
 )
 
 
@@ -18,9 +18,9 @@ def _yaml() -> YAML:
     return y
 
 
-def _val(v):
+def _val(v) -> str:
     """Coerce enum values to their string representation for YAML output."""
-    if isinstance(v, Enum):
+    if isinstance(v, StrEnum):
         return str(v)
     return v
 
@@ -120,7 +120,7 @@ class Serializer:
         m["name"] = col.name
         if col.description:
             m["description"] = col.description
-        m["data_type"] = col.data_type
+        m["type"] = col.type
         m["clearance"] = col.clearance
         m["nullable"] = col.nullable
         m["unique"] = col.unique
@@ -173,7 +173,7 @@ class Serializer:
     @classmethod
     def _serialize_table_permission(cls, tp: TablePermissionConfig) -> CommentedMap:
         m = CommentedMap()
-        m["table"] = tp.table
+        m["table"] = tp.name
         m["select"] = tp.select
         m["insert"] = tp.insert
         m["update"] = tp.update
@@ -187,7 +187,7 @@ class Serializer:
     @classmethod
     def _serialize_schema_permission(cls, sp: SchemaPermissionConfig) -> CommentedMap:
         m = CommentedMap()
-        m["schema"] = sp.schema_name
+        m["schema"] = sp.name
         m["usage"] = sp.usage
         m["create"] = sp.create
         if sp.tables:

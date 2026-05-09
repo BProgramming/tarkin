@@ -1,25 +1,8 @@
 from __future__ import annotations
-"""
-Database introspection for Tarkin.
-
-Uses SQLAlchemy's Inspector for the broad strokes, then drops into raw
-pg_catalog / information_schema queries for everything SA doesn't expose:
-sequences, OWNED BY, check constraints, custom types, trigger function bodies,
-role memberships, and table/schema grants.
-
-Produces a GovernanceProject that can be serialized to YAML and round-tripped
-back through YamlLoader + SemanticValidator without loss.
-
-Excluded schemas (never introspected):
-  pg_catalog, information_schema, pg_toast, pg_temp_*, __META__
-  and any schema whose name starts with "tk_" (Tarkin shadow schemas).
-"""
-
-from pathlib import Path
-from typing import Any
-
-from sqlalchemy import create_engine, inspect as sa_inspect, text
+from sqlalchemy import inspect as sa_inspect, text, Inspector, Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.interfaces import ReflectedColumn
+from sqlalchemy.dialects import postgresql as pg_dialect
 
 from .credentials import ConnectionProfile
 from .model import (
@@ -35,17 +18,14 @@ from .model import (
 # =========================================================
 
 _SYSTEM_SCHEMAS = {
-    "pg_catalog",
     "information_schema",
-    "pg_toast",
     "__META__",
 }
 
 def _is_excluded_schema(name: str) -> bool:
     return (
-        name in _SYSTEM_SCHEMAS
-        or name.startswith("pg_temp_")
-        or name.startswith("pg_toast_")
+           name in _SYSTEM_SCHEMAS
+        or name.startswith("pg_")
         or name.startswith("tk_")
     )
 
@@ -88,8 +68,8 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
     return GovernanceProject(
         database=DatabaseConfig(
             name=db_name,
-            description=f"Introspected from {profile.safe_repr()} — {db_version.split(',')[0]}",
-            engine=DatabaseEngine.POSTGRESQL,
+            description=f"Inspected from {profile.safe_repr()} on {db_version.split(',')[0]}.",
+            engine=DatabaseEngine(DatabaseEngine.POSTGRES),
             host=profile.host,
             port=profile.port,
             database=profile.database,
@@ -105,24 +85,22 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
 # SCHEMAS
 # =========================================================
 
-def _get_user_schemas(conn) -> list[str]:
+def _get_user_schemas(conn: Connection) -> list[str]:
     rows = conn.execute(text("""
         SELECT schema_name
         FROM information_schema.schemata
-        WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
-          AND schema_name NOT LIKE 'pg_toast%'
-          AND schema_name NOT LIKE 'pg_temp_%'
+        WHERE schema_name NOT IN ('information_schema', '__META__')
+          AND schema_name NOT LIKE 'pg\\_%'  ESCAPE '\\'
           AND schema_name NOT LIKE 'tk\\_%'  ESCAPE '\\'
-          AND schema_name != '__META__'
         ORDER BY schema_name
     """)).fetchall()
     return [r[0] for r in rows]
 
 
-def _build_schema(conn, engine: Engine, schema_name: str) -> SchemaConfig:
-    insp = sa_inspect(engine)
+def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaConfig:
+    inspector = sa_inspect(engine)
 
-    tables             = _build_tables(conn, insp, schema_name)
+    tables             = _build_tables(conn, inspector, schema_name)
     views              = _get_views(conn, schema_name)
     mat_views          = _get_materialized_views(conn, schema_name)
     functions          = _get_functions(conn, schema_name)
@@ -150,15 +128,15 @@ def _build_schema(conn, engine: Engine, schema_name: str) -> SchemaConfig:
 # TABLES
 # =========================================================
 
-def _build_tables(conn, insp, schema_name: str) -> list[TableConfig]:
-    table_names = insp.get_table_names(schema=schema_name)
-    return [_build_table(conn, insp, schema_name, t) for t in sorted(table_names)]
+def _build_tables(conn: Connection, inspector: Inspector, schema_name: str) -> list[TableConfig]:
+    table_names = inspector.get_table_names(schema=schema_name)
+    return [_build_table(conn, inspector, schema_name, str(t)) for t in sorted(table_names)]
 
 
-def _build_table(conn, insp, schema_name: str, table_name: str) -> TableConfig:
-    columns     = _build_columns(conn, insp, schema_name, table_name)
-    indexes     = _build_indexes(conn, insp, schema_name, table_name)
-    foreign_keys = _build_foreign_keys(insp, schema_name, table_name)
+def _build_table(conn: Connection, inspector: Inspector, schema_name: str, table_name: str) -> TableConfig:
+    columns     = _build_columns(conn, inspector, schema_name, table_name)
+    indexes     = _build_indexes(conn, schema_name, table_name)
+    foreign_keys = _build_foreign_keys(inspector, schema_name, table_name)
 
     return TableConfig(
         name=table_name,
@@ -172,11 +150,11 @@ def _build_table(conn, insp, schema_name: str, table_name: str) -> TableConfig:
 # COLUMNS
 # =========================================================
 
-# Map PostgreSQL type categories to simplified Tarkin data_type strings.
+# Map PostgreSQL type categories to simplified Tarkin type strings.
 # We preserve the raw pg type name so the round-trip can reconstruct DDL.
-def _build_columns(conn, insp, schema_name: str, table_name: str) -> list[ColumnConfig]:
+def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, table_name: str) -> list[ColumnConfig]:
     # SA gives us the basics; supplement with pg_catalog for defaults + identity
-    sa_cols = insp.get_columns(table_name, schema=schema_name)
+    sa_cols = inspector.get_columns(table_name, schema=schema_name)
     pg_cols = _get_pg_column_details(conn, schema_name, table_name)
 
     cols = []
@@ -184,20 +162,20 @@ def _build_columns(conn, insp, schema_name: str, table_name: str) -> list[Column
         name     = sa_col["name"]
         pg_extra = pg_cols.get(name, {})
 
-        data_type = _pg_type_string(sa_col)
-        default   = pg_extra.get("column_default")
+        type    = _pg_type_string(sa_col)
+        default = str(pg_extra.get("column_default"))
 
-        # Strip nextval(... defaults — these are sequence-driven, not user defaults.
+        # Strip 'nextval('... defaults — these are sequence-driven, not user defaults.
         # The sequence is captured separately; we don't want it in the YAML default field.
         if default and default.startswith("nextval("):
             default = None
 
         nullable = sa_col.get("nullable", True)
-        unique   = pg_extra.get("is_unique", False)
+        unique   = bool(pg_extra.get("is_unique", False))
 
         cols.append(ColumnConfig(
             name=name,
-            data_type=data_type,
+            type=type,
             nullable=nullable,
             unique=unique,
             default=default,
@@ -206,7 +184,7 @@ def _build_columns(conn, insp, schema_name: str, table_name: str) -> list[Column
     return cols
 
 
-def _get_pg_column_details(conn, schema_name: str, table_name: str) -> dict[str, dict]:
+def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) -> dict[str, dict[str, str | bool]]:
     """
     Pull column-level details from information_schema that SA doesn't always expose:
     raw default expressions and uniqueness (via constraint, not index).
@@ -239,27 +217,25 @@ def _get_pg_column_details(conn, schema_name: str, table_name: str) -> dict[str,
 
     return {
         r[0]: {
-            "column_default": r[1],
+            "column_default": str(r[1]),
             "is_unique":      bool(r[2]),
         }
         for r in rows
     }
 
 
-def _pg_type_string(sa_col: dict) -> str:
+def _pg_type_string(sa_col: dict | ReflectedColumn) -> str:
     """
     Produce a canonical PostgreSQL type string from a SQLAlchemy column dict.
     We use the compiled form so the YAML contains real pg types, not SA abstractions.
     """
     type_obj = sa_col.get("type")
-    if type_obj is None:
+    if not type_obj:
         return "text"
-    try:
-        # SA types have a compile method; use the generic dialect for portability
-        from sqlalchemy.dialects import postgresql as pg_dialect
+    elif hasattr(type_obj, 'compile'):
         compiled = type_obj.compile(dialect=pg_dialect.dialect())
         return str(compiled).lower()
-    except Exception:
+    else:
         return str(type_obj).lower()
 
 
@@ -275,7 +251,7 @@ _INDEX_TYPE_MAP = {
     "brin":  IndexType.BRIN,
 }
 
-def _build_indexes(conn, insp, schema_name: str, table_name: str) -> list[IndexConfig]:
+def _build_indexes(conn: Connection, schema_name: str, table_name: str) -> list[IndexConfig]:
     rows = conn.execute(text("""
         SELECT
             i.relname                    AS index_name,
@@ -308,7 +284,7 @@ def _build_indexes(conn, insp, schema_name: str, table_name: str) -> list[IndexC
             name=r[0],
             unique=bool(r[1]),
             primary_key=bool(r[2]),
-            index_type=idx_type,
+            index_type=IndexType(idx_type),
             columns=list(r[4]),
             partial_filter=r[5],
         ))
@@ -319,8 +295,8 @@ def _build_indexes(conn, insp, schema_name: str, table_name: str) -> list[IndexC
 # FOREIGN KEYS
 # =========================================================
 
-def _build_foreign_keys(insp, schema_name: str, table_name: str) -> list[ForeignKeyConfig]:
-    sa_fks = insp.get_foreign_keys(table_name, schema=schema_name)
+def _build_foreign_keys(inspector: Inspector, schema_name: str, table_name: str) -> list[ForeignKeyConfig]:
+    sa_fks = inspector.get_foreign_keys(table_name, schema=schema_name)
     fks = []
     for fk in sa_fks:
         # SA returns multi-column FKs; we model one ForeignKeyConfig per column pair
@@ -345,7 +321,7 @@ def _build_foreign_keys(insp, schema_name: str, table_name: str) -> list[Foreign
 # VIEWS / MATERIALIZED VIEWS
 # =========================================================
 
-def _get_views(conn, schema_name: str) -> list[str]:
+def _get_views(conn: Connection, schema_name: str) -> list[str]:
     """Return view names. Body is not stored in the governance YAML (inspect only captures structure)."""
     rows = conn.execute(text("""
         SELECT table_name
@@ -356,7 +332,7 @@ def _get_views(conn, schema_name: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _get_materialized_views(conn, schema_name: str) -> list[str]:
+def _get_materialized_views(conn: Connection, schema_name: str) -> list[str]:
     rows = conn.execute(text("""
         SELECT relname
         FROM pg_class c
@@ -372,7 +348,7 @@ def _get_materialized_views(conn, schema_name: str) -> list[str]:
 # FUNCTIONS / TRIGGER FUNCTIONS
 # =========================================================
 
-def _get_functions(conn, schema_name: str) -> list[str]:
+def _get_functions(conn: Connection, schema_name: str) -> list[str]:
     """Return function signatures (name + arg types). Bodies excluded from governance YAML."""
     rows = conn.execute(text("""
         SELECT p.proname || '(' ||
@@ -389,7 +365,7 @@ def _get_functions(conn, schema_name: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _get_trigger_functions(conn, schema_name: str) -> list[str]:
+def _get_trigger_functions(conn: Connection, schema_name: str) -> list[str]:
     """Return trigger function signatures (functions whose return type is trigger)."""
     rows = conn.execute(text("""
         SELECT p.proname || '(' ||
@@ -408,7 +384,7 @@ def _get_trigger_functions(conn, schema_name: str) -> list[str]:
 # SEQUENCES
 # =========================================================
 
-def _get_sequences(conn, schema_name: str) -> list[str]:
+def _get_sequences(conn: Connection, schema_name: str) -> list[str]:
     """
     Return sequence names. Format: 'sequence_name' or 'sequence_name OWNED BY table.column'.
     The OWNED BY clause is included so attach can reconstruct the ownership relationship.
@@ -446,7 +422,7 @@ def _get_sequences(conn, schema_name: str) -> list[str]:
 # CUSTOM TYPES
 # =========================================================
 
-def _get_custom_types(conn, schema_name: str) -> list[str]:
+def _get_custom_types(conn: Connection, schema_name: str) -> list[str]:
     """
     Return custom type signatures.
     Enums:      'my_enum (val1, val2, val3)'
@@ -478,10 +454,10 @@ def _get_custom_types(conn, schema_name: str) -> list[str]:
 
     result = []
     for r in rows:
-        name, typtype, definition = r
-        if typtype == "e":
+        name, type_type, definition = r
+        if type_type == "e":
             result.append(f"ENUM {name} ({definition})")
-        elif typtype == "c":
+        elif type_type == "c":
             result.append(f"TYPE {name} ({definition})")
     return result
 
@@ -490,7 +466,7 @@ def _get_custom_types(conn, schema_name: str) -> list[str]:
 # COLLATIONS
 # =========================================================
 
-def _get_collations(conn, schema_name: str) -> list[str]:
+def _get_collations(conn: Connection, schema_name: str) -> list[str]:
     rows = conn.execute(text("""
         SELECT collname
         FROM pg_collation c
@@ -505,7 +481,7 @@ def _get_collations(conn, schema_name: str) -> list[str]:
 # DOMAINS
 # =========================================================
 
-def _get_domains(conn, schema_name: str) -> list[str]:
+def _get_domains(conn: Connection, schema_name: str) -> list[str]:
     """
     Return domain definitions as 'domain_name AS base_type [CHECK (...)]'.
     """
@@ -548,9 +524,9 @@ def _get_domains(conn, schema_name: str) -> list[str]:
 # ROLES
 # =========================================================
 
-def _build_roles(conn) -> list[RoleConfig]:
+def _build_roles(conn: Connection) -> list[RoleConfig]:
     """
-    Introspect all non-system roles and their schema/table grants.
+    Inspect all non-system roles and their schema/table grants.
     System roles (pg_*) are excluded.
     """
     role_rows = conn.execute(text("""
@@ -573,65 +549,65 @@ def _build_roles(conn) -> list[RoleConfig]:
 
     roles = []
     for r in role_rows:
-        (rolname, is_super, can_createdb, can_createrole,
+        (role_name, is_super, can_create_db, can_create_role,
          inherit, can_login, bypass_rls, description) = r
 
         # Build SchemaPermissionConfig for each schema this role has grants on
         schema_perms: dict[str, SchemaPermissionConfig] = {}
-        for grant in schema_grants.get(rolname, []):
-            sname = grant["schema"]
-            if sname not in schema_perms:
-                schema_perms[sname] = SchemaPermissionConfig(
-                    schema_name=sname,
+        for grant in schema_grants.get(role_name, []):
+            schema = str(grant["schema"])
+            if schema not in schema_perms:
+                schema_perms[schema] = SchemaPermissionConfig(
+                    name=schema,
                     usage=False,
                     create=False,
                 )
             if grant["privilege"] == "USAGE":
-                schema_perms[sname].usage = True
+                schema_perms[schema].usage = True
             if grant["privilege"] == "CREATE":
-                schema_perms[sname].create = True
+                schema_perms[schema].create = True
 
         # Add table grants into the right SchemaPermissionConfig
-        for grant in table_grants.get(rolname, []):
-            sname = grant["schema"]
-            tname = grant["table"]
-            if sname not in schema_perms:
-                schema_perms[sname] = SchemaPermissionConfig(
-                    schema_name=sname,
+        for grant in table_grants.get(role_name, []):
+            schema = str(grant["schema"])
+            table = str(grant["table"])
+            if schema not in schema_perms:
+                schema_perms[schema] = SchemaPermissionConfig(
+                    name=schema,
                     usage=False,
                     create=False,
                 )
             # Find or create TablePermissionConfig for this table
             table_perm = next(
-                (tp for tp in schema_perms[sname].tables if tp.table == tname),
+                (tp for tp in schema_perms[schema].tables if tp.name == table),
                 None,
             )
             if table_perm is None:
-                table_perm = TablePermissionConfig(table=tname)
-                schema_perms[sname].tables.append(table_perm)
+                table_perm = TablePermissionConfig(name=table)
+                schema_perms[schema].tables.append(table_perm)
 
-            priv = grant["privilege"]
-            if priv == "SELECT":    table_perm.select    = True
-            if priv == "INSERT":    table_perm.insert    = True
-            if priv == "UPDATE":    table_perm.update    = True
-            if priv == "DELETE":    table_perm.delete    = True
-            if priv == "TRUNCATE":  table_perm.truncate  = True
-            if priv == "REFERENCES": table_perm.references = True
-            if priv == "TRIGGER":   table_perm.trigger   = True
+            privilege = grant["privilege"]
+            if privilege == "SELECT":     table_perm.select     = True
+            if privilege == "INSERT":     table_perm.insert     = True
+            if privilege == "UPDATE":     table_perm.update     = True
+            if privilege == "DELETE":     table_perm.delete     = True
+            if privilege == "TRUNCATE":   table_perm.truncate   = True
+            if privilege == "REFERENCES": table_perm.references = True
+            if privilege == "TRIGGER":    table_perm.trigger    = True
 
         roles.append(RoleConfig(
-            name=rolname,
+            name=role_name,
             description=description,
             can_admin=bool(is_super),
-            can_write=bool(can_createdb or can_createrole),
+            can_write=bool(can_create_db or can_create_role),
             on=list(schema_perms.values()),
         ))
 
     return roles
 
 
-def _get_all_schema_grants(conn) -> dict[str, list[dict]]:
-    """Returns {rolname: [{schema, privilege}]} for all non-system schemas."""
+def _get_all_schema_grants(conn: Connection) -> dict[str, list[dict]]:
+    """Returns {role_name: [{schema, privilege}]} for all non-system schemas."""
     rows = conn.execute(text("""
         SELECT
             n.nspname          AS schema,
@@ -654,8 +630,8 @@ def _get_all_schema_grants(conn) -> dict[str, list[dict]]:
     return result
 
 
-def _get_all_table_grants(conn) -> dict[str, list[dict]]:
-    """Returns {rolname: [{schema, table, privilege}]} for all non-system tables."""
+def _get_all_table_grants(conn: Connection) -> dict[str, list[dict]]:
+    """Returns {role_name: [{schema, table, privilege}]} for all non-system tables."""
     rows = conn.execute(text("""
         SELECT
             grantee,
@@ -684,7 +660,7 @@ def _get_all_table_grants(conn) -> dict[str, list[dict]]:
 # USERS
 # =========================================================
 
-def _build_users(conn, roles: list[RoleConfig]) -> list[UserConfig]:
+def _build_users(conn: Connection, roles: list[RoleConfig]) -> list[UserConfig]:
     """
     Introspect roles that can log in (i.e. actual users) and their role memberships.
     """
@@ -710,11 +686,11 @@ def _build_users(conn, roles: list[RoleConfig]) -> list[UserConfig]:
 
     users = []
     for r in rows:
-        rolname, can_login, member_of = r
+        role_name, can_login, member_of = r
         # Only include role memberships that exist in our role list
         valid_roles = [m for m in (member_of or []) if m in role_names]
         users.append(UserConfig(
-            username=rolname,
+            username=role_name,
             active=bool(can_login),
             roles=valid_roles,
         ))
@@ -725,6 +701,6 @@ def _build_users(conn, roles: list[RoleConfig]) -> list[UserConfig]:
 # UTILS
 # =========================================================
 
-def _scalar(conn, query: str) -> str:
+def _scalar(conn: Connection, query: str) -> str:
     row = conn.execute(text(query)).fetchone()
     return row[0] if row else ""
