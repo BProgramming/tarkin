@@ -18,7 +18,7 @@ import pytest
 from pydantic import SecretStr
 
 from tarkin.credentials import (
-    CredentialsFile, ConnectionProfile, ConnectionResult, test_connection,
+    CredentialsFile, ConnectionProfile, ConnectionResult, check_connection,
 )
 
 
@@ -81,8 +81,11 @@ def test_load_multiple_profiles(tmp_path):
 def test_get_existing_profile(tmp_path):
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost" ; port = 5432
-        database = "db" ; username = "u" ; password = "pw"
+        host = "localhost"
+        port = 5432
+        database = "db"
+        username = "u"
+        password = "pw"
     """)
     creds = CredentialsFile.load(p)
     prof = creds.get("dev")
@@ -92,8 +95,11 @@ def test_get_existing_profile(tmp_path):
 def test_get_missing_profile_raises(tmp_path):
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost" ; port = 5432
-        database = "db" ; username = "u" ; password = "pw"
+        host = "localhost"
+        port = 5432
+        database = "db"
+        username = "u"
+        password = "pw"
     """)
     creds = CredentialsFile.load(p)
     with pytest.raises(KeyError, match="ghost"):
@@ -108,8 +114,11 @@ def test_load_missing_file_raises():
 def test_invalid_port_raises(tmp_path):
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost" ; port = 99999
-        database = "db" ; username = "u" ; password = "pw"
+        host = "localhost"
+        port = 99999
+        database = "db"
+        username = "u"
+        password = "pw"
     """)
     with pytest.raises(ValueError, match="Invalid profile"):
         CredentialsFile.load(p)
@@ -119,8 +128,10 @@ def test_missing_required_field_raises(tmp_path):
     # username is required
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost" ; port = 5432
-        database = "db" ; password = "pw"
+        host = "localhost"
+        port = 5432
+        database = "db"
+        password = "pw"
     """)
     with pytest.raises(ValueError, match="Invalid profile"):
         CredentialsFile.load(p)
@@ -184,7 +195,7 @@ def test_bad_host_returns_failed_result():
         username="u",
         password=SecretStr("pw"),
     )
-    result = test_connection(prof)
+    result = check_connection(prof)
     assert result.success is False
     assert result.error is not None
 
@@ -222,7 +233,7 @@ def test_live_connection_succeeds():
     if prof is None:
         pytest.skip("TARKIN_TEST_* env vars not set.")
 
-    result = test_connection(prof)
+    result = check_connection(prof)
     assert result.success, f"Connection failed: {result.error}"
     assert result.server_version is not None
     assert result.db_user == prof.username
@@ -234,7 +245,7 @@ def test_live_connection_db_user_matches_profile():
     if prof is None:
         pytest.skip("TARKIN_TEST_* env vars not set.")
 
-    result = test_connection(prof)
+    result = check_connection(prof)
     assert result.db_user == prof.username, (
         f"Connected as {result.db_user!r} but profile username is {prof.username!r}. "
         f"The credentials file user must match the actual database user."

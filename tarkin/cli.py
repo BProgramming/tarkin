@@ -6,7 +6,7 @@ from typing import Optional
 
 from .credentials import (
     CredentialsFile, DEFAULT_CREDENTIALS_PATH,
-    test_connection, test_all_connections, ConnectionProfile,
+    check_connection, test_all_connections, ConnectionProfile,
 )
 from .inspect import inspect_database
 from .model import GovernanceProject, UserConfig
@@ -64,7 +64,7 @@ def test_connections(
         if profile:
             try:
                 p = creds.get(profile)
-                result = test_connection(p)
+                result = check_connection(p)
                 print(result)
                 if not result.success:
                     raise typer.Exit(1)
@@ -110,7 +110,7 @@ def inspect_database_build_yaml(
         else:
             # Test connection first — fail fast with a clear message
             print(f"Connecting to {prof.safe_repr()}...", end="\r")
-            result = test_connection(prof)
+            result = check_connection(prof)
             if not result.success:
                 _die(f"Connection failed: {result.error}")
             print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")

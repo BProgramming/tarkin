@@ -237,7 +237,7 @@ def test_column_clearance_below_table_minimum_is_invalid() -> None:
     proj = GovernanceProject(
         database=make_database(),
         schemas=[schema],
-        roles=[make_role(name="r")],
+        roles=[make_role()],
         users=[make_user()],
     )
     assert_invalid(proj, "clearance below required minimum")

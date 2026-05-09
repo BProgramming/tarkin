@@ -140,7 +140,7 @@ class ConnectionResult(BaseModel):
         return f"FAIL: {self.profile!r}, {self.error}"
 
 
-def test_connection(profile: ConnectionProfile) -> ConnectionResult:
+def check_connection(profile: ConnectionProfile) -> ConnectionResult:
     """
     Open a connection, run a minimal probe query, return a ConnectionResult.
     Never raises — errors are captured in the result.
@@ -179,7 +179,7 @@ def test_connection(profile: ConnectionProfile) -> ConnectionResult:
 
 
 def test_all_connections(creds: CredentialsFile) -> list[ConnectionResult]:
-    return [test_connection(p) for p in creds.profiles.values()]
+    return [check_connection(p) for p in creds.profiles.values()]
 
 
 # =========================================================
