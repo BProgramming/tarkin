@@ -164,7 +164,10 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
 
         type    = _pg_type_string(sa_col)
         default = pg_extra.get("column_default")
-        default = str(default) if default is not None else None
+        if default.casefold() == "none" or default is None:
+            default = None
+        else:
+            default = str(default)
 
         # Strip 'nextval('... defaults — these are sequence-driven, not user defaults.
         # The sequence is captured separately; we don't want it in the YAML default field.
