@@ -164,10 +164,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
 
         type    = _pg_type_string(sa_col)
         default = pg_extra.get("column_default")
-        if default.casefold() == "none" or default is None:
-            default = None
-        else:
-            default = str(default)
+        default = str(default) if default is not None else None
 
         # Strip 'nextval('... defaults — these are sequence-driven, not user defaults.
         # The sequence is captured separately; we don't want it in the YAML default field.
@@ -188,7 +185,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
     return cols
 
 
-def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) -> dict[str, dict[str, str | bool]]:
+def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) -> dict[str, dict[str, str | bool | None]]:
     """
     Pull column-level details from information_schema that SA doesn't always expose:
     raw default expressions and uniqueness (via constraint, not index).
@@ -221,7 +218,7 @@ def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) 
 
     return {
         r[0]: {
-            "column_default": str(r[1]),
+            "column_default": str(r[1]) if r[1] is not None else None,
             "is_unique":      bool(r[2]),
         }
         for r in rows
