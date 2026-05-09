@@ -13,9 +13,11 @@ Integration test coverage:
 """
 from __future__ import annotations
 import os
+
 import pytest
 from pydantic import SecretStr
 from ruamel.yaml import YAML
+from pathlib import Path
 
 from tarkin.credentials import ConnectionProfile
 from tarkin.model import GovernanceProject
@@ -389,3 +391,13 @@ class TestLiveInspect:
             # Expected for databases with empty schemas, roles with no tables, etc.
             # Log it but don't fail the test — these are pre-Tarkin databases.
             pytest.xfail(f"Validation warnings on live DB (expected): {exc}")
+
+    def test_inspect_writes_yaml(self, live_project: GovernanceProject, tmp_path: Path) -> None:
+        from tarkin.serialize import Serializer
+        from pathlib import Path
+
+        output = Path("test_output.yaml")
+        yaml_str = Serializer.to_yaml_string(live_project)
+        output.write_text(yaml_str, encoding="utf-8")
+        assert output.exists()
+        assert output.stat().st_size > 0
