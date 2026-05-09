@@ -163,7 +163,8 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
         pg_extra = pg_cols.get(name, {})
 
         type    = _pg_type_string(sa_col)
-        default = str(pg_extra.get("column_default"))
+        default = pg_extra.get("column_default")
+        default = str(default) if default is not None else None
 
         # Strip 'nextval('... defaults — these are sequence-driven, not user defaults.
         # The sequence is captured separately; we don't want it in the YAML default field.
@@ -447,6 +448,12 @@ def _get_custom_types(conn: Connection, schema_name: str) -> list[str]:
         JOIN pg_namespace n ON n.oid = t.typnamespace
         WHERE n.nspname = :schema
           AND t.typtype IN ('e', 'c')
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_class c
+              WHERE c.relnamespace = t.typnamespace
+                AND c.relname = t.typname
+                AND c.relkind = 'r'
+          )
         ORDER BY t.typname
     """), {"schema": schema_name}).fetchall()
 

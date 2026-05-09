@@ -19,6 +19,7 @@ from pydantic import SecretStr
 from ruamel.yaml import YAML
 from pathlib import Path
 
+from tarkin.inspect import inspect_database
 from tarkin.credentials import ConnectionProfile
 from tarkin.model import GovernanceProject
 from tarkin.serialize import Serializer
@@ -293,7 +294,6 @@ class TestLiveInspect:
 
     @pytest.fixture(scope="class")
     def live_project(self) -> GovernanceProject:
-        from tarkin.inspect import inspect_database
         prof = _integration_profile()
         if prof is None:
             pytest.skip("TARKIN_TEST_* env vars not set.")
@@ -393,9 +393,6 @@ class TestLiveInspect:
             pytest.xfail(f"Validation warnings on live DB (expected): {exc}")
 
     def test_inspect_writes_yaml(self, live_project: GovernanceProject, tmp_path: Path) -> None:
-        from tarkin.serialize import Serializer
-        from pathlib import Path
-
         output = Path("test_output.yaml")
         yaml_str = Serializer.to_yaml_string(live_project)
         output.write_text(yaml_str, encoding="utf-8")
