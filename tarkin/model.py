@@ -17,7 +17,7 @@ class StrEnum(str, Enum):
         return self.value
 
 
-class DatabaseEngine(str, StrEnum):
+class DatabaseEngine(StrEnum):
     POSTGRES = "postgres"
     MYSQL = "mysql"
     MARIADB = "mariadb"
@@ -26,24 +26,24 @@ class DatabaseEngine(str, StrEnum):
     ORACLE = "oracle"
 
 
-class MaskingStrategy(str, StrEnum):
+class MaskingStrategy(StrEnum):
     NONE = "none"
     FULL = "full"
     PARTIAL = "partial"
     HASH = "hash"
 
 
-class PartialMaskVisibleSide(str, StrEnum):
+class PartialMaskVisibleSide(StrEnum):
     LEFT = "left"
     RIGHT = "right"
 
 
-class GeneratedColumnStorage(str, StrEnum):
+class GeneratedColumnStorage(StrEnum):
     STORED = "stored"
     VIRTUAL = "virtual"
 
 
-class IndexType(str, StrEnum):
+class IndexType(StrEnum):
     BTREE = "btree"
     HASH = "hash"
     GIN = "gin"
