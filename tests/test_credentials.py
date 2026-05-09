@@ -159,7 +159,7 @@ def test_connection_result_str_success():
         server_version="16.2", db_user="alice",
     )
     s = str(r)
-    assert "[ok]" in s
+    assert "PASS" in s
     assert "16.2" in s
     assert "alice" in s
 
@@ -170,7 +170,7 @@ def test_connection_result_str_failure():
         error="Connection refused",
     )
     s = str(r)
-    assert "[fail]" in s
+    assert "FAIL" in s
     assert "Connection refused" in s
 
 

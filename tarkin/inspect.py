@@ -357,9 +357,7 @@ def _get_functions(conn: Connection, schema_name: str) -> list[str]:
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = :schema
           AND p.prokind = 'f'
-          AND NOT EXISTS (
-              SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid
-          )
+          AND p.prorettype != 'trigger'::regtype
         ORDER BY sig
     """), {"schema": schema_name}).fetchall()
     return [r[0] for r in rows]

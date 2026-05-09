@@ -89,6 +89,38 @@ class Serializer:
         m["clearance"] = schema.clearance
         m["audit_enabled"] = schema.audit_enabled
         m["tables"] = CommentedSeq([cls._serialize_table(t) for t in schema.tables])
+        if schema.views:
+            m["views"] = list(schema.views)
+        if schema.materialized_views:
+            m["materialized_views"] = list(schema.materialized_views)
+        if schema.functions:
+            m["functions"] = list(schema.functions)
+        if schema.trigger_functions:
+            m["trigger_functions"] = list(schema.trigger_functions)
+        if schema.sequences:
+            m["sequences"] = list(schema.sequences)
+        if schema.types:
+            m["types"] = list(schema.types)
+        if schema.collations:
+            m["collations"] = list(schema.collations)
+        if schema.domains:
+            m["domains"] = list(schema.domains)
+        if schema.aggregates:
+            m["aggregates"] = list(schema.aggregates)
+        if schema.operators:
+            m["operators"] = list(schema.operators)
+        if schema.procedures:
+            m["procedures"] = list(schema.procedures)
+        if schema.foreign_tables:
+            m["foreign_tables"] = list(schema.foreign_tables)
+        if schema.fts_configurations:
+            m["fts_configurations"] = list(schema.fts_configurations)
+        if schema.fts_dictionaries:
+            m["fts_dictionaries"] = list(schema.fts_dictionaries)
+        if schema.fts_parsers:
+            m["fts_parsers"] = list(schema.fts_parsers)
+        if schema.fts_templates:
+            m["fts_templates"] = list(schema.fts_templates)
         return m
 
     # =====================================================

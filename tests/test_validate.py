@@ -155,7 +155,7 @@ def test_generated_and_default_column_is_invalid() -> None:
         roles=[make_role()],
         users=[make_user()],
     )
-    assert_invalid(proj, "cannot have both default and generated")
+    assert_invalid(proj, "cannot have both a default value and a generated expression")
 
 
 # =====================================================
