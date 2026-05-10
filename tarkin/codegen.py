@@ -507,13 +507,14 @@ def _generate_grants(project: GovernanceProject) -> str:
                     continue
 
                 table_privs = []
-                if tp.select:     table_privs.append("SELECT")
-                if tp.insert:     table_privs.append("INSERT")
-                if tp.update:     table_privs.append("UPDATE")
-                if tp.delete:     table_privs.append("DELETE")
-                if tp.truncate:   table_privs.append("TRUNCATE")
-                if tp.references: table_privs.append("REFERENCES")
-                if tp.trigger:    table_privs.append("TRIGGER")
+                if tp.select:      table_privs.append("SELECT")
+                if tp.insert:      table_privs.append("INSERT")
+                if tp.update:      table_privs.append("UPDATE")
+                if tp.delete:      table_privs.append("DELETE")
+                if tp.truncate:    table_privs.append("TRUNCATE")
+                if tp.references:  table_privs.append("REFERENCES")
+                if tp.trigger:     table_privs.append("TRIGGER")
+                if tp.maintain:    table_privs.append("MAINTAIN")
 
                 if table_privs:
                     lines.append(
