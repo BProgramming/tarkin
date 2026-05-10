@@ -65,6 +65,14 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
         roles        = _build_roles(conn)
         users        = _build_users(conn, roles)
 
+        audit_enabled = _scalar(conn, """
+            SELECT COUNT(*) > 0
+            FROM pg_extension e, pg_settings s
+            WHERE e.extname = 'pgaudit'
+              AND s.name = 'shared_preload_libraries'
+              AND s.setting LIKE '%pgaudit%'
+        """)
+
     return GovernanceProject(
         database=DatabaseConfig(
             name=db_name,
@@ -73,7 +81,8 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
             host=profile.host,
             port=profile.port,
             database=profile.database,
-            audit_enabled=False,
+            audit_enabled=bool(audit_enabled),
+            profile=profile.profile,
         ),
         schemas=schemas,
         roles=roles,
@@ -359,6 +368,11 @@ def _get_functions(conn: Connection, schema_name: str) -> list[str]:
         WHERE n.nspname = :schema
           AND p.prokind = 'f'
           AND p.prorettype != 'trigger'::regtype
+          AND NOT EXISTS (
+                SELECT 1 FROM pg_depend d
+                WHERE d.objid = p.oid
+                  AND d.deptype IN ('e', 'x')
+            )
         ORDER BY sig
     """), {"schema": schema_name}).fetchall()
     return [r[0] for r in rows]

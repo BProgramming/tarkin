@@ -96,6 +96,10 @@ class SemanticValidator:
                 if unq:
                     errors.append(unq)
 
+                pk_indexes = [i for i in table.indexes if i.primary_key]
+                if len(pk_indexes) > 1:
+                    errors.append(f"Table '{schema.name}.{table.name}' has more than one primary key index.")
+
         if errors:
             return "\n".join(errors)
         else:
