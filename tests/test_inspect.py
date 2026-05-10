@@ -19,6 +19,11 @@ from pydantic import SecretStr
 from ruamel.yaml import YAML
 from pathlib import Path
 
+from tarkin.model import (
+    DatabaseConfig, SchemaConfig, TableConfig, ColumnConfig,
+    IndexConfig, RoleConfig, SchemaPermissionConfig,
+    TablePermissionConfig, DatabaseEngine, IndexType,
+)
 from tarkin.inspect import inspect_database
 from tarkin.credentials import ConnectionProfile
 from tarkin.model import GovernanceProject
@@ -71,12 +76,6 @@ def _build_mock_project() -> GovernanceProject:
     for a minimal database with one schema, one table, two columns, one index.
     Used to test structural expectations without a live DB.
     """
-    from tarkin.model import (
-        DatabaseConfig, SchemaConfig, TableConfig, ColumnConfig,
-        IndexConfig, RoleConfig, UserConfig, SchemaPermissionConfig,
-        TablePermissionConfig, DatabaseEngine, IndexType,
-    )
-
     col_id = ColumnConfig(name="id", type="bigint", nullable=False)
     col_name = ColumnConfig(name="name", type="text", nullable=True)
     idx = IndexConfig(
@@ -90,8 +89,12 @@ def _build_mock_project() -> GovernanceProject:
         name="public", usage=True,
         tables=[TablePermissionConfig(name="users", select=True)],
     )
-    role = RoleConfig(name="app_role", on=[perm])
-    user = UserConfig(username="tarkin_user", active=True, roles=["app_role"])
+    role = RoleConfig(
+        name="tarkin_user",
+        can_login=True,
+        active=True,
+        on=[perm],
+    )
 
     return GovernanceProject(
         database=DatabaseConfig(
@@ -104,7 +107,6 @@ def _build_mock_project() -> GovernanceProject:
         ),
         schemas=[schema],
         roles=[role],
-        users=[user],
     )
 
 
@@ -153,23 +155,23 @@ class TestInspectOutputStructure:
                             f"in {schema.name}.{table.name}"
                         )
 
-    def test_users_reference_existing_roles(self) -> None:
+    def test_roles_have_names(self) -> None:
+        proj = _build_mock_project()
+        for role in proj.roles:
+            assert role.name, "Role missing name"
+
+    def test_at_least_one_login_role(self) -> None:
+        proj = _build_mock_project()
+        assert any(r.can_login for r in proj.roles), "No login roles found"
+
+    def test_member_of_references_existing_roles(self) -> None:
         proj = _build_mock_project()
         role_names = {r.name for r in proj.roles}
-        for user in proj.users:
-            for role_name in user.roles:
-                assert role_name in role_names, (
-                    f"User {user.username!r} references undefined role {role_name!r}"
+        for role in proj.roles:
+            for parent in role.member_of:
+                assert parent in role_names, (
+                    f"Role {role.name!r} inherits from undefined role {parent!r}"
                 )
-
-    def test_db_user_in_users_list(self) -> None:
-        """The user recorded in database.profile's credentials must appear in users."""
-        proj = _build_mock_project()
-        db_user = "tarkin_user"  # what test_connection would return as db_user
-        user_names = {u.username for u in proj.users}
-        assert db_user in user_names, (
-            f"Connected user {db_user!r} not found in inspected users: {user_names}"
-        )
 
 
 # =====================================================
@@ -248,14 +250,17 @@ class TestInspectRoundTrip:
         if rt:
             assert {r.name for r in proj.roles} == {r.name for r in rt.roles}
 
-    def test_user_role_assignments_survive_roundtrip(self) -> None:
+    def test_role_properties_survive_roundtrip(self) -> None:
         proj = _build_mock_project()
         rt = self._roundtrip(proj)
         assert rt is not None
         if rt:
-            for ou, ru in zip(proj.users, rt.users):
-                assert ou.username == ru.username
-                assert set(ou.roles) == set(ru.roles)
+            for or_, rr in zip(proj.roles, rt.roles):
+                assert or_.name == rr.name
+                assert or_.can_login == rr.can_login
+                assert or_.can_admin == rr.can_admin
+                assert or_.active == rr.active
+                assert or_.member_of == rr.member_of
 
     def test_roundtripped_project_passes_validation(self) -> None:
         proj = _build_mock_project()
@@ -357,13 +362,18 @@ class TestLiveInspect:
                         f"{fk.referenced_schema}.{fk.referenced_table}.{fk.referenced_column}"
                     )
 
-    def test_connected_user_in_output(self, live_project: GovernanceProject) -> None:
+    def test_has_login_role(self, live_project: GovernanceProject) -> None:
+        assert any(r.can_login for r in live_project.roles), (
+            "No login roles found in inspected project."
+        )
+
+    def test_connected_user_in_roles(self, live_project: GovernanceProject) -> None:
         prof = _integration_profile()
         assert prof is not None
         if prof:
-            user_names = {u.username for u in live_project.users}
-            assert prof.username in user_names, (
-                f"Connected user {prof.username!r} not in inspected users: {user_names}"
+            role_names = {r.name for r in live_project.roles}
+            assert prof.username in role_names, (
+                f"Connected user {prof.username!r} not in inspected roles: {role_names}"
             )
 
     def test_round_trip_is_lossless(self, live_project: GovernanceProject) -> None:
@@ -393,7 +403,7 @@ class TestLiveInspect:
             pytest.xfail(f"Validation warnings on live DB (expected): {exc}")
 
     def test_inspect_writes_yaml(self, live_project: GovernanceProject, tmp_path: Path) -> None:
-        output = Path("test_output.yaml")
+        output = Path("out/test_output.yaml")
         yaml_str = Serializer.to_yaml_string(live_project)
         output.write_text(yaml_str, encoding="utf-8")
         assert output.exists()

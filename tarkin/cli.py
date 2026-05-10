@@ -9,7 +9,7 @@ from .credentials import (
     check_connection, test_all_connections, ConnectionProfile,
 )
 from .inspect import inspect_database
-from .model import GovernanceProject, UserConfig
+from .model import GovernanceProject
 from .yaml import YamlLoader
 from .validate import SemanticValidator, ValidationError
 from .serialize import Serializer
@@ -130,16 +130,14 @@ def inspect_database_build_yaml(
                 # Record which profile was used
                 proj.database.profile = prof.profile
 
-                # Confirm the connected user is present in the inspected users
-                user_names = {u.username for u in proj.users}
-                if db_user and db_user not in user_names:
+                # Confirm the connected user is present in the inspected roles
+                role_names = {r.name for r in proj.roles}
+                if db_user and db_user not in role_names:
                     _warn(
                         f"Connected as {db_user!r} but this user was not found in the database's "
-                        f"user list. The credentials profile may be using a role that exists outside "
-                        f"the standard pg_roles view, or may lack login privilege. "
-                        f"Tarkin has recorded it in your YAML as an inactive placeholder."
+                        f"role list. The credentials profile may be using a role that exists outside "
+                        f"the standard pg_roles view, or may lack login privilege."
                     )
-                    proj.users.append(UserConfig(username=db_user, active=True, roles=[]))
 
                 if validate:
                     print("Validating inspected model...", end="\r")
@@ -154,7 +152,7 @@ def inspect_database_build_yaml(
                 yaml_str = Serializer.to_yaml_string(proj)
 
                 if output is None:
-                    output = Path(f"{prof.database}_model.yaml")
+                    output = Path("out") / f"{prof.database}_model.yaml"
                 output.write_text(yaml_str, encoding="utf-8")
                 print(f"Written to {output}.")
 

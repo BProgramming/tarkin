@@ -29,7 +29,6 @@ def test_minimal_project_roundtrips() -> None:
         assert rt.schemas[0].name == proj.schemas[0].name
         assert rt.schemas[0].tables[0].name == proj.schemas[0].tables[0].name
         assert rt.roles[0].name == proj.roles[0].name
-        assert rt.users[0].username == proj.users[0].username
 
 
 def test_cross_schema_project_roundtrips() -> None:

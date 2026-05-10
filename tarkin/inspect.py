@@ -8,7 +8,7 @@ from .credentials import ConnectionProfile
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig,
     DatabaseEngine, IndexType,
 )
 
@@ -63,7 +63,6 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
         schema_names = _get_user_schemas(conn)
         schemas      = [_build_schema(conn, engine, name) for name in schema_names]
         roles        = _build_roles(conn)
-        users        = _build_users(conn, roles)
 
         audit_enabled = _scalar(conn, """
             SELECT COUNT(*) > 0
@@ -86,7 +85,6 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
         ),
         schemas=schemas,
         roles=roles,
-        users=users,
     )
 
 
@@ -544,10 +542,6 @@ def _get_domains(conn: Connection, schema_name: str) -> list[str]:
 # =========================================================
 
 def _build_roles(conn: Connection) -> list[RoleConfig]:
-    """
-    Inspect all non-system roles and their schema/table grants.
-    System roles (pg_*) are excluded.
-    """
     role_rows = conn.execute(text("""
         SELECT
             r.rolname,
@@ -557,21 +551,28 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
             r.rolinherit,
             r.rolcanlogin,
             r.rolbypassrls,
-            obj_description(r.oid, 'pg_authid') AS description
+            obj_description(r.oid, 'pg_authid') AS description,
+            ARRAY(
+                SELECT m.rolname
+                FROM pg_auth_members am
+                JOIN pg_roles m ON m.oid = am.roleid
+                WHERE am.member = r.oid
+                  AND m.rolname NOT LIKE 'pg\\_%'
+                ORDER BY m.rolname
+            ) AS member_of
         FROM pg_roles r
         WHERE r.rolname NOT LIKE 'pg\\_%'
         ORDER BY r.rolname
     """)).fetchall()
 
-    schema_grants  = _get_all_schema_grants(conn)
-    table_grants   = _get_all_table_grants(conn)
+    schema_grants = _get_all_schema_grants(conn)
+    table_grants  = _get_all_table_grants(conn)
 
     roles = []
     for r in role_rows:
         (role_name, is_super, can_create_db, can_create_role,
-         inherit, can_login, bypass_rls, description) = r
+         inherit, can_login, bypass_rls, description, member_of) = r
 
-        # Build SchemaPermissionConfig for each schema this role has grants on
         schema_perms: dict[str, SchemaPermissionConfig] = {}
         for grant in schema_grants.get(role_name, []):
             schema = str(grant["schema"])
@@ -586,17 +587,15 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
             if grant["privilege"] == "CREATE":
                 schema_perms[schema].create = True
 
-        # Add table grants into the right SchemaPermissionConfig
         for grant in table_grants.get(role_name, []):
             schema = str(grant["schema"])
-            table = str(grant["table"])
+            table  = str(grant["table"])
             if schema not in schema_perms:
                 schema_perms[schema] = SchemaPermissionConfig(
                     name=schema,
                     usage=False,
                     create=False,
                 )
-            # Find or create TablePermissionConfig for this table
             table_perm = next(
                 (tp for tp in schema_perms[schema].tables if tp.name == table),
                 None,
@@ -618,9 +617,13 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
         roles.append(RoleConfig(
             name=role_name,
             description=description,
+            active=bool(can_login),
+            can_login=bool(can_login),
             can_admin=bool(is_super),
             can_write=bool(can_create_db or can_create_role),
             can_maintain=bool(is_super),
+            can_read_sensitive=False,
+            member_of=[m for m in (member_of or [])],
             on=list(schema_perms.values()),
         ))
 
@@ -675,47 +678,6 @@ def _get_all_table_grants(conn: Connection) -> dict[str, list[dict]]:
             "privilege": privilege,
         })
     return result
-
-
-# =========================================================
-# USERS
-# =========================================================
-
-def _build_users(conn: Connection, roles: list[RoleConfig]) -> list[UserConfig]:
-    """
-    Introspect roles that can log in (i.e. actual users) and their role memberships.
-    """
-    rows = conn.execute(text("""
-        SELECT
-            r.rolname,
-            r.rolcanlogin,
-            ARRAY(
-                SELECT m.rolname
-                FROM pg_auth_members am
-                JOIN pg_roles m ON m.oid = am.roleid
-                WHERE am.member = r.oid
-                  AND m.rolname NOT LIKE 'pg\\_%'
-                ORDER BY m.rolname
-            ) AS member_of
-        FROM pg_roles r
-        WHERE r.rolcanlogin = true
-          AND r.rolname NOT LIKE 'pg\\_%'
-        ORDER BY r.rolname
-    """)).fetchall()
-
-    role_names = {role.name for role in roles}
-
-    users = []
-    for r in rows:
-        role_name, can_login, member_of = r
-        # Only include role memberships that exist in our role list
-        valid_roles = [m for m in (member_of or []) if m in role_names]
-        users.append(UserConfig(
-            username=role_name,
-            active=bool(can_login),
-            roles=valid_roles,
-        ))
-    return users
 
 
 # =========================================================

@@ -263,18 +263,15 @@ class RoleConfig(TarkinBaseModel):
     clearance: int = 0
     description: Optional[str] = None
 
-    on: list[SchemaPermissionConfig] = Field(default_factory=list)
-
-    can_read_sensitive: bool = False
-    can_write: bool = False
+    can_login: bool = False
     can_admin: bool = False
+    can_write: bool = False
     can_maintain: bool = False
+    can_read_sensitive: bool = False
 
-
-class UserConfig(TarkinBaseModel):
-    username: str = "default_user"
-    roles: list[str] = Field(default_factory=list)
     active: bool = True
+    member_of: list[str] = Field(default_factory=list)
+    on: list[SchemaPermissionConfig] = Field(default_factory=list)
 
 
 # =========================================================
@@ -287,7 +284,6 @@ class GovernanceProject(TarkinBaseModel):
 
     schemas: list[SchemaConfig] = Field(default_factory=list)
     roles: list[RoleConfig] = Field(default_factory=list)
-    users: list[UserConfig] = Field(default_factory=list)
 
     @property
     def clearance_min(self) -> int:

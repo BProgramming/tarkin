@@ -6,7 +6,7 @@ from io import StringIO
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig, StrEnum,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, StrEnum,
 )
 
 
@@ -54,7 +54,6 @@ class Serializer:
         doc["database"] = cls._serialize_database(project.database)
         doc["schemas"] = CommentedSeq([cls._serialize_schema(s) for s in project.schemas])
         doc["roles"] = CommentedSeq([cls._serialize_role(r) for r in project.roles])
-        doc["users"] = CommentedSeq([cls._serialize_user(u) for u in project.users])
         return doc
 
     # =====================================================
@@ -237,21 +236,14 @@ class Serializer:
         if role.description:
             m["description"] = role.description
         m["clearance"] = role.clearance
-        m["can_read_sensitive"] = role.can_read_sensitive
-        m["can_write"] = role.can_write
+        m["active"] = role.active
+        m["can_login"] = role.can_login
         m["can_admin"] = role.can_admin
+        m["can_write"] = role.can_write
         m["can_maintain"] = role.can_maintain
-        m["on"] = CommentedSeq([cls._serialize_schema_permission(o) for o in role.on])
-        return m
-
-    # =====================================================
-    # USER
-    # =====================================================
-
-    @classmethod
-    def _serialize_user(cls, user: UserConfig) -> CommentedMap:
-        m = CommentedMap()
-        m["username"] = user.username
-        m["active"] = user.active
-        m["roles"] = list(user.roles)
+        m["can_read_sensitive"] = role.can_read_sensitive
+        if role.member_of:
+            m["member_of"] = list(role.member_of)
+        if role.on:
+            m["on"] = CommentedSeq([cls._serialize_schema_permission(o) for o in role.on])
         return m

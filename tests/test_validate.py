@@ -9,11 +9,11 @@ from tarkin.validate import SemanticValidator, ValidationError
 from tarkin.model import (
     GovernanceProject, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    SchemaPermissionConfig, RoleConfig, UserConfig,
+    SchemaPermissionConfig, RoleConfig,
 )
 from tests.fixtures import (
     build_minimal_project, build_cross_schema_project, build_clearance_project,
-    make_schema, make_column, make_role, make_user, make_database,
+    make_schema, make_column, make_role, make_database,
 )
 
 
@@ -59,7 +59,6 @@ def test_no_schemas_is_invalid() -> None:
         database=make_database(),
         schemas=[],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "at least one schema")
 
@@ -81,7 +80,6 @@ def test_duplicate_schema_names_are_invalid() -> None:
         database=make_database(),
         schemas=[s1, s2],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "Duplicate schema")
 
@@ -97,7 +95,6 @@ def test_empty_table_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "at least one column")
 
@@ -110,7 +107,6 @@ def test_duplicate_column_names_are_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "Duplicate column")
 
@@ -127,7 +123,6 @@ def test_versioned_and_immutable_column_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "versioned and immutable")
 
@@ -140,7 +135,6 @@ def test_encrypted_column_without_sensitivity_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "encrypted but not marked sensitive")
 
@@ -153,7 +147,6 @@ def test_generated_and_default_column_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "cannot have both a default value and a generated expression")
 
@@ -173,7 +166,6 @@ def test_fk_to_missing_schema_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "missing schema 'nonexistent'")
 
@@ -189,7 +181,6 @@ def test_fk_to_missing_table_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "missing table 'public.ghost'")
 
@@ -207,7 +198,6 @@ def test_fk_to_missing_column_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "missing column 'public.users.ghost_col'")
 
@@ -221,7 +211,6 @@ def test_index_referencing_missing_column_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "missing column 'nonexistent'")
 
@@ -238,7 +227,6 @@ def test_column_clearance_below_table_minimum_is_invalid() -> None:
         database=make_database(),
         schemas=[schema],
         roles=[make_role()],
-        users=[make_user()],
     )
     assert_invalid(proj, "clearance below required minimum")
 
@@ -253,7 +241,6 @@ def test_role_with_no_schemas_is_invalid() -> None:
         database=make_database(),
         schemas=[make_schema()],
         roles=[role],
-        users=[make_user(roles=["empty_role"])],
     )
     assert_invalid(proj, "no assigned schemas")
 
@@ -267,40 +254,5 @@ def test_role_referencing_missing_schema_is_invalid() -> None:
         database=make_database(),
         schemas=[make_schema()],
         roles=[role],
-        users=[make_user(roles=["bad_role"])],
     )
     assert_invalid(proj, "ghost_schema")
-
-
-# =====================================================
-# USER RULES
-# =====================================================
-
-def test_user_with_no_roles_is_invalid() -> None:
-    proj = GovernanceProject(
-        database=make_database(),
-        schemas=[make_schema()],
-        roles=[make_role()],
-        users=[UserConfig(username="unassigned_user", roles=[])],
-    )
-    assert_invalid(proj, "no assigned roles")
-
-
-def test_user_referencing_missing_role_is_invalid() -> None:
-    proj = GovernanceProject(
-        database=make_database(),
-        schemas=[make_schema()],
-        roles=[make_role()],
-        users=[make_user(roles=["ghost_role"])],
-    )
-    assert_invalid(proj, "ghost_role")
-
-
-def test_no_active_users_is_invalid() -> None:
-    proj = GovernanceProject(
-        database=make_database(),
-        schemas=[make_schema()],
-        roles=[make_role()],
-        users=[make_user(active=False)],
-    )
-    assert_invalid(proj, "no active users")

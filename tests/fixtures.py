@@ -3,7 +3,7 @@ from __future__ import annotations
 from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig,
 )
 
 
@@ -27,17 +27,19 @@ def make_schema(name: str = "public", **kwargs) -> SchemaConfig:
     return SchemaConfig(name=name, tables=[make_table()], **kwargs)
 
 
-def make_role(name: str = "reader", schema: str = "public", **kwargs) -> RoleConfig:
+def make_role(
+    name: str = "reader",
+    schema: str = "public",
+    can_login: bool = True,
+    **kwargs
+) -> RoleConfig:
     perm = SchemaPermissionConfig(
         name=schema,
         usage=True,
         tables=[TablePermissionConfig(name="users", select=True)],
     )
-    return RoleConfig(name=name, on=[perm], **kwargs)
+    return RoleConfig(name=name, can_login=can_login, active=True, on=[perm], **kwargs)
 
-
-def make_user(username: str = "app_user", roles: list[str] | None = None, **kwargs) -> UserConfig:
-    return UserConfig(username=username, roles=roles or ["reader"], **kwargs)
 
 
 def build_minimal_project() -> GovernanceProject:
@@ -49,7 +51,6 @@ def build_minimal_project() -> GovernanceProject:
         database=make_database(),
         schemas=[make_schema()],
         roles=[make_role()],
-        users=[make_user()],
     )
 
 
@@ -73,6 +74,7 @@ def build_cross_schema_project() -> GovernanceProject:
 
     roles = RoleConfig(
         name="reader",
+        can_login=True,
         on=[
             SchemaPermissionConfig(name="public", usage=True,
                                    tables=[TablePermissionConfig(name="users", select=True)]),
@@ -84,7 +86,6 @@ def build_cross_schema_project() -> GovernanceProject:
         database=make_database(),
         schemas=[public_schema, orders_schema],
         roles=[roles],
-        users=[make_user()],
     )
 
 
@@ -120,8 +121,4 @@ def build_clearance_project() -> GovernanceProject:
         database=make_database(),
         schemas=[schema],
         roles=[low_role, high_role],
-        users=[
-            make_user(username="app", roles=["basic_reader"]),
-            make_user(username="clinician", roles=["phi_reader"]),
-        ],
     )

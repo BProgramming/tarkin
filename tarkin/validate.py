@@ -29,7 +29,6 @@ class SemanticValidator:
             cls._validate_cross_references(project),
             cls._validate_clearance_rules(project),
             cls._validate_roles(project),
-            cls._validate_users(project),
         ]
 
         errors = [str(e) for e in errors if e]
@@ -47,6 +46,8 @@ class SemanticValidator:
     def _validate_project_structure(cls, project: GovernanceProject) -> str | None:
         if not project.schemas:
             return "Database must have at least one schema."
+        elif not project.roles:
+            return "Database must have at least one role."
         else:
             return None
 
@@ -260,54 +261,38 @@ class SemanticValidator:
     def _validate_roles(cls, project: GovernanceProject) -> str | None:
         errors = []
 
-        role_names = [r.name for r in project.roles]
-        unq = cls._check_unique(role_names, "role")
+        role_names_list = [r.name for r in project.roles]
+        unq = cls._check_unique(role_names_list, "role")
         if unq:
             errors.append(unq)
 
+        role_names = {r.name for r in project.roles}
         schema_names = {s.name for s in project.schemas}
+        active = False
+
         for role in project.roles:
-            if not role.on:
-                errors.append(f"Role '{role.name}' has no assigned schemas or tables.")
+            if role.active and role.can_login:
+                active = True
+
+            if not role.on and not role.member_of:
+                errors.append(f"Role '{role.name}' has no assigned schemas or inherited roles.")
+
             for sp in role.on:
                 if sp.name not in schema_names:
-                    errors.append(
-                        f"Role '{role.name}' references schema '{sp.name}' which does not exist."
-                    )
+                    errors.append(f"Role '{role.name}' references schema '{sp.name}' which does not exist.")
 
-        if errors:
-            return "\n".join(errors)
-        else:
-            return None
-
-    # =====================================================
-    # USER RULES
-    # =====================================================
-
-    @classmethod
-    def _validate_users(cls, project: GovernanceProject) -> str | None:
-        errors = []
-
-        role_names = {r.name for r in project.roles}
-        active = False
-        for user in project.users:
-            if not active and user.active:
-                active = True
-            if not user.roles:
-                errors.append(f"User '{user.username}' has no assigned roles.")
-            for role_name in user.roles:
-                if role_name not in role_names:
-                    errors.append(
-                        f"User '{user.username}' references role '{role_name}' which does not exist."
-                    )
+            for parent in role.member_of:
+                if parent not in role_names:
+                    errors.append(f"Role '{role.name}' inherits from '{parent}' which does not exist.")
 
         if not active:
-            errors.append("Database has no active users.")
+            errors.append("Database has no active login roles.")
 
         if errors:
             return "\n".join(errors)
         else:
             return None
+
 
     # =====================================================
     # UTILS

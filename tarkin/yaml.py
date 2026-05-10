@@ -5,7 +5,7 @@ from ruamel.yaml import YAML
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, UserConfig, DatabaseEngine, MaskingStrategy,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, DatabaseEngine, MaskingStrategy,
     GeneratedColumnStorage, IndexType,
 )
 
@@ -53,7 +53,6 @@ class YamlLoader:
                 database=cls._parse_database(doc["database"]),
                 schemas=[cls._parse_schema(s) for s in doc.get("schemas", [])],
                 roles=[cls._parse_role(r) for r in doc.get("roles", [])],
-                users=[cls._parse_user(u) for u in doc.get("users", [])],
             )
 
     # =====================================================
@@ -201,21 +200,12 @@ class YamlLoader:
             name=d.get("name", "default_role"),
             description=d.get("description"),
             clearance=d.get("clearance", 0),
-            can_read_sensitive=d.get("can_read_sensitive", False),
-            can_write=d.get("can_write", False),
-            can_admin=d.get("can_admin", False),
-            can_maintain=d.get("can_maintain", False),
-            on=[cls._parse_schema_permission(o) for o in d.get("on", [])],
-        )
-
-    # =====================================================
-    # USER
-    # =====================================================
-
-    @classmethod
-    def _parse_user(cls, d: dict) -> UserConfig:
-        return UserConfig(
-            username=d.get("username", "default_user"),
             active=d.get("active", True),
-            roles=list(d.get("roles", [])),
+            can_login=d.get("can_login", False),
+            can_admin=d.get("can_admin", False),
+            can_write=d.get("can_write", False),
+            can_maintain=d.get("can_maintain", False),
+            can_read_sensitive=d.get("can_read_sensitive", False),
+            member_of=list(d.get("member_of", [])),
+            on=[cls._parse_schema_permission(o) for o in d.get("on", [])],
         )
