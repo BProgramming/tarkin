@@ -32,7 +32,7 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject) -> str:
         _section("TRIGGERS"),
         _generate_triggers(project),
         _section("ROLES"),
-        _generate_roles(project),
+        _generate_roles(project, current),
         _section("GRANTS"),
         _generate_grants(project),
         _section("META POPULATION"),
@@ -440,21 +440,40 @@ def _pk_filter(table: TableConfig) -> str:
 # ROLES
 # =========================================================
 
-def _generate_roles(project: GovernanceProject) -> str:
+def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> str:
     lines = []
+    existing_role_names = {r.name for r in current.roles}
 
     for role in project.roles:
-        parts = [f"CREATE ROLE {_q(role.name)}"]
+        if role.name in existing_role_names:
+            # Role exists — ALTER to match desired state
+            parts = [f"ALTER ROLE {_q(role.name)}"]
+        else:
+            # Role is new — CREATE
+            parts = [f"CREATE ROLE {_q(role.name)}"]
+
         if role.can_login:
             parts.append("LOGIN")
+        else:
+            parts.append("NOLOGIN")
         if role.can_admin:
             parts.append("SUPERUSER")
+        else:
+            parts.append("NOSUPERUSER")
         if role.can_write:
             parts.append("CREATEDB CREATEROLE")
+        else:
+            parts.append("NOCREATEDB NOCREATEROLE")
+
         lines.append(" ".join(parts) + ";")
 
+        # Only GRANT membership for new roles — existing membership
+        # may already be set and re-granting is harmless, but
+        # we should avoid revoking memberships not in the model
         for parent in role.member_of:
-            lines.append(f"GRANT {_q(parent)} TO {_q(role.name)};")
+            lines.append(
+                f"GRANT {_q(parent)} TO {_q(role.name)};"
+            )
 
         lines.append("")
 
@@ -584,7 +603,7 @@ def _generate_meta_population(project: GovernanceProject) -> str:
         f"    VALUES ("
         f"'{tarkin_version}', '{profile}', '{database_name}', "
         f"'{checksum}', '{yaml_escaped}')",
-        f"    RETURNING id INTO v_build_id;",
+        f"    RETURNING build_id INTO v_build_id;",
         "",
     ]
 

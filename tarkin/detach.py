@@ -25,7 +25,7 @@ def detach(
     # Step 1 — inspect current state
     print("Inspecting current database state...", end="\r")
     try:
-        current = inspect_database(profile)
+        current = inspect_database(profile, include_tk=True)
     except Exception as exc:
         raise DetachError(f"Failed to inspect database: {exc}") from exc
     print("Inspecting current database state... Done.")

@@ -23,18 +23,14 @@ _SYSTEM_SCHEMAS = {
 }
 
 def _is_excluded_schema(name: str) -> bool:
-    return (
-           name in _SYSTEM_SCHEMAS
-        or name.startswith("pg_")
-        or name.startswith("tk_")
-    )
+    return name.startswith("pg_") or name in _SYSTEM_SCHEMAS
 
 
 # =========================================================
 # PUBLIC ENTRY POINT
 # =========================================================
 
-def inspect_database(profile: ConnectionProfile) -> GovernanceProject:
+def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
     """
     Introspect a live PostgreSQL database and return a GovernanceProject.
 
@@ -46,7 +42,7 @@ def inspect_database(profile: ConnectionProfile) -> GovernanceProject:
     """
     engine = profile.engine()
     try:
-        return _build_project(engine, profile)
+        return _build_project(engine, profile, include_tk=include_tk)
     finally:
         engine.dispose()
 
@@ -55,12 +51,12 @@ def inspect_database(profile: ConnectionProfile) -> GovernanceProject:
 # PROJECT BUILDER
 # =========================================================
 
-def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProject:
+def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
     with engine.connect() as conn:
         db_name    = _scalar(conn, "SELECT current_database()")
         db_version = _scalar(conn, "SELECT version()")
 
-        schema_names = _get_user_schemas(conn)
+        schema_names = _get_user_schemas(conn, include_tk=include_tk)
         schemas      = [_build_schema(conn, engine, name) for name in schema_names]
         roles        = _build_roles(conn)
 
@@ -92,15 +88,15 @@ def _build_project(engine: Engine, profile: ConnectionProfile) -> GovernanceProj
 # SCHEMAS
 # =========================================================
 
-def _get_user_schemas(conn: Connection) -> list[str]:
+def _get_user_schemas(conn: Connection, include_tk: bool = False) -> list[str]:
     rows = conn.execute(text("""
         SELECT schema_name
         FROM information_schema.schemata
         WHERE schema_name NOT IN ('information_schema', '__META__')
           AND schema_name NOT LIKE 'pg\\_%'  ESCAPE '\\'
-          AND schema_name NOT LIKE 'tk\\_%'  ESCAPE '\\'
+          AND (:include_tk OR schema_name NOT LIKE 'tk\\_%'  ESCAPE '\\')
         ORDER BY schema_name
-    """)).fetchall()
+    """), {"include_tk": include_tk}).fetchall()
     return [r[0] for r in rows]
 
 
