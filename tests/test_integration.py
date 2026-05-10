@@ -1,5 +1,5 @@
 """
-Inspection tests.
+Integration tests.
 
 Unit tests use a lightweight mock of the SQLAlchemy engine/inspector so they
 run without a live database. Integration tests require TARKIN_TEST_* env vars
@@ -19,6 +19,8 @@ from pydantic import SecretStr
 from ruamel.yaml import YAML
 from pathlib import Path
 
+from tarkin.attach import attach
+from tarkin.detach import detach
 from tarkin.model import (
     DatabaseConfig, SchemaConfig, TableConfig, ColumnConfig,
     IndexConfig, RoleConfig, SchemaPermissionConfig,
@@ -430,3 +432,32 @@ class TestLiveInspect:
             assert "BEGIN;" in sql
             assert "COMMIT;" in sql
             assert "__META__" in sql
+
+    def test_attach_applies_build(self, live_project: GovernanceProject) -> None:
+        zip_path = max(Path("out").glob("tarkin_build_*.zip"), key=lambda p: p.name)
+        prof = _integration_profile()
+        assert prof is not None
+
+        if prof:
+            attach(prof, build_path=zip_path)
+
+    def test_inspect_after_attach_writes_yaml(self, live_project: GovernanceProject) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        post_attach = inspect_database(prof)
+        yaml_str = Serializer.to_yaml_string(post_attach)
+        output = Path("out") / "test_output_post_attach.yaml"
+        output.write_text(yaml_str, encoding="utf-8")
+        assert output.exists()
+
+    def test_detach_removes_build(self, live_project: GovernanceProject) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        detach(prof, keep_versioning=False, drop_versioning=False, no_warn=False)
+
+        # Verify tk_ schemas are gone
+        post_detach = inspect_database(prof)
+        tk_schemas = [s for s in post_detach.schemas if s.name.startswith("tk_")]
+        assert not tk_schemas, f"tk_ schemas still present after detach: {tk_schemas}"

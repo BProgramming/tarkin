@@ -1,9 +1,13 @@
 from __future__ import annotations
 import typer
+import json
+import zipfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
+from .attach import attach, AttachError
+from .detach import detach, DetachError
 from .credentials import (
     CredentialsFile, DEFAULT_CREDENTIALS_PATH,
     check_connection, test_all_connections, ConnectionProfile,
@@ -112,7 +116,7 @@ def inspect_database_build_yaml(
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")
+    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     db_user = result.db_user
 
@@ -206,7 +210,7 @@ def build_data_model_from_yaml(
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")
+    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
         zip_path = build(proj, prof, out_dir=output)
@@ -228,9 +232,42 @@ def attach_to_database(
     credentials: Optional[Path] = _credentials_option,
 ) -> None:
     """
-    Apply a Tarkin model to a live database using a build artifact. (not yet implemented)
+    Apply a Tarkin model to a live database.
+
+    Verifies the database state matches the build, then executes the
+    generated SQL inside a transaction. Rolls back on any failure.
     """
-    raise NotImplementedError("attach is not yet implemented.")
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    # Read profile from artifact if not overridden
+    if not profile:
+        zip_path = build_path or _find_latest_artifact_path()
+        if zip_path:
+            with zipfile.ZipFile(zip_path) as zf:
+                metadata = json.loads(zf.read("tarkin_build.json").decode())
+                profile  = metadata.get("profile")
+
+    if not profile:
+        _die("No credentials profile specified. Use --profile or ensure the build artifact contains one.")
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
+
+    try:
+        attach(prof, build_path=build_path)
+    except AttachError as exc:
+        _die(str(exc))
 
 
 # =====================================================
@@ -239,21 +276,67 @@ def attach_to_database(
 
 @app.command(name="detach")
 def detach_from_database(
-    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
+    profile:         Optional[str]  = typer.Option(None, "--profile", "-p",
         help="Credentials profile to use."),
-    credentials: Optional[Path] = _credentials_option,
-    keep_versioning: bool          = typer.Option(False, "--keep-versioning", "k",
-        help="Retain versioning history when removing versioned tables."),
+    credentials:     Optional[Path] = _credentials_option,
+    keep_versioning: bool           = typer.Option(False, "--keep-versioning", "-k",
+        help="Retain versioning columns and history when detaching."),
+    drop_versioning: bool           = typer.Option(False, "--drop-versioning", "-d",
+        help="Drop versioning columns, retaining only current records."),
+    no_warn:         bool           = typer.Option(False, "--no-warn", "-n",
+        help="Suppress confirmation prompt when dropping versioning data."),
 ) -> None:
     """
-    Remove a Tarkin model from a live database. (not yet implemented)
+    Remove a Tarkin governance model from a live database.
+
+    If versioned tables exist, you must specify either --keep-versioning
+    or --drop-versioning. Use --no-warn to suppress the confirmation
+    prompt when dropping versioning data.
     """
-    raise NotImplementedError("detach is not yet implemented.")
+    if keep_versioning and drop_versioning:
+        _die("Cannot specify both --keep-versioning and --drop-versioning.")
+        return
+
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    if not profile:
+        _die("No credentials profile specified. Use --profile.")
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
+
+    try:
+        detach(
+            prof,
+            keep_versioning=keep_versioning,
+            drop_versioning=drop_versioning,
+            no_warn=no_warn,
+        )
+    except DetachError as exc:
+        _die(str(exc))
 
 
 # =====================================================
 # INTERNAL HELPERS
 # =====================================================
+
+def _find_latest_artifact_path() -> Path | None:
+    from .attach import OUT_DIR
+    if not OUT_DIR.exists():
+        return None
+    artifacts: list[Path] = sorted((p for p in OUT_DIR.glob("tarkin_build_*.zip")), key=lambda p: p.name)
+    return artifacts[-1] if artifacts else None
 
 def _load_credentials(path: Optional[Path]) -> CredentialsFile | None:
     try:
