@@ -63,7 +63,6 @@ def build(
 
     # Step 4 — write artifact
     print("Building artifact...", end="\r")
-    _check_no_existing_build(current)
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     zip_path  = out / f"tarkin_build_{timestamp}.zip"
 

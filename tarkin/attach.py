@@ -12,7 +12,7 @@ from .inspect import inspect_database
 # OUTPUT DIRECTORY
 # =========================================================
 
-OUT_DIR = Path("../out")
+OUT_DIR = Path("out")
 
 
 # =========================================================

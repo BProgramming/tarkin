@@ -58,7 +58,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
 
         schema_names = _get_user_schemas(conn, include_tk=include_tk)
         schemas      = [_build_schema(conn, engine, name) for name in schema_names]
-        roles        = _build_roles(conn)
+        roles        = _build_roles(conn, include_tk=include_tk)
 
         audit_enabled = _scalar(conn, """
             SELECT COUNT(*) > 0
@@ -537,7 +537,7 @@ def _get_domains(conn: Connection, schema_name: str) -> list[str]:
 # ROLES
 # =========================================================
 
-def _build_roles(conn: Connection) -> list[RoleConfig]:
+def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]:
     role_rows = conn.execute(text("""
         SELECT
             r.rolname,
@@ -561,8 +561,8 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
         ORDER BY r.rolname
     """)).fetchall()
 
-    schema_grants = _get_all_schema_grants(conn)
-    table_grants  = _get_all_table_grants(conn)
+    schema_grants = _get_all_schema_grants(conn, include_tk=include_tk)
+    table_grants  = _get_all_table_grants(conn, include_tk=include_tk)
 
     roles = []
     for r in role_rows:
@@ -626,7 +626,7 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
     return roles
 
 
-def _get_all_schema_grants(conn: Connection) -> dict[str, list[dict]]:
+def _get_all_schema_grants(conn: Connection, include_tk: bool = False) -> dict[str, list[dict]]:
     """Returns {role_name: [{schema, privilege}]} for all non-system schemas."""
     rows = conn.execute(text("""
         SELECT
@@ -638,11 +638,11 @@ def _get_all_schema_grants(conn: Connection) -> dict[str, list[dict]]:
         CROSS JOIN (VALUES ('USAGE'), ('CREATE')) AS p(privilege_type)
         WHERE n.nspname NOT LIKE 'pg\\_%'
           AND n.nspname NOT IN ('information_schema', '__META__')
-          AND n.nspname NOT LIKE 'tk\\_%'
+          AND (:include_tk OR n.nspname NOT LIKE 'tk\\_%')
           AND r.rolname NOT LIKE 'pg\\_%'
           AND has_schema_privilege(r.rolname, n.nspname, p.privilege_type)
         ORDER BY r.rolname, n.nspname, p.privilege_type
-    """)).fetchall()
+    """), {"include_tk": include_tk}).fetchall()
 
     result: dict[str, list[dict]] = {}
     for schema, grantee, privilege in rows:
@@ -650,7 +650,7 @@ def _get_all_schema_grants(conn: Connection) -> dict[str, list[dict]]:
     return result
 
 
-def _get_all_table_grants(conn: Connection) -> dict[str, list[dict]]:
+def _get_all_table_grants(conn: Connection, include_tk: bool = False) -> dict[str, list[dict]]:
     """Returns {role_name: [{schema, table, privilege}]} for all non-system tables."""
     rows = conn.execute(text("""
         SELECT
@@ -661,10 +661,10 @@ def _get_all_table_grants(conn: Connection) -> dict[str, list[dict]]:
         FROM information_schema.role_table_grants
         WHERE table_schema NOT LIKE 'pg\\_%'
           AND table_schema NOT IN ('information_schema', '__META__')
-          AND table_schema NOT LIKE 'tk\\_%'
+          AND (:include_tk OR table_schema NOT LIKE 'tk\\_%')
           AND grantee NOT LIKE 'pg\\_%'
         ORDER BY grantee, table_schema, table_name, privilege_type
-    """)).fetchall()
+    """), {"include_tk": include_tk}).fetchall()
 
     result: dict[str, list[dict]] = {}
     for grantee, schema, table, privilege in rows:

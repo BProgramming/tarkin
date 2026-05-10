@@ -109,6 +109,7 @@ def build_clearance_project() -> GovernanceProject:
     high_role = RoleConfig(
         name="phi_reader",
         clearance=2,
+        can_login=True,
         can_read_sensitive=True,
         on=[SchemaPermissionConfig(
             name="clinical",

@@ -173,7 +173,7 @@ def _generate_detach_sql(current, drop_versioning: bool) -> str:
                     )
 
         # Drop original schema and rename shadow back
-        lines.append(f'DROP SCHEMA "{original_name}";')
+        lines.append(f'DROP SCHEMA "{original_name}" CASCADE;')
         lines.append(f'ALTER SCHEMA "{shadow}" RENAME TO "{original_name}";')
         lines.append("")
 

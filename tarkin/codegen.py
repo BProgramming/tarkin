@@ -313,34 +313,34 @@ def _generate_trigger_function(
         v_insert_vals = insert_vals + ", now(), 'infinity'::timestamptz"
 
         return f"""
-            CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
-            RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN
-                IF TG_OP = 'INSERT' THEN
-            {sensitive_stubs}
-                    INSERT INTO {tbl_ref} ({v_insert_cols})
-                    VALUES ({v_insert_vals});
-                    RETURN NEW;
-            
-                ELSIF TG_OP = 'UPDATE' THEN
-            {immutable_checks}{sensitive_stubs}
-                    UPDATE {tbl_ref}
-                    SET valid_to = now()
-                    WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
-            
-                    INSERT INTO {tbl_ref} ({v_insert_cols})
-                    VALUES ({v_insert_vals});
-                    RETURN NEW;
-            
-                ELSIF TG_OP = 'DELETE' THEN
-                    UPDATE {tbl_ref}
-                    SET valid_to = now()
-                    WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
-                    RETURN OLD;
-                END IF;
-            END;
-            $$;
-            """.strip()
+CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+{sensitive_stubs}
+        INSERT INTO {tbl_ref} ({v_insert_cols})
+        VALUES ({v_insert_vals});
+        RETURN NEW;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+{immutable_checks}{sensitive_stubs}
+        UPDATE {tbl_ref}
+        SET valid_to = now()
+        WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
+
+        INSERT INTO {tbl_ref} ({v_insert_cols})
+        VALUES ({v_insert_vals});
+        RETURN NEW;
+
+    ELSIF TG_OP = 'DELETE' THEN
+        UPDATE {tbl_ref}
+        SET valid_to = now()
+        WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
+        RETURN OLD;
+    END IF;
+END;
+$$;
+""".strip()
 
     else:
         update_set = ", ".join(
@@ -348,30 +348,30 @@ def _generate_trigger_function(
         )
 
         return f"""
-            CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
-            RETURNS trigger LANGUAGE plpgsql AS $$
-            BEGIN
-                IF TG_OP = 'INSERT' THEN
-            {sensitive_stubs}
-                    INSERT INTO {tbl_ref} ({insert_cols})
-                    VALUES ({insert_vals});
-                    RETURN NEW;
-            
-                ELSIF TG_OP = 'UPDATE' THEN
-            {immutable_checks}{sensitive_stubs}
-                    UPDATE {tbl_ref}
-                    SET {update_set}
-                    WHERE {pk_filt};
-                    RETURN NEW;
-            
-                ELSIF TG_OP = 'DELETE' THEN
-                    DELETE FROM {tbl_ref}
-                    WHERE {pk_filt};
-                    RETURN OLD;
-                END IF;
-            END;
-            $$;
-            """.strip()
+CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+{sensitive_stubs}
+        INSERT INTO {tbl_ref} ({insert_cols})
+        VALUES ({insert_vals});
+        RETURN NEW;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+{immutable_checks}{sensitive_stubs}
+        UPDATE {tbl_ref}
+        SET {update_set}
+        WHERE {pk_filt};
+        RETURN NEW;
+
+    ELSIF TG_OP = 'DELETE' THEN
+        DELETE FROM {tbl_ref}
+        WHERE {pk_filt};
+        RETURN OLD;
+    END IF;
+END;
+$$;
+""".strip()
 
 
 def _generate_immutable_checks(table: TableConfig) -> str:
