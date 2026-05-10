@@ -25,6 +25,7 @@ from tarkin.model import (
     TablePermissionConfig, DatabaseEngine, IndexType,
 )
 from tarkin.inspect import inspect_database
+from tarkin.build import build
 from tarkin.credentials import ConnectionProfile
 from tarkin.model import GovernanceProject
 from tarkin.serialize import Serializer
@@ -408,3 +409,24 @@ class TestLiveInspect:
         output.write_text(yaml_str, encoding="utf-8")
         assert output.exists()
         assert output.stat().st_size > 0
+
+    def test_build_produces_artifact(self, live_project: GovernanceProject) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        out_dir = Path("out")
+        zip_path = build(live_project, prof, out_dir=out_dir)
+
+        assert zip_path.exists()
+        assert zip_path.suffix == ".zip"
+
+        import zipfile
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            assert "tarkin_build.json" in names
+            assert "tarkin_build.sql" in names
+
+            sql = zf.read("tarkin_build.sql").decode()
+            assert "BEGIN;" in sql
+            assert "COMMIT;" in sql
+            assert "__META__" in sql

@@ -13,6 +13,7 @@ from .model import GovernanceProject
 from .yaml import YamlLoader
 from .validate import SemanticValidator, ValidationError
 from .serialize import Serializer
+from .build import build, BuildError
 
 app = typer.Typer(no_args_is_help=True, help="Tarkin: governance compiler for PostgreSQL.")
 
@@ -98,63 +99,57 @@ def inspect_database_build_yaml(
     views, functions, roles, and grants), and writes a governance YAML that can
     be edited and applied back with 'tarkin attach'.
     """
-
     creds = _load_credentials(credentials)
     if not creds:
-        _die(f"Credentials {credentials!r} not found.")
-    else:
-        prof  = _resolve_profile(creds, profile)
+        return
 
-        if not prof:
-            _die(f"Profile {profile!r} not found.")
-        else:
-            # Test connection first — fail fast with a clear message
-            print(f"Connecting to {prof.safe_repr()}...", end="\r")
-            result = check_connection(prof)
-            if not result.success:
-                _die(f"Connection failed: {result.error}")
-            print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
 
-            # Validate the db user appears in the output yaml
-            db_user = result.db_user
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")
 
-            print("Inspecting database...", end="\r")
+    db_user = result.db_user
+
+    print("Inspecting database...", end="\r")
+    try:
+        proj = inspect_database(prof)
+        print("Inspecting database... Done.")
+    except Exception as exc:
+        _die(f"Inspection failed: {exc}")
+        return
+
+    if proj:
+        proj.database.profile = prof.profile
+
+        role_names = {r.name for r in proj.roles}
+        if db_user and db_user not in role_names:
+            _warn(
+                f"Connected as {db_user!r} but this user was not found in the database's "
+                f"role list. The credentials profile may be using a role that exists outside "
+                f"the standard pg_roles view, or may lack login privilege."
+            )
+
+        if validate:
+            print("Validating inspected model...", end="\r")
             try:
-                proj = inspect_database(prof)
-                print("Inspecting database... Done.")
-            except Exception as exc:
-                proj = None
-                _die(f"Inspection failed: {exc}")
+                SemanticValidator.validate(proj)
+                print("Validating inspected model... Passed.")
+            except ValidationError as exc:
+                _warn(f"Semantic validation found issues. Review before attaching:\n{exc}")
 
-            if proj:
-                # Record which profile was used
-                proj.database.profile = prof.profile
+        yaml_str = Serializer.to_yaml_string(proj)
 
-                # Confirm the connected user is present in the inspected roles
-                role_names = {r.name for r in proj.roles}
-                if db_user and db_user not in role_names:
-                    _warn(
-                        f"Connected as {db_user!r} but this user was not found in the database's "
-                        f"role list. The credentials profile may be using a role that exists outside "
-                        f"the standard pg_roles view, or may lack login privilege."
-                    )
-
-                if validate:
-                    print("Validating inspected model...", end="\r")
-                    try:
-                        SemanticValidator.validate(proj)
-                        print("Validating inspected model... Passed.")
-                    except ValidationError as exc:
-                        # Validation errors on an inspected DB are warnings, not fatal —
-                        # the live DB may have things Tarkin doesn't model yet.
-                        _warn(f"Semantic validation found issues. Review before attaching:\n{exc}")
-
-                yaml_str = Serializer.to_yaml_string(proj)
-
-                if output is None:
-                    output = Path("out") / f"{prof.database}_model.yaml"
-                output.write_text(yaml_str, encoding="utf-8")
-                print(f"Written to {output}.")
+        if output is None:
+            output = Path("out") / f"{prof.database}_model.yaml"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(yaml_str, encoding="utf-8")
+        print(f"Written to {output}.")
 
 
 # =====================================================
@@ -171,47 +166,88 @@ def validate_data_model(
 
 
 # =====================================================
-# BUILD — parse, validate, write canonical form
+# BUILD — compile governance YAML to a build artifact
 # =====================================================
 
 @app.command(name="build")
 def build_data_model_from_yaml(
-    config: Path            = typer.Argument(..., help="Path to governance YAML."),
-    output: Optional[Path]  = _output_option,
+    config:      Path           = typer.Argument(..., help="Path to governance YAML."),
+    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
+        help="Override the credentials profile in the YAML."),
+    credentials: Optional[Path] = _credentials_option,
+    output:      Optional[Path] = _output_option,
 ) -> None:
-    """Parse a Tarkin YAML, validate it, and write the canonical form back out."""
+    """
+    Compile a Tarkin governance YAML into a build artifact.
+
+    Connects to the live database, inspects current state, generates the SQL
+    needed to implement the governance model, and writes a zip artifact
+    containing the SQL and build metadata to out/.
+    """
     proj = _load_and_validate(config)
+    if not proj:
+        return
 
-    if proj:
-        if output is None:
-            output = config.with_stem(config.stem + "_out")
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
 
-        yaml_str = Serializer.to_yaml_string(proj)
-        output.write_text(yaml_str, encoding="utf-8")
-        print(f"Written to {output}")
+    profile_name = profile or proj.database.profile
+    if not profile_name:
+        _die("No credentials profile specified. Use --profile or set 'profile' in the YAML.")
+        return
+
+    prof = _resolve_profile(creds, profile_name)
+    if not prof:
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Connected on PostgreSQL {result.server_version}.")
+
+    try:
+        zip_path = build(proj, prof, out_dir=output)
+        print(f"Build complete: {zip_path}")
+    except BuildError as exc:
+        _die(str(exc))
 
 
 # =====================================================
-# ATTACH / DETACH — not yet implemented
+# ATTACH — execute a build artifact against a live database
 # =====================================================
 
 @app.command(name="attach")
 def attach_to_database(
-    config:      Path            = typer.Argument(..., help="Path to governance YAML."),
-    profile:     Optional[str]   = typer.Option(None, "--profile", "-p",
-        help="Override the credentials profile in the YAML."),
-    credentials: Optional[Path]  = _credentials_option,
+    build_path:  Optional[Path] = typer.Option(None, "--build", "-b",
+        help="Path to build artifact zip. Defaults to latest in out/."),
+    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
+        help="Override the credentials profile in the build artifact."),
+    credentials: Optional[Path] = _credentials_option,
 ) -> None:
-    """Apply a Tarkin governance model to a live database. (not yet implemented)"""
+    """
+    Apply a Tarkin model to a live database using a build artifact. (not yet implemented)
+    """
     raise NotImplementedError("attach is not yet implemented.")
 
 
+# =====================================================
+# DETACH — remove Tarkin from a live database
+# =====================================================
+
 @app.command(name="detach")
 def detach_from_database(
-    profile:     str            = _profile_option,
+    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
+        help="Credentials profile to use."),
     credentials: Optional[Path] = _credentials_option,
+    keep_versioning: bool          = typer.Option(False, "--keep-versioning", "k",
+        help="Retain versioning history when removing versioned tables."),
 ) -> None:
-    """Remove a Tarkin governance model from a live database. (not yet implemented)"""
+    """
+    Remove a Tarkin model from a live database. (not yet implemented)
+    """
     raise NotImplementedError("detach is not yet implemented.")
 
 
@@ -238,13 +274,14 @@ def _resolve_profile(creds: CredentialsFile, profile_name: str) -> ConnectionPro
 def _load_and_validate(config: Path) -> GovernanceProject | None:
     if not config.exists():
         _die(f"File not found: {config}")
+        return None
 
     print(f"Loading {config}...", end="\r")
     try:
         proj = YamlLoader.load(config)
     except Exception as exc:
-        proj = None
         _die(f"Failed to parse {config}: {exc}")
+        return None
     print(f"Loading {config}... Done.")
 
     if proj:
@@ -253,11 +290,11 @@ def _load_and_validate(config: Path) -> GovernanceProject | None:
             SemanticValidator.validate(proj)
         except ValidationError as exc:
             _die(f"Validation failed:\n{exc}")
+            return None
         print("Validating... Done.")
-
         return proj
-    else:
-        return None
+
+    return None
 
 
 def _die(msg: str) -> None:
