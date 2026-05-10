@@ -327,6 +327,35 @@ def detach_from_database(
         _die(str(exc))
 
 
+# ==================================================================
+# PURGE — remove all build artifacts from the Tarkin out/ directory
+# ==================================================================
+
+
+@app.command(name="purge")
+def purge_output(
+    no_warn: bool = typer.Option(False, "--no-warn", "-n",
+        help="Skip confirmation prompt."),
+) -> None:
+    """Delete all build artifacts and output files from the out/ directory."""
+    out_dir = Path("out")
+
+    if not out_dir.exists() or not any(out_dir.iterdir()):
+        print("Nothing to purge: directory out/ is empty or does not exist.")
+        return
+
+    if not no_warn:
+        print("This will delete everything in the out/ directory.")
+        response = input("Type 'y' to confirm: ").strip().casefold()
+        if response != 'y':
+            print("Purge cancelled.")
+            return
+
+    import shutil
+    shutil.rmtree(out_dir)
+    out_dir.mkdir()
+    print("Directory out/ purged.")
+
 # =====================================================
 # INTERNAL HELPERS
 # =====================================================
