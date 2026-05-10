@@ -268,6 +268,7 @@ class RoleConfig(TarkinBaseModel):
     can_read_sensitive: bool = False
     can_write: bool = False
     can_admin: bool = False
+    can_maintain: bool = False
 
 
 class UserConfig(TarkinBaseModel):

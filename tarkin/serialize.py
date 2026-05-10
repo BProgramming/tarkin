@@ -240,6 +240,7 @@ class Serializer:
         m["can_read_sensitive"] = role.can_read_sensitive
         m["can_write"] = role.can_write
         m["can_admin"] = role.can_admin
+        m["can_maintain"] = role.can_maintain
         m["on"] = CommentedSeq([cls._serialize_schema_permission(o) for o in role.on])
         return m
 

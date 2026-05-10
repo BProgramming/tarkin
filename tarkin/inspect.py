@@ -613,12 +613,14 @@ def _build_roles(conn: Connection) -> list[RoleConfig]:
             if privilege == "TRUNCATE":   table_perm.truncate   = True
             if privilege == "REFERENCES": table_perm.references = True
             if privilege == "TRIGGER":    table_perm.trigger    = True
+            if privilege == "MAINTAIN":   table_perm.maintain   = True
 
         roles.append(RoleConfig(
             name=role_name,
             description=description,
             can_admin=bool(is_super),
             can_write=bool(can_create_db or can_create_role),
+            can_maintain=bool(is_super),
             on=list(schema_perms.values()),
         ))
 
