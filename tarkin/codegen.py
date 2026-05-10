@@ -143,24 +143,24 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_role_schemas (
     build_id    bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
     role_name   text NOT NULL,
     schema_name text NOT NULL,
-    usage       bool NOT NULL DEFAULT true,
-    create      bool NOT NULL DEFAULT false
+    "usage"     bool NOT NULL DEFAULT true,
+    "create"    bool NOT NULL DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_role_tables (
-    rt_id       bigserial PRIMARY KEY,
-    build_id    bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
-    role_name   text NOT NULL,
-    schema_name text NOT NULL,
-    table_name  text NOT NULL,
-    "select"    bool NOT NULL DEFAULT false,
-    insert      bool NOT NULL DEFAULT false,
-    update      bool NOT NULL DEFAULT false,
-    delete      bool NOT NULL DEFAULT false,
-    truncate    bool NOT NULL DEFAULT false,
+    rt_id        bigserial PRIMARY KEY,
+    build_id     bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    role_name    text NOT NULL,
+    schema_name  text NOT NULL,
+    table_name   text NOT NULL,
+    "select"     bool NOT NULL DEFAULT false,
+    "insert"     bool NOT NULL DEFAULT false,
+    "update"     bool NOT NULL DEFAULT false,
+    "delete"     bool NOT NULL DEFAULT false,
+    "truncate"   bool NOT NULL DEFAULT false,
     "references" bool NOT NULL DEFAULT false,
-    trigger     bool NOT NULL DEFAULT false,
-    maintain    bool NOT NULL DEFAULT false
+    "trigger"    bool NOT NULL DEFAULT false,
+    "maintain"   bool NOT NULL DEFAULT false
 );
 """.strip()
 
@@ -708,7 +708,7 @@ def _generate_meta_population(project: GovernanceProject) -> str:
         for sp in role.on:
             lines.append(
                 f"    INSERT INTO __META__.tarkin_role_schemas "
-                f"(build_id, role_name, schema_name, usage, create) VALUES ("
+                f"(build_id, role_name, schema_name, \"usage\", \"create\") VALUES ("
                 f"v_build_id, '{_escape_sql_string(role.name)}', "
                 f"'{_escape_sql_string(sp.name)}', "
                 f"{str(sp.usage).lower()}, {str(sp.create).lower()});"
@@ -722,8 +722,8 @@ def _generate_meta_population(project: GovernanceProject) -> str:
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_role_tables "
                     f"(build_id, role_name, schema_name, table_name, \"select\", "
-                    f"insert, update, delete, truncate, \"references\", trigger, "
-                    f"maintain) VALUES ("
+                    f"\"insert\", \"update\", \"delete\", \"truncate\", \"references\", \"trigger\", "
+                    f"\"maintain\") VALUES ("
                     f"v_build_id, '{_escape_sql_string(role.name)}', "
                     f"'{_escape_sql_string(sp.name)}', "
                     f"'{_escape_sql_string(tp.name)}', "
