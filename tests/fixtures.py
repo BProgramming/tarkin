@@ -110,7 +110,7 @@ def build_clearance_project() -> GovernanceProject:
         name="phi_reader",
         clearance=2,
         can_login=True,
-        can_read_sensitive=True,
+        can_access_sensitive=True,
         on=[SchemaPermissionConfig(
             name="clinical",
             usage=True,

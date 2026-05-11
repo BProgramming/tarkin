@@ -43,8 +43,8 @@ def detach(
         (s, t)
         for s in tk_schemas
         for t in s.tables
-        if "valid_from" in {c.name for c in t.columns}
-        and "valid_to" in {c.name for c in t.columns}
+        if "__valid_from__" in {c.name for c in t.columns}
+        and "__valid_to__" in {c.name for c in t.columns}
     ]
     has_versioning = bool(versioned_tables)
 
@@ -99,7 +99,7 @@ def _confirm_drop_versioning(versioned_tables: list) -> None:
     print(
         f"\nThe following tables have versioning columns that will be permanently dropped:\n"
         f"{table_list}\n"
-        f"Only current records (valid_to = 'infinity') will be retained.\n"
+        f"Only current records (__valid_to__ = 'infinity') will be retained.\n"
         f"This operation cannot be undone."
     )
     response = input("Type 'y' to confirm: ").strip().casefold()
@@ -136,8 +136,8 @@ def _generate_detach_sql(current, drop_versioning: bool) -> str:
         # Drop views in original schema
         for table in schema.tables:
             versioned = (
-                "valid_from" in {c.name for c in table.columns}
-                and "valid_to" in {c.name for c in table.columns}
+                "__valid_from__" in {c.name for c in table.columns}
+                and "__valid_to__" in {c.name for c in table.columns}
             )
             lines.append(
                 f'DROP VIEW IF EXISTS "{original_name}"."{table.name}";'
@@ -151,25 +151,25 @@ def _generate_detach_sql(current, drop_versioning: bool) -> str:
         if drop_versioning:
             for table in schema.tables:
                 versioned = (
-                    "valid_from" in {c.name for c in table.columns}
-                    and "valid_to" in {c.name for c in table.columns}
+                    "__valid_from__" in {c.name for c in table.columns}
+                    and "__valid_to__" in {c.name for c in table.columns}
                 )
                 if versioned:
                     # Retain only current records
                     lines.append(
                         f'DELETE FROM "{shadow}"."{table.name}" '
-                        f"WHERE valid_to != 'infinity'::timestamptz;"
+                        f"WHERE __valid_to__ != 'infinity'::timestamptz;"
                     )
                     lines.append(
                         f'DROP INDEX IF EXISTS "idx_{table.name}_current";'
                     )
                     lines.append(
                         f'ALTER TABLE "{shadow}"."{table.name}" '
-                        f"DROP COLUMN valid_from;"
+                        f"DROP COLUMN __valid_from__;"
                     )
                     lines.append(
                         f'ALTER TABLE "{shadow}"."{table.name}" '
-                        f"DROP COLUMN valid_to;"
+                        f"DROP COLUMN __valid_to__;"
                     )
 
         # Drop original schema and rename shadow back

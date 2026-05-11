@@ -205,7 +205,7 @@ class YamlLoader:
             can_admin=d.get("can_admin", False),
             can_write=d.get("can_write", False),
             can_maintain=d.get("can_maintain", False),
-            can_read_sensitive=d.get("can_read_sensitive", False),
+            can_access_sensitive=d.get("can_access_sensitive", False),
             member_of=list(d.get("member_of", [])),
             on=[cls._parse_schema_permission(o) for o in d.get("on", [])],
         )

@@ -618,7 +618,7 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
             can_admin=bool(is_super),
             can_write=bool(can_create_db or can_create_role),
             can_maintain=bool(is_super),
-            can_read_sensitive=False,
+            can_access_sensitive=False,
             member_of=[m for m in (member_of or [])],
             on=list(schema_perms.values()),
         ))

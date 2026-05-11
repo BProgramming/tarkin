@@ -125,17 +125,17 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_foreign_keys (
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_roles (
-    role_id             bigserial PRIMARY KEY,
-    build_id            bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
-    name                text NOT NULL,
-    clearance           int NOT NULL DEFAULT 0,
-    can_login           bool NOT NULL DEFAULT false,
-    can_admin           bool NOT NULL DEFAULT false,
-    can_write           bool NOT NULL DEFAULT false,
-    can_maintain        bool NOT NULL DEFAULT false,
-    can_read_sensitive  bool NOT NULL DEFAULT false,
-    active              bool NOT NULL DEFAULT true,
-    member_of           text[] NOT NULL DEFAULT '{}'
+    role_id              bigserial PRIMARY KEY,
+    build_id             bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    name                 text NOT NULL,
+    clearance            int NOT NULL DEFAULT 0,
+    can_login            bool NOT NULL DEFAULT false,
+    can_admin            bool NOT NULL DEFAULT false,
+    can_write            bool NOT NULL DEFAULT false,
+    can_maintain         bool NOT NULL DEFAULT false,
+    can_access_sensitive bool NOT NULL DEFAULT false,
+    active               bool NOT NULL DEFAULT true,
+    member_of            text[] NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_role_schemas (
@@ -204,13 +204,13 @@ def _generate_versioning_columns(
                 continue
 
             existing_cols = current_col_map.get((schema.name, table.name), set())
-            has_valid_from = "valid_from" in existing_cols
-            has_valid_to   = "valid_to" in existing_cols
+            has_valid_from = "__valid_from__" in existing_cols
+            has_valid_to   = "__valid_to__" in existing_cols
 
             if has_valid_from or has_valid_to:
                 lines.append(
                     f"-- WARNING: {shadow}.{table.name} already has "
-                    f"valid_from/valid_to columns. "
+                    f"__valid_from__/__valid_to__ columns. "
                     f"Existing data in these columns will be overwritten "
                     f"by Tarkin versioning."
                 )
@@ -218,20 +218,20 @@ def _generate_versioning_columns(
             if not has_valid_from:
                 lines.append(
                     f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
-                    f"ADD COLUMN valid_from timestamptz "
+                    f"ADD COLUMN __valid_from__ timestamptz "
                     f"NOT NULL DEFAULT now();"
                 )
             if not has_valid_to:
                 lines.append(
                     f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
-                    f"ADD COLUMN valid_to timestamptz "
+                    f"ADD COLUMN __valid_to__ timestamptz "
                     f"NOT NULL DEFAULT 'infinity'::timestamptz;"
                 )
 
             lines.append(
                 f"CREATE INDEX {_q('idx_' + table.name + '_current')} "
-                f"ON {_q(shadow)}.{_q(table.name)} (valid_to) "
-                f"WHERE valid_to = 'infinity'::timestamptz;"
+                f"ON {_q(shadow)}.{_q(table.name)} (__valid_to__) "
+                f"WHERE __valid_to__ = 'infinity'::timestamptz;"
             )
             lines.append("")
 
@@ -264,7 +264,7 @@ def _generate_views(project: GovernanceProject) -> str:
                     f"CREATE VIEW {_q(schema.name)}.{_q(table.name + '_current')} AS\n"
                     f"    SELECT {col_list}\n"
                     f"    FROM {_q(shadow)}.{_q(table.name)}\n"
-                    f"    WHERE valid_to >= now();"
+                    f"    WHERE __valid_to__ >= now();"
                 )
 
             lines.append("")
@@ -309,7 +309,7 @@ def _generate_trigger_function(
     pk_filt = _pk_filter(table)
 
     if any(c.versioned for c in table.columns):
-        v_insert_cols = insert_cols + ", valid_from, valid_to"
+        v_insert_cols = insert_cols + ", __valid_from__, __valid_to__"
         v_insert_vals = insert_vals + ", now(), 'infinity'::timestamptz"
 
         return f"""
@@ -325,8 +325,8 @@ BEGIN
     ELSIF TG_OP = 'UPDATE' THEN
 {immutable_checks}{sensitive_stubs}
         UPDATE {tbl_ref}
-        SET valid_to = now()
-        WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
+        SET __valid_to__ = now()
+        WHERE {pk_filt} AND __valid_to__ = 'infinity'::timestamptz;
 
         INSERT INTO {tbl_ref} ({v_insert_cols})
         VALUES ({v_insert_vals});
@@ -334,8 +334,8 @@ BEGIN
 
     ELSIF TG_OP = 'DELETE' THEN
         UPDATE {tbl_ref}
-        SET valid_to = now()
-        WHERE {pk_filt} AND valid_to = 'infinity'::timestamptz;
+        SET __valid_to__ = now()
+        WHERE {pk_filt} AND __valid_to__ = 'infinity'::timestamptz;
         RETURN OLD;
     END IF;
 END;
@@ -713,11 +713,11 @@ def _generate_meta_population(project: GovernanceProject) -> str:
         lines.append(
             f"    INSERT INTO __META__.tarkin_roles "
             f"(build_id, name, clearance, can_login, can_admin, can_write, "
-            f"can_maintain, can_read_sensitive, active, member_of) VALUES ("
+            f"can_maintain, can_access_sensitive, active, member_of) VALUES ("
             f"v_build_id, '{_escape_sql_string(role.name)}', {role.clearance}, "
             f"{str(role.can_login).lower()}, {str(role.can_admin).lower()}, "
             f"{str(role.can_write).lower()}, {str(role.can_maintain).lower()}, "
-            f"{str(role.can_read_sensitive).lower()}, {str(role.active).lower()}, "
+            f"{str(role.can_access_sensitive).lower()}, {str(role.active).lower()}, "
             f"{member_of_array});"
         )
     lines.append("")

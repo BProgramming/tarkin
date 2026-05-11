@@ -56,6 +56,11 @@ class IndexType(StrEnum):
 # =========================================================
 
 
+class FullMaskConfig(BaseModel):
+    mask_char: str = "X"
+    hide_null: bool = False
+
+
 class PartialMaskConfig(BaseModel):
     visible_length: int
     visible_side: PartialMaskVisibleSide = PartialMaskVisibleSide.RIGHT
@@ -267,7 +272,7 @@ class RoleConfig(TarkinBaseModel):
     can_admin: bool = False
     can_write: bool = False
     can_maintain: bool = False
-    can_read_sensitive: bool = False
+    can_access_sensitive: bool = False
 
     active: bool = True
     member_of: list[str] = Field(default_factory=list)

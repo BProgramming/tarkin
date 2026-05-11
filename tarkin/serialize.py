@@ -241,7 +241,7 @@ class Serializer:
         m["can_admin"] = role.can_admin
         m["can_write"] = role.can_write
         m["can_maintain"] = role.can_maintain
-        m["can_read_sensitive"] = role.can_read_sensitive
+        m["can_access_sensitive"] = role.can_access_sensitive
         if role.member_of:
             m["member_of"] = list(role.member_of)
         if role.on:
