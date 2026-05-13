@@ -16,7 +16,7 @@ from tarkin.model import (
 from .fixtures import (
     build_minimal_project, build_cross_schema_project, build_clearance_project,
     build_masking_project,
-    make_schema, make_column, make_role, make_database,
+    make_schema, make_column, make_role, make_database, make_index,
 )
 
 
@@ -250,7 +250,7 @@ def test_full_mask_with_correct_config_is_valid() -> None:
         masking_strategy=MaskingStrategy.FULL,
         mask_config=FullMaskConfig(mask_char="*"),
     )
-    table = TableConfig(name="users", columns=[make_column(), col])
+    table = TableConfig(name="users", columns=[make_column(), col], indexes=[make_index()])
     schema = SchemaConfig(name="public", tables=[table])
     proj = GovernanceProject(
         database=make_database(),

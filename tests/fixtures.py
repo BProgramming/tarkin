@@ -19,11 +19,11 @@ def make_column(name: str = "id", type: str = "bigint", **kwargs) -> ColumnConfi
 
 
 def make_index(name: str = "pk_id", columns: list[str] | None = None, **kwargs) -> IndexConfig:
-    return IndexConfig(name=name, columns=columns or ["id"], primary_key=True, **kwargs)
+    return IndexConfig(name=name, columns=columns or ["id"], primary_key=True, unique=True, **kwargs)
 
 
 def make_table(name: str = "users", **kwargs) -> TableConfig:
-    return TableConfig(name=name, columns=[make_column()], **kwargs)
+    return TableConfig(name=name, columns=[make_column()], indexes=[make_index()], **kwargs)
 
 
 def make_schema(name: str = "public", **kwargs) -> SchemaConfig:
@@ -61,7 +61,12 @@ def build_cross_schema_project() -> GovernanceProject:
         referenced_table="users",
         referenced_column="id",
     )
-    orders_table  = TableConfig(name="orders", columns=[orders_col], foreign_keys=[fk])
+    orders_table  = TableConfig(
+        name="orders",
+        columns=[orders_col],
+        indexes=[make_index("pk_orders", ["user_id"])],
+        foreign_keys=[fk],
+    )
     orders_schema = SchemaConfig(name="sales", tables=[orders_table])
     public_schema = make_schema(name="public")
 
@@ -91,10 +96,14 @@ def build_clearance_project() -> GovernanceProject:
         sensitive=True,
         encrypted=True,
     )
-    table  = TableConfig(name="patients", columns=[normal_col, phi_col])
+    table  = TableConfig(
+        name="patients",
+        columns=[normal_col, phi_col],
+        indexes=[make_index()],
+    )
     schema = SchemaConfig(name="clinical", clearance=0, tables=[table])
 
-    low_role = make_role(name="basic_reader", schema="clinical")
+    low_role  = make_role(name="basic_reader", schema="clinical")
     high_role = RoleConfig(
         name="phi_reader",
         clearance=2,
@@ -115,7 +124,6 @@ def build_clearance_project() -> GovernanceProject:
 
 
 def build_masking_project() -> GovernanceProject:
-    """Project exercising all masking strategies."""
     cols = [
         make_column(name="id"),
         ColumnConfig(
@@ -168,10 +176,9 @@ def build_masking_project() -> GovernanceProject:
         ),
     ]
 
-    table  = TableConfig(name="contacts", columns=cols)
+    table  = TableConfig(name="contacts", columns=cols, indexes=[make_index()])
     schema = SchemaConfig(name="public", tables=[table])
     role   = make_role(name="reader", schema="public")
-    # Override table permission to point at contacts
     role.on[0].tables[0].name = "contacts"
 
     return GovernanceProject(

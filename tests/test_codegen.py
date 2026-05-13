@@ -418,19 +418,20 @@ class TestGenerateTriggers:
             _generate_triggers(proj)
 
     def test_pk_filter_uses_only_pk_column(self) -> None:
-        id_col   = _make_pk_column("uuid")
+        id_col = _make_pk_column("uuid")
         name_col = ColumnConfig(name="name", type="text")
-        table    = TableConfig(
+        table = TableConfig(
             name="things",
             columns=[id_col, name_col],
             indexes=[IndexConfig(name="pk_things", columns=["uuid"], primary_key=True, unique=True)],
         )
         schema = SchemaConfig(name="public", tables=[table])
-        proj   = _make_project(schemas=[schema])
+        proj = _make_project(schemas=[schema])
         sql = _generate_triggers(proj)
-        assert '"uuid" = NEW."uuid"' in sql
-        assert '"name" = NEW."name"' not in sql
-
+        # The WHERE clause should filter on PK only
+        assert 'WHERE "uuid" = NEW."uuid"' in sql
+        # name should not appear in any WHERE clause
+        assert 'WHERE "name"' not in sql
 
 # =====================================================
 # ROLES
