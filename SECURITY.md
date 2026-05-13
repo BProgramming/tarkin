@@ -6,6 +6,16 @@
 |---------|-----------|
 | latest  | YES       |
 
+## Database Superuser
+
+Many of Tarkin's operations require a specified database owner with
+superuser access. Tarkin populates this automatically from the active user
+running it,vbut if that user is not the database owner then the
+specification yaml needs to be changed accordingly.
+
+All other users/roles will have access restricted based on specified
+clearances.
+
 ## Reporting a Vulnerability
 
 Please do not report security vulnerabilities via public GitHub issues.

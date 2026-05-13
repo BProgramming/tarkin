@@ -118,6 +118,7 @@ class YamlLoader:
             database=d.get("database", "postgres"),
             engine=DatabaseEngine(d.get("engine", "postgres")),
             profile=d.get("profile"),
+            owner=d.get("owner"),
         )
 
     # =====================================================

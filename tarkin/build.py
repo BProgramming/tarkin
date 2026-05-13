@@ -27,11 +27,7 @@ def _ensure_out_dir(out_dir: Path) -> Path:
 # BUILD ENTRY POINT
 # =========================================================
 
-def build(
-    project: GovernanceProject,
-    profile: ConnectionProfile,
-    out_dir: Path | None = None,
-) -> Path:
+def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path | None = None) -> Path:
     """
     Run a full Tarkin build against a live database.
 
@@ -106,11 +102,7 @@ def _check_audit_requirements(project: GovernanceProject, current: GovernancePro
 # METADATA
 # =========================================================
 
-def _build_metadata(
-    project: GovernanceProject,
-    current: GovernanceProject,
-    profile: ConnectionProfile,
-) -> dict:
+def _build_metadata(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> dict:
     return {
         "tarkin_version": pkg_version("tarkin"),
         "built_at":       datetime.now(UTC).isoformat(),

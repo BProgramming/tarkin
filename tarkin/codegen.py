@@ -2,11 +2,12 @@ from __future__ import annotations
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
 import hashlib
+import warnings
 
 from .model import (
     GovernanceProject, TableConfig, ColumnConfig,
-    MaskingStrategy,
-    FullMaskConfig, PartialMaskConfig,
+    MaskingStrategy, MaskConfig,
+    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig,
     PartialMaskVisibleSide,
@@ -284,6 +285,8 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
     Return a SQL expression for a column in a view, applying masking if configured.
     Columns with masking_strategy='none' are passed through as-is.
     """
+    _default_mask_char = "X"
+
     strategy = MaskingStrategy(col.masking_strategy)
     ref      = f"{_q(shadow)}.{_q(table_name)}.{_q(col.name)}"
     cfg      = col.mask_config
@@ -292,22 +295,29 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _q(col.name)
 
     # Shared null handling wrapper
-    def _wrap_null(expr: str, hide_null: bool) -> str:
-        if hide_null:
-            return f"COALESCE({expr}, {_mask_null_literal(strategy, cfg)}) AS {_q(col.name)}"
-        return f"CASE WHEN {ref} IS NULL THEN NULL ELSE {expr} END AS {_q(col.name)}"
+    def _wrap_null(exp: str, hn: bool) -> str:
+        if hn:
+            return f"COALESCE({exp}, {_mask_null_literal(strategy, cfg)}) AS {_q(col.name)}"
+        return f"CASE WHEN {ref} IS NULL THEN NULL ELSE {exp} END AS {_q(col.name)}"
 
     if strategy == MaskingStrategy.FULL:
-        mask_char = cfg.mask_char if isinstance(cfg, FullMaskConfig) else "X"
-        hide_null = cfg.hide_null if cfg else False
+        if not isinstance(cfg, FullMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'full' requires FullMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         expr = f"regexp_replace({ref}::text, '.', '{mask_char}', 'g')"
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.PARTIAL:
         if not isinstance(cfg, PartialMaskConfig):
-            # Fallback — shouldn't happen after validation
-            return _q(col.name)
-        mask_char = cfg.mask_char
+            raise ValueError(
+                f"Column '{col.name}': strategy 'partial' requires PartialMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
         length    = cfg.visible_length
         side      = cfg.visible_side
         hide_null = cfg.hide_null
@@ -324,15 +334,31 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.HASH:
-        hide_null = cfg.hide_null if cfg else False
+        if not isinstance(cfg, HashMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'hash' requires HashMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        hide_null = cfg.hide_null
+        warnings.warn(
+            f"Column '{col.name}': masking strategy 'hash' is not encryption. "
+            f"Hash values may be reversible given knowledge of the source data. "
+            f"Do not rely on hashing alone for sensitive data protection. "
+            f"See Tarkin docs for guidance.",
+            UserWarning,
+            stacklevel=2,
+        )
         expr = f"hashtextextended({ref}::text, 0)::text"
-        warning = f"/* HASH MASK: not encryption, see tarkin docs */"
-        return _wrap_null(f"{warning} {expr}", hide_null)
+        return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.EMAIL:
-        mask_char = cfg.mask_char if isinstance(cfg, EmailMaskConfig) else "X"
-        hide_null = cfg.hide_null if cfg else False
-        # j***@example.com — keep first char + mask up to @
+        if not isinstance(cfg, EmailMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'email' requires EmailMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         expr = (
             f"left({ref}::text, 1) || "
             f"repeat('{mask_char}', greatest(0, position('@' IN {ref}::text) - 2)) || "
@@ -341,10 +367,14 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.PHONE:
-        visible = cfg.visible_digits if isinstance(cfg, PhoneMaskConfig) else 4
-        mask_char = cfg.mask_char if isinstance(cfg, PhoneMaskConfig) else "X"
-        hide_null = cfg.hide_null if cfg else False
-        # Keep last N digits only (strips non-digits first, then remasks)
+        if not isinstance(cfg, PhoneMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'phone' requires PhoneMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        visible   = cfg.visible_digits
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         expr = (
             f"repeat('{mask_char}', greatest(0, length(regexp_replace({ref}::text, '[^0-9]', '', 'g')) - {visible})) || "
             f"right(regexp_replace({ref}::text, '[^0-9]', '', 'g'), {visible})"
@@ -352,9 +382,13 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.CREDIT_CARD:
-        mask_char = cfg.mask_char if isinstance(cfg, CreditCardMaskConfig) else "X"
-        hide_null = cfg.hide_null if cfg else False
-        # XXXX-XXXX-XXXX-1234 — strip non-digits, show last 4, format with dashes
+        if not isinstance(cfg, CreditCardMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'credit_card' requires CreditCardMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         expr = (
             f"repeat('{mask_char}', 4) || '-' || repeat('{mask_char}', 4) || '-' || "
             f"repeat('{mask_char}', 4) || '-' || "
@@ -363,12 +397,14 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.IP_ADDRESS:
-        visible  = cfg.visible_octets if isinstance(cfg, IpAddressMaskConfig) else 2
-        mask_char = cfg.mask_char if isinstance(cfg, IpAddressMaskConfig) else "X"
-        hide_null = cfg.hide_null if cfg else False
-        # For IPv4: show last visible_octets, mask the rest
-        # We split on '.', mask leading octets, rejoin
-        # Simplest correct approach in pure SQL for IPv4:
+        if not isinstance(cfg, IpAddressMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'ip_address' requires IpAddressMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        visible   = cfg.visible_octets
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         if visible == 1:
             expr = (
                 f"'{mask_char}.' || '{mask_char}.' || '{mask_char}.' || "
@@ -392,9 +428,13 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.NAME:
-        mask_char = cfg.mask_char if isinstance(cfg, NameMaskConfig) else "*"
-        hide_null = cfg.hide_null if cfg else False
-        # First letter of each word + mask_char * 3: "John Smith" -> "J*** S***"
+        if not isinstance(cfg, NameMaskConfig):
+            raise ValueError(
+                f"Column '{col.name}': strategy 'name' requires NameMaskConfig, "
+                f"got {type(cfg).__name__}"
+            )
+        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+        hide_null = cfg.hide_null
         expr = (
             f"array_to_string(ARRAY("
             f"SELECT left(word, 1) || repeat('{mask_char}', 3) "
@@ -403,16 +443,19 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         )
         return _wrap_null(expr, hide_null)
 
-    # Fallback
-    return _q(col.name)
+    # Fallback — should be unreachable if MaskingStrategy enum is exhaustive
+    raise ValueError(
+        f"Column '{col.name}': unhandled masking strategy '{strategy}'. "
+        f"This is a Tarkin bug — please file an issue."
+    )
 
 
-def _mask_null_literal(strategy: MaskingStrategy, cfg) -> str:
+def _mask_null_literal(strategy: MaskingStrategy, cfg: MaskConfig | None) -> str:
     """Return a SQL literal to use when hide_null=True and the value is NULL."""
     if strategy == MaskingStrategy.HASH:
         return "hashtextextended('', 0)::text"
     mask_char = "X"
-    if cfg and hasattr(cfg, "mask_char"):
+    if cfg and hasattr(cfg, "mask_char") and cfg.mask_char:
         mask_char = cfg.mask_char
     return f"'{mask_char}'"
 
@@ -567,7 +610,7 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
         else:
             parts = [f"CREATE ROLE {_q(role.name)}"]
 
-        parts.append("LOGIN"    if role.can_login  else "NOLOGIN")
+        parts.append("LOGIN" if role.can_login  else "NOLOGIN")
         parts.append("SUPERUSER" if role.can_admin else "NOSUPERUSER")
         parts.append("CREATEDB CREATEROLE" if role.can_write else "NOCREATEDB NOCREATEROLE")
 
@@ -588,8 +631,28 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
 def _generate_grants(project: GovernanceProject) -> str:
     lines = []
 
-    schema_map = {s.name: s for s in project.schemas}
-    table_map  = {(s.name, t.name): t for s in project.schemas for t in s.tables}
+    schema_map  = {s.name: s for s in project.schemas}
+    table_map   = {(s.name, t.name): t for s in project.schemas for t in s.tables}
+    shadow_schemas = [f"tk_{s.name}" for s in project.schemas]
+
+    # Revoke all access to shadow schemas for non-owner roles.
+    # Shadow schemas are for internal use only — roles must access
+    # masked data through views, not the shadow schema directly.
+    # NOTE: REVOKE ON ALL TABLES covers existing tables only.
+    # Re-run Tarkin after schema changes to maintain shadow schema isolation.
+    for role in project.roles:
+        if role.name == project.database.owner:
+            continue
+        for shadow in shadow_schemas:
+            lines.append(
+                f"REVOKE ALL ON SCHEMA {_q(shadow)} FROM {_q(role.name)};"
+            )
+            lines.append(
+                f"REVOKE ALL ON ALL TABLES IN SCHEMA {_q(shadow)} FROM {_q(role.name)};"
+            )
+
+    if lines:
+        lines.append("")
 
     for role in project.roles:
         for sp in role.on:
@@ -626,8 +689,11 @@ def _generate_grants(project: GovernanceProject) -> str:
                     if role.clearance >= c.clearance
                     and (not c.sensitive or role.can_access_sensitive)
                 ]
-                all_cols        = table.columns
-                restricted      = len(accessible_cols) < len(all_cols)
+                restricted_cols = [
+                    c for c in table.columns
+                    if c not in accessible_cols
+                ]
+                restricted = len(restricted_cols) > 0
 
                 if not accessible_cols:
                     lines.append(
@@ -653,19 +719,70 @@ def _generate_grants(project: GovernanceProject) -> str:
                         f"{_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
                     )
 
-                # Column-level SELECT restriction if needed
-                if tp.select and restricted:
-                    col_list = ", ".join(_q(c.name) for c in accessible_cols)
-                    lines.append(
-                        f"-- Column-level SELECT restricted by clearance/sensitivity "
-                        f"for {role.name} on {sp.name}.{tp.name}"
-                    )
-                    lines.append(
-                        f"REVOKE SELECT ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
-                    )
-                    lines.append(
-                        f"GRANT SELECT ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
-                    )
+                if restricted:
+                    col_list    = ", ".join(_q(c.name) for c in accessible_cols)
+                    is_db_owner = role.name == project.database.owner
+
+                    if is_db_owner:
+                        warnings.warn(
+                            f"Role '{role.name}' is the database owner and has restricted "
+                            f"columns on {sp.name}.{tp.name}. Column-level REVOKEs have "
+                            f"been skipped for this role to preserve shadow schema access. "
+                            f"Verify manually that this role has the access that it needs.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                    else:
+                        # SELECT — revoke table-level, re-grant column-level
+                        if tp.select:
+                            lines.append(
+                                f"-- Column-level SELECT restricted by clearance/sensitivity "
+                                f"for {role.name} on {sp.name}.{tp.name}"
+                            )
+                            lines.append(
+                                f"REVOKE SELECT ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
+                            )
+                            lines.append(
+                                f"GRANT SELECT ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
+                            )
+
+                        # UPDATE — revoke table-level, re-grant column-level
+                        if tp.update:
+                            lines.append(
+                                f"-- Column-level UPDATE restricted by clearance/sensitivity "
+                                f"for {role.name} on {sp.name}.{tp.name}"
+                            )
+                            lines.append(
+                                f"REVOKE UPDATE ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
+                            )
+                            lines.append(
+                                f"GRANT UPDATE ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
+                            )
+
+                        # REFERENCES — revoke table-level, re-grant column-level
+                        if tp.references:
+                            lines.append(
+                                f"-- Column-level REFERENCES restricted by clearance/sensitivity "
+                                f"for {role.name} on {sp.name}.{tp.name}"
+                            )
+                            lines.append(
+                                f"REVOKE REFERENCES ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
+                            )
+                            lines.append(
+                                f"GRANT REFERENCES ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
+                            )
+
+                        # INSERT — warn at creation time, no column-level enforcement
+                        if tp.insert:
+                            warnings.warn(
+                                f"Role '{role.name}' has INSERT on {sp.name}.{tp.name}, "
+                                f"which has restricted columns "
+                                f"({', '.join(c.name for c in restricted_cols)}). "
+                                f"Ensure restricted columns have DEFAULT values or are "
+                                f"nullable, otherwise inserts will fail at runtime.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
 
             lines.append("")
 
@@ -680,15 +797,53 @@ def _generate_audit(project: GovernanceProject) -> str:
     if not project.database.audit_enabled:
         return "-- Audit logging not enabled for this database.\n"
 
-    levels = ", ".join(str(level) for level in project.database.audit_logged)
+    levels  = ", ".join(str(level) for level in project.database.audit_logged)
     db_name = _escape_sql_string(project.database.name)
 
     lines = [
         f"-- Configure pgaudit for database {db_name}",
-        f"ALTER DATABASE {_q(db_name)} SET pgaudit.log = '{levels}';",
-        f"ALTER DATABASE {_q(db_name)} SET pgaudit.log_catalog = off;",
-        f"ALTER DATABASE {_q(db_name)} SET pgaudit.log_relation = on;",
-        "",
+        f"-- Additive: merges with existing pgaudit settings rather than overwriting.",
+        f"",
+        f"-- Merge pgaudit.log levels with any existing configuration",
+        f"DO $$",
+        f"DECLARE",
+        f"    _existing  text := current_setting('pgaudit.log', true);",
+        f"    _new       text := '{levels}';",
+        f"    _merged    text;",
+        f"BEGIN",
+        f"    SELECT string_agg(DISTINCT trim(val), ', ')",
+        f"    INTO _merged",
+        f"    FROM (",
+        f"        SELECT unnest(string_to_array(_existing, ',')) AS val",
+        f"        UNION",
+        f"        SELECT unnest(string_to_array(_new, ',')) AS val",
+        f"    ) t",
+        f"    WHERE trim(val) <> '';",
+        f"    EXECUTE format(",
+        f"        'ALTER DATABASE {_q(db_name)} SET pgaudit.log = ''%s''',",
+        f"        _merged",
+        f"    );",
+        f"END;",
+        f"$$ LANGUAGE plpgsql;",
+        f"",
+        f"-- log_catalog: only disable if not already explicitly enabled",
+        f"DO $$",
+        f"BEGIN",
+        f"    IF current_setting('pgaudit.log_catalog', true) <> 'on' THEN",
+        f"        EXECUTE 'ALTER DATABASE {_q(db_name)} SET pgaudit.log_catalog = off';",
+        f"    END IF;",
+        f"END;",
+        f"$$ LANGUAGE plpgsql;",
+        f"",
+        f"-- log_relation: enable if not already on",
+        f"DO $$",
+        f"BEGIN",
+        f"    IF current_setting('pgaudit.log_relation', true) <> 'on' THEN",
+        f"        EXECUTE 'ALTER DATABASE {_q(db_name)} SET pgaudit.log_relation = on';",
+        f"    END IF;",
+        f"END;",
+        f"$$ LANGUAGE plpgsql;",
+        f"",
     ]
 
     # Per-table audit overrides: disable pgaudit for tables with audit_enabled=false

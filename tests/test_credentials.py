@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import textwrap
 from pathlib import Path
-
 import pytest
 from pydantic import SecretStr
 
@@ -36,7 +35,7 @@ def write_toml(tmp_path: Path, content: str) -> Path:
 # CREDENTIALS FILE LOADING
 # =====================================================
 
-def test_load_single_profile(tmp_path):
+def test_load_single_profile(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host     = "localhost"
@@ -55,7 +54,7 @@ def test_load_single_profile(tmp_path):
     assert prof.password.get_secret_value() == "devpass"
 
 
-def test_load_multiple_profiles(tmp_path):
+def test_load_multiple_profiles(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host     = "localhost"
@@ -78,7 +77,7 @@ def test_load_multiple_profiles(tmp_path):
     assert creds.profiles["prod"].sslmode == "require"
 
 
-def test_get_existing_profile(tmp_path):
+def test_get_existing_profile(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host = "localhost"
@@ -92,7 +91,7 @@ def test_get_existing_profile(tmp_path):
     assert prof.profile == "dev"
 
 
-def test_get_missing_profile_raises(tmp_path):
+def test_get_missing_profile_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host = "localhost"
@@ -106,12 +105,12 @@ def test_get_missing_profile_raises(tmp_path):
         creds.get("ghost")
 
 
-def test_load_missing_file_raises():
+def test_load_missing_file_raises() -> None:
     with pytest.raises(FileNotFoundError, match="not found"):
         CredentialsFile.load(Path("/nonexistent/credentials.toml"))
 
 
-def test_invalid_port_raises(tmp_path):
+def test_invalid_port_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host = "localhost"
@@ -124,8 +123,7 @@ def test_invalid_port_raises(tmp_path):
         CredentialsFile.load(p)
 
 
-def test_missing_required_field_raises(tmp_path):
-    # username is required
+def test_missing_required_field_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
         host = "localhost"
@@ -137,7 +135,7 @@ def test_missing_required_field_raises(tmp_path):
         CredentialsFile.load(p)
 
 
-def test_dsn_does_not_expose_password():
+def test_dsn_does_not_expose_password() -> None:
     prof = ConnectionProfile(
         profile="dev", host="localhost", port=5432,
         database="db", username="user", password=SecretStr("s3cr3t"),
@@ -147,7 +145,7 @@ def test_dsn_does_not_expose_password():
     assert "s3cr3t" not in prof.safe_repr()
 
 
-def test_safe_repr_contains_key_fields():
+def test_safe_repr_contains_key_fields() -> None:
     prof = ConnectionProfile(
         profile="dev", host="pg.example.com", port=5433,
         database="mydb", username="alice", password=SecretStr("pw"),
@@ -164,7 +162,7 @@ def test_safe_repr_contains_key_fields():
 # MOCK CONNECTION TESTS (no live DB required)
 # =====================================================
 
-def test_connection_result_str_success():
+def test_connection_result_str_success() -> None:
     r = ConnectionResult(
         profile="dev", success=True,
         server_version="16.2", db_user="alice",
@@ -175,7 +173,7 @@ def test_connection_result_str_success():
     assert "alice" in s
 
 
-def test_connection_result_str_failure():
+def test_connection_result_str_failure() -> None:
     r = ConnectionResult(
         profile="prod", success=False,
         error="Connection refused",
@@ -185,7 +183,7 @@ def test_connection_result_str_failure():
     assert "Connection refused" in s
 
 
-def test_bad_host_returns_failed_result():
+def test_bad_host_returns_failed_result() -> None:
     """A profile pointing at a nonexistent host should return success=False, not raise."""
     prof = ConnectionProfile(
         profile="bad",
@@ -228,7 +226,7 @@ def _integration_profile() -> ConnectionProfile | None:
 
 
 @pytest.mark.integration
-def test_live_connection_succeeds():
+def test_live_connection_succeeds() -> None:
     prof = _integration_profile()
     if prof is None:
         pytest.skip("TARKIN_TEST_* env vars not set.")
@@ -240,7 +238,7 @@ def test_live_connection_succeeds():
 
 
 @pytest.mark.integration
-def test_live_connection_db_user_matches_profile():
+def test_live_connection_db_user_matches_profile() -> None:
     prof = _integration_profile()
     if prof is None:
         pytest.skip("TARKIN_TEST_* env vars not set.")

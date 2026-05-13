@@ -2,8 +2,9 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 from typing import Optional
+
+import sqlalchemy
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
-from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 
@@ -49,9 +50,9 @@ class ConnectionProfile(BaseModel):
             f"?sslmode={self.sslmode}"
         )
 
-    def engine(self):
+    def engine(self) -> sqlalchemy.Engine:
         """Return a SQLAlchemy engine for this profile."""
-        return create_engine(self.dsn(), pool_pre_ping=True)
+        return sqlalchemy.create_engine(self.dsn(), pool_pre_ping=True)
 
     def safe_repr(self) -> str:
         """Human-readable representation with password redacted."""
@@ -148,7 +149,7 @@ def check_connection(profile: ConnectionProfile) -> ConnectionResult:
     try:
         engine = profile.engine()
         with engine.connect() as conn:
-            row = conn.execute(text(
+            row = conn.execute(sqlalchemy.text(
                 "SELECT current_user, version()"
             )).fetchone()
             if row:

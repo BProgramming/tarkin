@@ -78,6 +78,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
             database=profile.database,
             audit_enabled=bool(audit_enabled),
             profile=profile.profile,
+            owner=profile.username,
         ),
         schemas=schemas,
         roles=roles,

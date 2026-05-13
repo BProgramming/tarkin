@@ -19,10 +19,7 @@ OUT_DIR = Path("out")
 # ATTACH ENTRY POINT
 # =========================================================
 
-def attach(
-    profile: ConnectionProfile,
-    build_path: Path | None = None,
-) -> None:
+def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
     """
     Apply a Tarkin model to a live database.
 

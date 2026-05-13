@@ -107,6 +107,7 @@ def _build_mock_project() -> GovernanceProject:
             port=5432,
             database="testdb",
             profile="test",
+            owner="test_user",
         ),
         schemas=[schema],
         roles=[role],

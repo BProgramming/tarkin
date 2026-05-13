@@ -65,18 +65,20 @@ class Serializer:
     @classmethod
     def _serialize_database(cls, db: DatabaseConfig) -> CommentedMap:
         m = CommentedMap()
-        m["name"] = db.name
+        m["name"]             = db.name
         if db.description:
-            m["description"] = db.description
-        m["engine"]        = _val(db.engine)
-        m["host"]          = db.host
-        m["port"]          = db.port
-        m["database"]      = db.database
-        m["audit_enabled"] = db.audit_enabled
+            m["description"]  = db.description
+        m["engine"]           = _val(db.engine)
+        m["host"]             = db.host
+        m["port"]             = db.port
+        m["database"]         = db.database
+        m["audit_enabled"]    = db.audit_enabled
         if db.audit_enabled:
             m["audit_logged"] = [_val(level) for level in db.audit_logged]
         if db.profile:
-            m["profile"] = db.profile
+            m["profile"]      = db.profile
+        if db.owner:
+            m["owner"]         = db.owner
         return m
 
     # =====================================================

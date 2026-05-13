@@ -10,10 +10,10 @@ from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
     SchemaPermissionConfig, RoleConfig,
-    MaskingStrategy, FullMaskConfig, PartialMaskConfig, HashMaskConfig,
+    MaskingStrategy, FullMaskConfig,
     EmailMaskConfig, AuditLogLevel,
 )
-from tests.fixtures import (
+from .fixtures import (
     build_minimal_project, build_cross_schema_project, build_clearance_project,
     build_masking_project,
     make_schema, make_column, make_role, make_database,
@@ -95,7 +95,6 @@ def test_audit_enabled_with_levels_is_valid() -> None:
 
 
 def test_audit_disabled_with_empty_audit_logged_is_valid() -> None:
-    # audit_logged only matters when audit_enabled=True
     db = DatabaseConfig(audit_enabled=False, audit_logged=[])
     proj = GovernanceProject(
         database=db,

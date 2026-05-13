@@ -3,7 +3,10 @@ Serialize → YAML string → YamlLoader round-trip tests.
 """
 from __future__ import annotations
 
-from tarkin.model import GovernanceProject, MaskingStrategy, PartialMaskConfig, PartialMaskVisibleSide
+from tarkin.model import (
+    DatabaseConfig, AuditLogLevel, GovernanceProject,
+    MaskingStrategy, PartialMaskConfig, PartialMaskVisibleSide,
+)
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
 from tarkin.validate import SemanticValidator
@@ -100,7 +103,6 @@ def test_masking_project_roundtrips() -> None:
 
 
 def test_audit_config_roundtrips() -> None:
-    from tarkin.model import DatabaseConfig, AuditLogLevel
     proj = build_minimal_project()
     proj.database = DatabaseConfig(
         name="testdb",

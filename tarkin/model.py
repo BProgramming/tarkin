@@ -171,6 +171,7 @@ class DatabaseConfig(TarkinBaseModel):
     database: str            = "postgres"
     engine:   DatabaseEngine = DatabaseEngine.POSTGRES
     profile:  Optional[str]  = None
+    owner:     Optional[str]  = None
 
 
 # =========================================================
@@ -179,10 +180,10 @@ class DatabaseConfig(TarkinBaseModel):
 
 
 class ColumnConfig(TarkinBaseModel):
-    name:        str          = "default_column"
-    clearance:   int          = 0
-    description: Optional[str] = None
-    audit_enabled: bool       = True
+    name:          str           = "default_column"
+    clearance:     int           = 0
+    description:   Optional[str] = None
+    audit_enabled: bool          = True
 
     type:    str           = "str"
     default: Optional[str] = None
@@ -195,10 +196,10 @@ class ColumnConfig(TarkinBaseModel):
     sensitive: bool = False
     encrypted: bool = False
 
-    masking_strategy: MaskingStrategy      = MaskingStrategy.NONE
+    masking_strategy: MaskingStrategy         = MaskingStrategy.NONE
     mask_config:      Optional[AnyMaskConfig] = None
 
-    generated_expression: Optional[str]            = None
+    generated_expression: Optional[str]             = None
     generated_storage:    GeneratedColumnStorage    = GeneratedColumnStorage.STORED
 
     @property
@@ -212,11 +213,11 @@ class ColumnConfig(TarkinBaseModel):
 
 
 class IndexConfig(TarkinBaseModel):
-    name:           str       = "default_index"
+    name:           str        = "default_index"
     columns:        list[str]
-    index_type:     IndexType = IndexType.BTREE
-    unique:         bool      = False
-    primary_key:    bool      = False
+    index_type:     IndexType  = IndexType.BTREE
+    unique:         bool       = False
+    primary_key:    bool       = False
     partial_filter: str | None = None
 
 
@@ -239,10 +240,10 @@ class ForeignKeyConfig(TarkinBaseModel):
 
 
 class TableConfig(TarkinBaseModel):
-    name:          str          = "default_table"
-    clearance:     int          = 0
+    name:          str           = "default_table"
+    clearance:     int           = 0
     description:   Optional[str] = None
-    audit_enabled: bool         = True
+    audit_enabled: bool          = True
 
     columns:      list[ColumnConfig]      = Field(default_factory=list)
     indexes:      list[IndexConfig]       = Field(default_factory=list)
@@ -267,28 +268,28 @@ class TableConfig(TarkinBaseModel):
 
 
 class SchemaConfig(TarkinBaseModel):
-    name:          str          = "default_schema"
-    clearance:     int          = 0
+    name:          str           = "default_schema"
+    clearance:     int           = 0
     description:   Optional[str] = None
-    audit_enabled: bool         = True
+    audit_enabled: bool          = True
 
-    aggregates:         list[str] = Field(default_factory=list)  # not implemented
-    collations:         list[str] = Field(default_factory=list)
-    domains:            list[str] = Field(default_factory=list)
-    fts_configurations: list[str] = Field(default_factory=list)  # not implemented
-    fts_dictionaries:   list[str] = Field(default_factory=list)  # not implemented
-    fts_parsers:        list[str] = Field(default_factory=list)  # not implemented
-    fts_templates:      list[str] = Field(default_factory=list)  # not implemented
-    foreign_tables:     list[str] = Field(default_factory=list)  # not implemented
-    functions:          list[str] = Field(default_factory=list)
-    materialized_views: list[str] = Field(default_factory=list)
-    operators:          list[str] = Field(default_factory=list)  # not implemented
-    procedures:         list[str] = Field(default_factory=list)  # not implemented
-    sequences:          list[str] = Field(default_factory=list)
+    aggregates:         list[str]         = Field(default_factory=list)  # not implemented
+    collations:         list[str]         = Field(default_factory=list)
+    domains:            list[str]         = Field(default_factory=list)
+    fts_configurations: list[str]         = Field(default_factory=list)  # not implemented
+    fts_dictionaries:   list[str]         = Field(default_factory=list)  # not implemented
+    fts_parsers:        list[str]         = Field(default_factory=list)  # not implemented
+    fts_templates:      list[str]         = Field(default_factory=list)  # not implemented
+    foreign_tables:     list[str]         = Field(default_factory=list)  # not implemented
+    functions:          list[str]         = Field(default_factory=list)
+    materialized_views: list[str]         = Field(default_factory=list)
+    operators:          list[str]         = Field(default_factory=list)  # not implemented
+    procedures:         list[str]         = Field(default_factory=list)  # not implemented
+    sequences:          list[str]         = Field(default_factory=list)
     tables:             list[TableConfig] = Field(default_factory=list)
-    trigger_functions:  list[str] = Field(default_factory=list)
-    types:              list[str] = Field(default_factory=list)
-    views:              list[str] = Field(default_factory=list)
+    trigger_functions:  list[str]         = Field(default_factory=list)
+    types:              list[str]         = Field(default_factory=list)
+    views:              list[str]         = Field(default_factory=list)
 
     @property
     def clearance_min(self) -> int:
@@ -321,10 +322,10 @@ class TablePermissionConfig(TarkinBaseModel):
 
 
 class SchemaPermissionConfig(TarkinBaseModel):
-    name:   str  = "-"
+    name:   str                         = "-"
     tables: list[TablePermissionConfig] = Field(default_factory=list)
-    usage:  bool = True
-    create: bool = False
+    usage:  bool                        = True
+    create: bool                        = False
 
 
 # =========================================================
@@ -333,8 +334,8 @@ class SchemaPermissionConfig(TarkinBaseModel):
 
 
 class RoleConfig(TarkinBaseModel):
-    name:        str          = "default_role"
-    clearance:   int          = 0
+    name:        str           = "default_role"
+    clearance:   int           = 0
     description: Optional[str] = None
 
     can_login:            bool = False
@@ -343,8 +344,8 @@ class RoleConfig(TarkinBaseModel):
     can_maintain:         bool = False
     can_access_sensitive: bool = False
 
-    active:    bool       = True
-    member_of: list[str]  = Field(default_factory=list)
+    active:    bool                         = True
+    member_of: list[str]                    = Field(default_factory=list)
     on:        list[SchemaPermissionConfig] = Field(default_factory=list)
 
 

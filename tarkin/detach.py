@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .credentials import ConnectionProfile
 from .inspect import inspect_database
+from .model import GovernanceProject
 
 
 # =========================================================
@@ -111,7 +112,7 @@ def _confirm_drop_versioning(versioned_tables: list) -> None:
 # SQL GENERATION
 # =========================================================
 
-def _generate_detach_sql(current, drop_versioning: bool) -> str:
+def _generate_detach_sql(current: GovernanceProject, drop_versioning: bool) -> str:
     tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]
     lines = [
         "-- Tarkin detach",
