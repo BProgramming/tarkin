@@ -4,6 +4,9 @@ from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
     TablePermissionConfig, SchemaPermissionConfig, RoleConfig,
+    MaskingStrategy, FullMaskConfig, PartialMaskConfig, HashMaskConfig,
+    EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
+    IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
 )
 
 
@@ -41,12 +44,7 @@ def make_role(
     return RoleConfig(name=name, can_login=can_login, active=True, on=[perm], **kwargs)
 
 
-
 def build_minimal_project() -> GovernanceProject:
-    """
-    Smallest valid GovernanceProject: one schema, one table, one column,
-    one role, one active user.
-    """
     return GovernanceProject(
         database=make_database(),
         schemas=[make_schema()],
@@ -55,10 +53,6 @@ def build_minimal_project() -> GovernanceProject:
 
 
 def build_cross_schema_project() -> GovernanceProject:
-    """
-    Two schemas with a cross-schema foreign key.
-    Useful for testing FK validation logic.
-    """
     orders_col = make_column(name="user_id", type="bigint")
     fk = ForeignKeyConfig(
         name="fk_orders_user_id",
@@ -67,12 +61,11 @@ def build_cross_schema_project() -> GovernanceProject:
         referenced_table="users",
         referenced_column="id",
     )
-    orders_table = TableConfig(name="orders", columns=[orders_col], foreign_keys=[fk])
+    orders_table  = TableConfig(name="orders", columns=[orders_col], foreign_keys=[fk])
     orders_schema = SchemaConfig(name="sales", tables=[orders_table])
-
     public_schema = make_schema(name="public")
 
-    roles = RoleConfig(
+    role = RoleConfig(
         name="reader",
         can_login=True,
         on=[
@@ -85,15 +78,11 @@ def build_cross_schema_project() -> GovernanceProject:
     return GovernanceProject(
         database=make_database(),
         schemas=[public_schema, orders_schema],
-        roles=[roles],
+        roles=[role],
     )
 
 
 def build_clearance_project() -> GovernanceProject:
-    """
-    Project with clearance levels set on columns and roles.
-    Useful for testing clearance validation.
-    """
     normal_col = make_column(name="id")
     phi_col = ColumnConfig(
         name="ssn",
@@ -102,7 +91,7 @@ def build_clearance_project() -> GovernanceProject:
         sensitive=True,
         encrypted=True,
     )
-    table = TableConfig(name="patients", columns=[normal_col, phi_col])
+    table  = TableConfig(name="patients", columns=[normal_col, phi_col])
     schema = SchemaConfig(name="clinical", clearance=0, tables=[table])
 
     low_role = make_role(name="basic_reader", schema="clinical")
@@ -122,4 +111,71 @@ def build_clearance_project() -> GovernanceProject:
         database=make_database(),
         schemas=[schema],
         roles=[low_role, high_role],
+    )
+
+
+def build_masking_project() -> GovernanceProject:
+    """Project exercising all masking strategies."""
+    cols = [
+        make_column(name="id"),
+        ColumnConfig(
+            name="full_name",
+            type="text",
+            masking_strategy=MaskingStrategy.FULL,
+            mask_config=FullMaskConfig(mask_char="*"),
+        ),
+        ColumnConfig(
+            name="partial_code",
+            type="text",
+            masking_strategy=MaskingStrategy.PARTIAL,
+            mask_config=PartialMaskConfig(visible_length=4, visible_side=PartialMaskVisibleSide.RIGHT),
+        ),
+        ColumnConfig(
+            name="hashed_value",
+            type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(),
+        ),
+        ColumnConfig(
+            name="email",
+            type="text",
+            masking_strategy=MaskingStrategy.EMAIL,
+            mask_config=EmailMaskConfig(),
+        ),
+        ColumnConfig(
+            name="phone",
+            type="text",
+            masking_strategy=MaskingStrategy.PHONE,
+            mask_config=PhoneMaskConfig(visible_digits=4),
+        ),
+        ColumnConfig(
+            name="credit_card",
+            type="text",
+            masking_strategy=MaskingStrategy.CREDIT_CARD,
+            mask_config=CreditCardMaskConfig(),
+        ),
+        ColumnConfig(
+            name="ip_address",
+            type="text",
+            masking_strategy=MaskingStrategy.IP_ADDRESS,
+            mask_config=IpAddressMaskConfig(visible_octets=2),
+        ),
+        ColumnConfig(
+            name="display_name",
+            type="text",
+            masking_strategy=MaskingStrategy.NAME,
+            mask_config=NameMaskConfig(),
+        ),
+    ]
+
+    table  = TableConfig(name="contacts", columns=cols)
+    schema = SchemaConfig(name="public", tables=[table])
+    role   = make_role(name="reader", schema="public")
+    # Override table permission to point at contacts
+    role.on[0].tables[0].name = "contacts"
+
+    return GovernanceProject(
+        database=make_database(),
+        schemas=[schema],
+        roles=[role],
     )

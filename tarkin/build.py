@@ -37,9 +37,10 @@ def build(
 
     1. Re-inspect the live database to capture current state
     2. Verify no tk_ schemas exist (would indicate a prior build)
-    3. Generate SQL
-    4. Write build artifact (zip containing JSON metadata + SQL)
-    5. Return path to the zip
+    3. Verify pgaudit is available if audit_enabled=True
+    4. Generate SQL
+    5. Write build artifact (zip containing JSON metadata + SQL)
+    6. Return path to the zip
 
     Raises BuildError on any failure.
     """
@@ -56,12 +57,15 @@ def build(
     # Step 2 — check for existing Tarkin build
     _check_no_existing_build(current)
 
-    # Step 3 — generate SQL
+    # Step 3 — check pgaudit if required
+    _check_audit_requirements(project, current)
+
+    # Step 4 — generate SQL
     print("Generating SQL...", end="\r")
     sql = generate_sql(project, current)
     print("Generating SQL... Done.")
 
-    # Step 4 — write artifact
+    # Step 5 — write artifact
     print("Building artifact...", end="\r")
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     zip_path  = out / f"tarkin_build_{timestamp}.zip"
@@ -78,13 +82,23 @@ def build(
 # =========================================================
 
 def _check_no_existing_build(current: GovernanceProject) -> None:
-    """Fail if any tk_ schemas exist — indicates a prior Tarkin build."""
     tk_schemas = [s for s in current.schemas if s.name.casefold().startswith("tk_")]
     if tk_schemas:
         names = ", ".join(s.name for s in tk_schemas)
         raise BuildError(
             f"Existing Tarkin shadow schemas detected: {names}. "
             f"Run 'tarkin detach' to remove the existing build before building again."
+        )
+
+
+def _check_audit_requirements(project: GovernanceProject, current: GovernanceProject) -> None:
+    """Fail if the YAML requires audit but the live database doesn't have pgaudit preloaded."""
+    if project.database.audit_enabled and not current.database.audit_enabled:
+        raise BuildError(
+            "The governance YAML requires audit_enabled=true, but pgaudit is not "
+            "installed or not preloaded on this database.\n"
+            "Install postgresql-pgaudit, add 'pgaudit' to shared_preload_libraries "
+            "in postgresql.conf, and restart PostgreSQL before building."
         )
 
 
@@ -98,16 +112,18 @@ def _build_metadata(
     profile: ConnectionProfile,
 ) -> dict:
     return {
-        "tarkin_version":  pkg_version("tarkin"),
-        "built_at":        datetime.now(UTC).isoformat(),
-        "profile":         profile.profile,
-        "database":        profile.database,
-        "host":            profile.host,
-        "port":            profile.port,
-        "yaml_checksum":   _project_checksum(project),
-        "db_checksum":     _project_checksum(current),
-        "schemas":         [s.name for s in project.schemas],
-        "shadow_schemas":  [f"tk_{s.name}" for s in project.schemas],
+        "tarkin_version": pkg_version("tarkin"),
+        "built_at":       datetime.now(UTC).isoformat(),
+        "profile":        profile.profile,
+        "database":       profile.database,
+        "host":           profile.host,
+        "port":           profile.port,
+        "yaml_checksum":  _project_checksum(project),
+        "db_checksum":    _project_checksum(current),
+        "schemas":        [s.name for s in project.schemas],
+        "shadow_schemas": [f"tk_{s.name}" for s in project.schemas],
+        "audit_enabled":  project.database.audit_enabled,
+        "audit_logged":   [str(level) for level in project.database.audit_logged],
     }
 
 

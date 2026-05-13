@@ -5,8 +5,13 @@ from ruamel.yaml import YAML
 from .model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, ForeignKeyConfig,
-    TablePermissionConfig, SchemaPermissionConfig, RoleConfig, DatabaseEngine, MaskingStrategy,
-    GeneratedColumnStorage, IndexType,
+    TablePermissionConfig, SchemaPermissionConfig, RoleConfig,
+    DatabaseEngine, MaskingStrategy, GeneratedColumnStorage, IndexType,
+    AuditLogLevel,
+    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
+    EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
+    IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
+    AnyMaskConfig,
 )
 
 
@@ -16,12 +21,55 @@ def _yaml() -> YAML:
     return y
 
 
+def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
+    """Parse a mask_config dict into the appropriate MaskConfig subclass."""
+    if not d:
+        return None
+
+    cfg_type    = d.get("type", "full")
+    hide_null   = d.get("hide_null", False)
+    mask_char   = d.get("mask_char", "X")
+
+    if cfg_type == "full":
+        return FullMaskConfig(hide_null=hide_null, mask_char=mask_char)
+    elif cfg_type == "partial":
+        return PartialMaskConfig(
+            hide_null=hide_null,
+            mask_char=mask_char,
+            visible_length=d.get("visible_length", 4),
+            visible_side=PartialMaskVisibleSide(d.get("visible_side", "right")),
+        )
+    elif cfg_type == "hash":
+        return HashMaskConfig(hide_null=hide_null)
+    elif cfg_type == "email":
+        return EmailMaskConfig(hide_null=hide_null, mask_char=mask_char)
+    elif cfg_type == "phone":
+        return PhoneMaskConfig(
+            hide_null=hide_null,
+            mask_char=mask_char,
+            visible_digits=d.get("visible_digits", 4),
+        )
+    elif cfg_type == "credit_card":
+        return CreditCardMaskConfig(hide_null=hide_null, mask_char=mask_char)
+    elif cfg_type == "ip_address":
+        return IpAddressMaskConfig(
+            hide_null=hide_null,
+            mask_char=mask_char,
+            visible_octets=d.get("visible_octets", 2),
+        )
+    elif cfg_type == "name":
+        return NameMaskConfig(
+            hide_null=hide_null,
+            mask_char=d.get("mask_char", "*"),
+        )
+    else:
+        return None
+
+
 class YamlLoader:
     """
     Parse a Tarkin governance YAML file into a GovernanceProject.
-
-    The YAML schema mirrors the structure produced by Serializer.to_yaml_string(),
-    so load(serialize(project)) round-trips cleanly.
+    load(serialize(project)) round-trips cleanly.
     """
 
     @classmethod
@@ -33,7 +81,6 @@ class YamlLoader:
 
     @classmethod
     def loads(cls, text: str) -> GovernanceProject | None:
-        """Parse from a YAML string (useful for testing)."""
         y = _yaml()
         doc = y.load(text)
         return cls._parse_project(doc, source="<string>")
@@ -43,17 +90,16 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_project(cls, doc: dict, source: Path | str | None = None) -> GovernanceProject | None:
+    def _parse_project(cls, doc: dict, source=None) -> GovernanceProject | None:
         if not source:
-            raise ValueError(f"No YAML to load.")
-        elif "database" not in doc:
+            raise ValueError("No YAML to load.")
+        if "database" not in doc:
             raise ValueError(f"Tarkin YAML at {source!r} is missing required key 'database'.")
-        else:
-            return GovernanceProject(
-                database=cls._parse_database(doc["database"]),
-                schemas=[cls._parse_schema(s) for s in doc.get("schemas", [])],
-                roles=[cls._parse_role(r) for r in doc.get("roles", [])],
-            )
+        return GovernanceProject(
+            database=cls._parse_database(doc["database"]),
+            schemas=[cls._parse_schema(s) for s in doc.get("schemas", [])],
+            roles=[cls._parse_role(r) for r in doc.get("roles", [])],
+        )
 
     # =====================================================
     # DATABASE
@@ -61,10 +107,12 @@ class YamlLoader:
 
     @classmethod
     def _parse_database(cls, d: dict) -> DatabaseConfig:
+        raw_logged = d.get("audit_logged", ["ddl", "write"])
         return DatabaseConfig(
             name=d.get("name", "default_database"),
             description=d.get("description"),
-            audit_enabled=d.get("audit_enabled", True),
+            audit_enabled=d.get("audit_enabled", False),
+            audit_logged=[AuditLogLevel(v) for v in raw_logged],
             host=d.get("host", "localhost"),
             port=d.get("port", 5432),
             database=d.get("database", "postgres"),
@@ -116,6 +164,9 @@ class YamlLoader:
 
     @classmethod
     def _parse_column(cls, d: dict) -> ColumnConfig:
+        raw_mask = d.get("mask_config")
+        mask_config = _parse_mask_config(raw_mask) if raw_mask else None
+
         return ColumnConfig(
             name=d.get("name", "default_column"),
             description=d.get("description"),
@@ -130,6 +181,7 @@ class YamlLoader:
             sensitive=d.get("sensitive", False),
             encrypted=d.get("encrypted", False),
             masking_strategy=MaskingStrategy(d.get("masking_strategy", "none")),
+            mask_config=mask_config,
             generated_expression=d.get("generated_expression"),
             generated_storage=GeneratedColumnStorage(d.get("generated_storage", "stored")),
         )
