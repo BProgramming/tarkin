@@ -164,7 +164,7 @@ class YamlLoader:
 
     @classmethod
     def _parse_column(cls, d: dict) -> ColumnConfig:
-        raw_mask = d.get("mask_config")
+        raw_mask = d.get("mask_config") or {}
         mask_config = _parse_mask_config(raw_mask) if raw_mask else None
 
         return ColumnConfig(

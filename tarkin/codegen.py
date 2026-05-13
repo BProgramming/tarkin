@@ -5,8 +5,8 @@ import hashlib
 
 from .model import (
     GovernanceProject, TableConfig, ColumnConfig,
-    MaskingStrategy, MaskConfig,
-    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
+    MaskingStrategy,
+    FullMaskConfig, PartialMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig,
     PartialMaskVisibleSide,
@@ -312,19 +312,11 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         side      = cfg.visible_side
         hide_null = cfg.hide_null
         if side == PartialMaskVisibleSide.RIGHT:
-            # Show last N chars, mask the rest
-            expr = (
-                f"regexp_replace({ref}::text, "
-                f"'^.{{1,{chr(125)}}}'||'(?=.{{{length}}}$)', "  # leave last N
-                f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length})), 'g')"
-            )
-            # Simpler and more reliable approach:
             expr = (
                 f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length})) || "
                 f"right({ref}::text, {length})"
             )
         else:
-            # Show first N chars, mask the rest
             expr = (
                 f"left({ref}::text, {length}) || "
                 f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length}))"
@@ -334,7 +326,6 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
     elif strategy == MaskingStrategy.HASH:
         hide_null = cfg.hide_null if cfg else False
         expr = f"hashtextextended({ref}::text, 0)::text"
-        # Emit warning comment — also warned at build time
         warning = f"/* HASH MASK: not encryption, see tarkin docs */"
         return _wrap_null(f"{warning} {expr}", hide_null)
 

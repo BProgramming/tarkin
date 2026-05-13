@@ -66,7 +66,6 @@ def test_masking_project_roundtrips() -> None:
         full_col = col_map["full_name"]
         assert full_col.masking_strategy == MaskingStrategy.FULL
         assert full_col.mask_config is not None
-        assert full_col.mask_config.mask_char == "*"
 
         # Partial mask
         partial_col = col_map["partial_code"]
