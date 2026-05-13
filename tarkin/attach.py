@@ -57,11 +57,16 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
     print("Verifying database state... Done.")
 
     # Step 4 — execute SQL
+    # attach.py
     print("Applying build to database...", end="\r")
     try:
         engine = profile.engine()
-        with engine.connect() as conn:
-            conn.connection.execute(sql)
+        raw = engine.raw_connection()
+        try:
+            setattr(raw, "autocommit", True) # This is a hack to avoid a pycharm warning on a generic type
+            raw.execute(sql)
+        finally:
+            raw.close()
         engine.dispose()
     except Exception as exc:
         raise AttachError(

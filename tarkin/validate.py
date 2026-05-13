@@ -106,6 +106,11 @@ class SemanticValidator:
                 pk_indexes = [i for i in table.indexes if i.primary_key]
                 if len(pk_indexes) > 1:
                     errors.append(f"Table '{schema.name}.{table.name}' has more than one primary key index.")
+                if not pk_indexes:
+                    errors.append(
+                        f"Table '{schema.name}.{table.name}' has no primary key defined. "
+                        f"Tarkin requires a primary key on all tables to generate safe trigger functions."
+                    )
         return "\n".join(errors) if errors else None
 
     # =====================================================

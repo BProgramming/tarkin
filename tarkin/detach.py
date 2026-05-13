@@ -73,11 +73,16 @@ def detach(
     sql = _generate_detach_sql(current, drop_versioning)
     print("Generating rollback SQL... Done.")
 
+    # detach.py
     print("Removing Tarkin model from database...", end="\r")
     try:
         engine = profile.engine()
-        with engine.connect() as conn:
-            conn.connection.execute(sql)
+        raw = engine.raw_connection()
+        try:
+            setattr(raw, "autocommit", True) # This is a hack to avoid a pycharm warning on a generic type
+            raw.execute(sql)
+        finally:
+            raw.close()
         engine.dispose()
     except Exception as exc:
         raise DetachError(

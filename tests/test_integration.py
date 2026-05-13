@@ -456,9 +456,8 @@ class TestLiveInspect:
         prof = _integration_profile()
         assert prof is not None
 
-        detach(prof, keep_versioning=False, drop_versioning=False, no_warn=False)
+        detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
-        # Verify tk_ schemas are gone
         post_detach = inspect_database(prof)
         tk_schemas = [s for s in post_detach.schemas if s.name.startswith("tk_")]
         assert not tk_schemas, f"tk_ schemas still present after detach: {tk_schemas}"

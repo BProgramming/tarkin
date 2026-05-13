@@ -54,6 +54,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject) -> str:
 def _generate_meta_schema() -> str:
     return """
 CREATE SCHEMA IF NOT EXISTS __META__;
+REVOKE ALL ON SCHEMA __META__ FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA __META__ FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_builds (
     build_id        bigserial PRIMARY KEY,
@@ -592,7 +594,11 @@ def _attach_trigger(schema_name: str, table_name: str) -> str:
 def _pk_filter(table: TableConfig) -> str:
     pk_cols = [col for idx in table.indexes if idx.primary_key for col in idx.columns]
     if not pk_cols:
-        pk_cols = [c.name for c in table.columns]
+        raise ValueError(
+            f"Table '{table.name}' has no primary key defined. "
+            f"Tarkin requires a primary key to generate safe trigger functions. "
+            f"This should have been caught by validation — please file a bug."
+        )
     return " AND ".join(f"{_q(col)} = NEW.{_q(col)}" for col in pk_cols)
 
 
