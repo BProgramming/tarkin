@@ -1,14 +1,13 @@
 [project]
 name = "tarkin"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Governance compiler for PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 authors = [
-    { name = "Brent Pollard" }
+    { name = "Brent Pollard", email = "brentjpollard@gmail.com" }
 ]
-
 dependencies = [
     "typer",
     "pydantic",
@@ -21,8 +20,13 @@ dependencies = [
 tarkin = "tarkin.cli:app"
 
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+
+[tool.setuptools.packages.find]
+include = ["tarkin*"]
 
 [tool.pytest.ini_options]
 markers = [
