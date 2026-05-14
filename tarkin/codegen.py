@@ -26,6 +26,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         "BEGIN;\n",
         _section("HMAC KEY"),
         _generate_hmac_key(project, profile),
+        _section("EXTENSIONS"),
+        _generate_extensions(project),
         _section("META SCHEMA"),
         _generate_meta_schema(),
         _section("SHADOW SCHEMAS"),
@@ -247,6 +249,28 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
             lines.append("")
 
     return "\n".join(lines)
+
+
+# =========================================================
+# EXTENSIONS
+# =========================================================
+
+
+def _generate_extensions(project: GovernanceProject) -> str:
+    from .model import HashMaskConfig, HashAlgorithm
+    needs_pgcrypto = any(
+        isinstance(col.mask_config, HashMaskConfig)
+        and col.mask_config.algorithm in (
+            HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256
+        )
+        for schema in project.schemas
+        for table in schema.tables
+        for col in table.columns
+    )
+    if not needs_pgcrypto:
+        return "-- No pgcrypto-dependent features in use.\n"
+
+    return "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n"
 
 
 # =========================================================
