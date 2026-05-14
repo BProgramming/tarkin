@@ -4,10 +4,11 @@ from importlib.metadata import version as pkg_version
 import hashlib
 import warnings
 
+from .credentials import ConnectionProfile
 from .model import (
     GovernanceProject, TableConfig, ColumnConfig,
-    MaskingStrategy, MaskConfig,
-    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
+    MaskingStrategy, MaskConfig, FullMaskConfig,
+    PartialMaskConfig, HashAlgorithm, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig,
     PartialMaskVisibleSide,
@@ -18,11 +19,13 @@ from .model import (
 # ENTRY POINT
 # =========================================================
 
-def generate_sql(project: GovernanceProject, current: GovernanceProject) -> str:
+def generate_sql(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> str:
     sections = [
         _section("TARKIN BUILD", f"Generated at {datetime.now(UTC).isoformat()}"),
         _section("TRANSACTION START"),
         "BEGIN;\n",
+        _section("HMAC KEY"),
+        _generate_hmac_key(project, profile),
         _section("META SCHEMA"),
         _generate_meta_schema(),
         _section("SHADOW SCHEMAS"),
@@ -111,7 +114,6 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_columns (
     immutable            bool NOT NULL DEFAULT false,
     versioned            bool NOT NULL DEFAULT false,
     sensitive            bool NOT NULL DEFAULT false,
-    encrypted            bool NOT NULL DEFAULT false,
     masking_strategy     text NOT NULL DEFAULT 'none',
     default_value        text,
     generated_expression text,
@@ -282,6 +284,36 @@ def _generate_views(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
+def _generate_hmac_key(project: GovernanceProject, profile: ConnectionProfile) -> str:
+    from .model import HashMaskConfig, HashAlgorithm
+    needs_hmac = any(
+        isinstance(col.mask_config, HashMaskConfig)
+        and col.mask_config.algorithm == HashAlgorithm.HMAC256
+        for schema in project.schemas
+        for table in schema.tables
+        for col in table.columns
+    )
+    if not needs_hmac:
+        return "-- No HMAC256 columns, skipping hmac_key configuration.\n"
+
+    if not profile.hmac_key:
+        raise ValueError(
+            "One or more columns use HMAC256 hashing, but no hmac_key is set "
+            "in the credentials profile. Add 'hmac_key = \"your-secret\"' to "
+            f"the [{profile.profile}] section of your credentials.toml."
+        )
+
+    key = _escape_sql_string(profile.hmac_key.get_secret_value())
+    db_name = _escape_sql_string(project.database.name)
+    return (
+        f"-- Set HMAC key for HMAC256 masking.\n"
+        f"-- This value is stored as a database-level setting and is visible to superusers.\n"
+        f"-- Treat it as a secret and rotate it via credentials.toml if compromised.\n"
+        f"-- WARNING: Rotating the key will invalidate all existing HMAC-hashed values.\n"
+        f"ALTER DATABASE {_q(db_name)} SET tarkin.hmac_key = '{key}';\n"
+    )
+
+
 def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
     """
     Return a SQL expression for a column in a view, applying masking if configured.
@@ -342,15 +374,50 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
                 f"got {type(cfg).__name__}"
             )
         hide_null = cfg.hide_null
-        warnings.warn(
-            f"Column '{col.name}': masking strategy 'hash' is not encryption. "
-            f"Hash values may be reversible given knowledge of the source data. "
-            f"Do not rely on hashing alone for sensitive data protection. "
-            f"See Tarkin docs for guidance.",
-            UserWarning,
-            stacklevel=2,
-        )
-        expr = f"hashtextextended({ref}::text, 0)::text"
+        algorithm = cfg.algorithm
+
+        if algorithm == HashAlgorithm.XXHASH:
+            warnings.warn(
+                f"Column '{col.name}': hash algorithm 'xxhash' is non-cryptographic. "
+                f"Hash values are trivially reversible given knowledge of the source data distribution. "
+                f"Use sha256, sha512, or hmac256 for sensitive data. "
+                f"See Tarkin docs for guidance.",
+                UserWarning,
+                stacklevel=2,
+            )
+            expr = f"hashtextextended({ref}::text, 0)::text"
+
+        elif algorithm == HashAlgorithm.SHA256:
+            warnings.warn(
+                f"Column '{col.name}': hash algorithm 'sha256' is cryptographic but "
+                f"may be vulnerable to dictionary attacks on low-entropy data (e.g. SSNs, postcodes). "
+                f"Consider hmac256 with a secret key for stronger protection. "
+                f"See Tarkin docs for guidance.",
+                UserWarning,
+                stacklevel=2,
+            )
+            expr = f"encode(digest({ref}::text, 'sha256'), 'hex')"
+
+        elif algorithm == HashAlgorithm.SHA512:
+            warnings.warn(
+                f"Column '{col.name}': hash algorithm 'sha512' is cryptographic but "
+                f"may be vulnerable to dictionary attacks on low-entropy data (e.g. SSNs, postcodes). "
+                f"Consider hmac256 with a secret key for stronger protection. "
+                f"See Tarkin docs for guidance.",
+                UserWarning,
+                stacklevel=2,
+            )
+            expr = f"encode(digest({ref}::text, 'sha512'), 'hex')"
+
+        elif algorithm == HashAlgorithm.HMAC256:
+            expr = f"encode(hmac({ref}::text, {_escape_hmac_key()}, 'sha256'), 'hex')"
+
+        else:
+            raise ValueError(
+                f"Column '{col.name}': unhandled hash algorithm '{algorithm}'. "
+                f"This is a Tarkin bug — please file an issue."
+            )
+
         return _wrap_null(expr, hide_null)
 
     elif strategy == MaskingStrategy.EMAIL:
@@ -455,10 +522,21 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
 def _mask_null_literal(strategy: MaskingStrategy, cfg: MaskConfig | None) -> str:
     """Return a SQL literal to use when hide_null=True and the value is NULL."""
     if strategy == MaskingStrategy.HASH:
+        if isinstance(cfg, HashMaskConfig):
+            if cfg.algorithm == HashAlgorithm.XXHASH:
+                return "hashtextextended('', 0)::text"
+            elif cfg.algorithm == HashAlgorithm.HMAC256:
+                return "encode(hmac('', current_setting('tarkin.hmac_key'), 'sha256'), 'hex')"
+            else:
+                # sha256 / sha512
+                algo = cfg.algorithm.value
+                return f"encode(digest('', '{algo}'), 'hex')"
         return "hashtextextended('', 0)::text"
-    mask_char = "X"
+
     if cfg and hasattr(cfg, "mask_char") and cfg.mask_char:
         mask_char = cfg.mask_char
+    else:
+        mask_char = "X"
     return f"'{mask_char}'"
 
 
@@ -485,7 +563,7 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
 
     immutable_checks = _generate_immutable_checks(table) if any(c.immutable for c in table.columns) else ""
     sensitive_stubs  = _generate_sensitive_stubs(table) if any(
-        c.sensitive or c.encrypted or c.masking_strategy != "none"
+        c.sensitive or c.masking_strategy != "none"
         for c in table.columns
     ) else ""
 
@@ -574,8 +652,6 @@ def _generate_sensitive_stubs(table: TableConfig) -> str:
     for col in table.columns:
         if col.sensitive:
             lines.append(f"        -- STUB: sensitive column {col.name} -- implement access control here")
-        if col.encrypted:
-            lines.append(f"        -- STUB: encrypted column {col.name} -- implement encryption/decryption here")
         if col.masking_strategy != "none":
             lines.append(f"        -- STUB: masking strategy '{col.masking_strategy}' on column {col.name} -- implement masking here")
     return "\n".join(lines) + "\n" if lines else ""
@@ -941,13 +1017,12 @@ def _generate_meta_population(project: GovernanceProject) -> str:
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_columns "
                     f"(build_id, schema_name, table_name, name, type, clearance, nullable, \"unique\", "
-                    f"immutable, versioned, sensitive, encrypted, masking_strategy, "
+                    f"immutable, versioned, sensitive, masking_strategy, "
                     f"default_value, generated_expression, generated_storage) "
                     f"VALUES (v_build_id, '{sn}', '{tn}', '{cn}', '{ct}', {col.clearance}, "
                     f"{str(col.nullable).lower()}, {str(col.unique).lower()}, "
                     f"{str(col.immutable).lower()}, {str(col.versioned).lower()}, "
-                    f"{str(col.sensitive).lower()}, {str(col.encrypted).lower()}, "
-                    f"'{ms}', {dv}, {ge}, '{gs}');"
+                    f"{str(col.sensitive).lower()}, '{ms}', {dv}, {ge}, '{gs}');"
                 )
                 cc = _object_checksum({
                     "schema": schema.name, "table": table.name, "name": col.name,
@@ -1062,6 +1137,9 @@ def _generate_meta_population(project: GovernanceProject) -> str:
 # =========================================================
 # UTILS
 # =========================================================
+
+def _escape_hmac_key() -> str:
+    return "current_setting('tarkin.hmac_key')"
 
 def _q(name: str) -> str:
     return f'"{name}"'

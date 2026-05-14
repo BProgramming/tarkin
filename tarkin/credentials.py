@@ -34,6 +34,8 @@ class ConnectionProfile(BaseModel):
     password: SecretStr
     sslmode:  str        = "prefer"
 
+    hmac_key: Optional[SecretStr] = None
+
     @field_validator("port")
     @classmethod
     def port_in_range(cls, v: int) -> int:

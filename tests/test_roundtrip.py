@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from tarkin.model import (
     DatabaseConfig, AuditLogLevel, GovernanceProject,
-    MaskingStrategy, PartialMaskConfig, PartialMaskVisibleSide,
+    MaskingStrategy, PartialMaskConfig, PartialMaskVisibleSide, HashMaskConfig, HashAlgorithm,
 )
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
@@ -54,7 +54,6 @@ def test_clearance_project_roundtrips() -> None:
         ssn_col  = next(c for c in clinical.tables[0].columns if c.name == "ssn")
         assert ssn_col.clearance  == 2
         assert ssn_col.sensitive  is True
-        assert ssn_col.encrypted  is True
 
 
 def test_masking_project_roundtrips() -> None:
@@ -101,6 +100,25 @@ def test_masking_project_roundtrips() -> None:
         name_col = col_map["display_name"]
         assert name_col.masking_strategy == MaskingStrategy.NAME
 
+        xxhash_col = col_map["xxhash_value"]
+        assert xxhash_col.masking_strategy == MaskingStrategy.HASH
+        assert isinstance(xxhash_col.mask_config, HashMaskConfig)
+        assert xxhash_col.mask_config.algorithm == HashAlgorithm.XXHASH
+
+        sha256_col = col_map["sha256_value"]
+        assert sha256_col.masking_strategy == MaskingStrategy.HASH
+        assert isinstance(sha256_col.mask_config, HashMaskConfig)
+        assert sha256_col.mask_config.algorithm == HashAlgorithm.SHA256
+        
+        sha512_col = col_map["sha512_value"]
+        assert sha512_col.masking_strategy == MaskingStrategy.HASH
+        assert isinstance(sha512_col.mask_config, HashMaskConfig)
+        assert sha512_col.mask_config.algorithm == HashAlgorithm.SHA512
+
+        hmac256_col = col_map["hmac256_value"]
+        assert hmac256_col.masking_strategy == MaskingStrategy.HASH
+        assert isinstance(hmac256_col.mask_config, HashMaskConfig)
+        assert hmac256_col.mask_config.algorithm == HashAlgorithm.HMAC256
 
 def test_audit_config_roundtrips() -> None:
     proj = build_minimal_project()

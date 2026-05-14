@@ -11,7 +11,7 @@ from .model import (
     FullMaskConfig, PartialMaskConfig, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
-    AnyMaskConfig,
+    AnyMaskConfig, HashAlgorithm,
 )
 
 
@@ -40,7 +40,10 @@ def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
             visible_side=PartialMaskVisibleSide(d.get("visible_side", "right")),
         )
     elif cfg_type == "hash":
-        return HashMaskConfig(hide_null=hide_null)
+        return HashMaskConfig(
+            hide_null=hide_null,
+            algorithm=HashAlgorithm(d.get("algorithm", HashAlgorithm.XXHASH)),
+        )
     elif cfg_type == "email":
         return EmailMaskConfig(hide_null=hide_null, mask_char=mask_char)
     elif cfg_type == "phone":
@@ -188,7 +191,6 @@ class YamlLoader:
             immutable=d.get("immutable", False),
             versioned=d.get("versioned", False),
             sensitive=d.get("sensitive", False),
-            encrypted=d.get("encrypted", False),
             masking_strategy=MaskingStrategy(d.get("masking_strategy", "none")),
             mask_config=mask_config,
             generated_expression=d.get("generated_expression"),

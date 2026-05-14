@@ -6,7 +6,7 @@ from tarkin.model import (
     TablePermissionConfig, SchemaPermissionConfig, RoleConfig,
     MaskingStrategy, FullMaskConfig, PartialMaskConfig, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
-    IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
+    IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide, HashAlgorithm,
 )
 
 
@@ -94,7 +94,6 @@ def build_clearance_project() -> GovernanceProject:
         type="text",
         clearance=2,
         sensitive=True,
-        encrypted=True,
     )
     table  = TableConfig(
         name="patients",
@@ -173,6 +172,30 @@ def build_masking_project() -> GovernanceProject:
             type="text",
             masking_strategy=MaskingStrategy.NAME,
             mask_config=NameMaskConfig(),
+        ),
+        ColumnConfig(
+            name="xxhash_value",
+            type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.XXHASH),
+        ),
+        ColumnConfig(
+            name="sha256_value",
+            type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.SHA256),
+        ),
+        ColumnConfig(
+            name="sha512_value",
+            type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.SHA512),
+        ),
+        ColumnConfig(
+            name="hmac256_value",
+            type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.HMAC256),
         ),
     ]
 

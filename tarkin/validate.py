@@ -139,8 +139,6 @@ class SemanticValidator:
             errors.append(f"Column '{path}' cannot be versioned and have a generated expression.")
         if col.versioned and col.immutable:
             errors.append(f"Column '{path}' cannot be both versioned and immutable.")
-        if col.encrypted and not (col.sensitive or col.clearance > 0):
-            errors.append(f"Column '{path}' is encrypted but not marked sensitive or assigned clearance above 0.")
 
         # Validate mask_config matches masking_strategy
         strategy = MaskingStrategy(col.masking_strategy)

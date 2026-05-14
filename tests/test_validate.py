@@ -11,7 +11,7 @@ from tarkin.model import (
     ColumnConfig, IndexConfig, ForeignKeyConfig,
     SchemaPermissionConfig, RoleConfig,
     MaskingStrategy, FullMaskConfig,
-    EmailMaskConfig, AuditLogLevel,
+    EmailMaskConfig, AuditLogLevel, HashAlgorithm, HashMaskConfig,
 )
 from .fixtures import (
     build_minimal_project, build_cross_schema_project, build_clearance_project,
@@ -168,18 +168,6 @@ def test_versioned_and_immutable_column_is_invalid() -> None:
     assert_invalid(proj, "versioned and immutable")
 
 
-def test_encrypted_column_without_sensitivity_is_invalid() -> None:
-    col = ColumnConfig(name="token", type="text", encrypted=True)
-    table = TableConfig(name="t", columns=[col])
-    schema = SchemaConfig(name="public", tables=[table])
-    proj = GovernanceProject(
-        database=make_database(),
-        schemas=[schema],
-        roles=[make_role()],
-    )
-    assert_invalid(proj, "encrypted but not marked sensitive")
-
-
 def test_generated_and_default_column_is_invalid() -> None:
     col = ColumnConfig(name="g", type="text", generated_expression="1+1", default="0")
     table = TableConfig(name="t", columns=[col])
@@ -274,6 +262,23 @@ def test_hash_mask_with_wrong_config_type_is_invalid() -> None:
         roles=[make_role()],
     )
     assert_invalid(proj, "Expected HashMaskConfig")
+
+
+def test_hash_mask_with_algorithm_is_valid() -> None:
+    for algo in [HashAlgorithm.XXHASH, HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256]:
+        col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=algo),
+        )
+        table  = TableConfig(name="users", columns=[make_column(), col], indexes=[make_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = GovernanceProject(
+            database=make_database(),
+            schemas=[schema],
+            roles=[make_role()],
+        )
+        assert_valid(proj)
 
 
 # =====================================================

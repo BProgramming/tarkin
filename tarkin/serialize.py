@@ -164,7 +164,6 @@ class Serializer:
         m["immutable"]        = col.immutable
         m["versioned"]        = col.versioned
         m["sensitive"]        = col.sensitive
-        m["encrypted"]        = col.encrypted
         m["masking_strategy"] = _val(col.masking_strategy)
         if col.mask_config is not None:
             m["mask_config"] = cls._serialize_mask_config(col.mask_config)
@@ -190,6 +189,7 @@ class Serializer:
             m["mask_char"] = cfg.mask_char
         elif isinstance(cfg, HashMaskConfig):
             m["type"] = "hash"
+            m["algorithm"] = _val(cfg.algorithm)
         elif isinstance(cfg, EmailMaskConfig):
             m["type"]      = "email"
             m["mask_char"] = cfg.mask_char

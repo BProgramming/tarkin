@@ -54,11 +54,12 @@ def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path 
     _check_no_existing_build(current)
 
     # Step 3 — check pgaudit if required
-    _check_audit_requirements(project, current)
+    _check_pgaudit_requirements(project, current)
+    _check_pgcrypto_requirements(project, current)
 
     # Step 4 — generate SQL
     print("Generating SQL...", end="\r")
-    sql = generate_sql(project, current)
+    sql = generate_sql(project, current, profile)
     print("Generating SQL... Done.")
 
     # Step 5 — write artifact
@@ -87,7 +88,7 @@ def _check_no_existing_build(current: GovernanceProject) -> None:
         )
 
 
-def _check_audit_requirements(project: GovernanceProject, current: GovernanceProject) -> None:
+def _check_pgaudit_requirements(project: GovernanceProject, current: GovernanceProject) -> None:
     """Fail if the YAML requires audit but the live database doesn't have pgaudit preloaded."""
     if project.database.audit_enabled and not current.database.audit_enabled:
         raise BuildError(
@@ -95,6 +96,23 @@ def _check_audit_requirements(project: GovernanceProject, current: GovernancePro
             "installed or not preloaded on this database.\n"
             "Install postgresql-pgaudit, add 'pgaudit' to shared_preload_libraries "
             "in postgresql.conf, and restart PostgreSQL before building."
+        )
+
+
+def _check_pgcrypto_requirements(project: GovernanceProject, current: GovernanceProject) -> None:
+    from .model import HashMaskConfig, HashAlgorithm
+    needs_pgcrypto = any(
+        isinstance(col.mask_config, HashMaskConfig)
+        and col.mask_config.algorithm in (HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256)
+        for schema in project.schemas
+        for table in schema.tables
+        for col in table.columns
+    )
+    if needs_pgcrypto and not current.database.encryption_enabled:
+        raise BuildError(
+            "One or more columns use SHA/HMAC hashing, but pgcrypto is not installed on this database.\n"
+            "Run: CREATE EXTENSION pgcrypto;\n"
+            "Then re-run 'tarkin build'."
         )
 
 

@@ -17,8 +17,8 @@ from tarkin.codegen import (
 from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, RoleConfig,
-    SchemaPermissionConfig, TablePermissionConfig,
-    AuditLogLevel, MaskingStrategy, FullMaskConfig,
+    SchemaPermissionConfig, TablePermissionConfig, HashAlgorithm,
+    AuditLogLevel, MaskingStrategy, FullMaskConfig, HashMaskConfig,
 )
 
 
@@ -350,6 +350,115 @@ class TestGenerateViews:
         assert '"sales"."orders"' in sql
         assert '"tk_public"' in sql
         assert '"tk_sales"' in sql
+
+    def test_xxhash_uses_hashtextextended(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.XXHASH),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        with pytest.warns(UserWarning, match="non-cryptographic"):
+            sql = _generate_views(proj)
+        assert "hashtextextended" in sql
+        assert "digest" not in sql
+
+    def test_sha256_uses_digest(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.SHA256),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        with pytest.warns(UserWarning, match="dictionary attacks"):
+            sql = _generate_views(proj)
+        assert "digest" in sql
+        assert "sha256" in sql
+        assert "encode" in sql
+
+    def test_sha512_uses_digest(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.SHA512),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        with pytest.warns(UserWarning, match="dictionary attacks"):
+            sql = _generate_views(proj)
+        assert "digest" in sql
+        assert "sha512" in sql
+        assert "encode" in sql
+
+    def test_hmac256_uses_hmac_and_current_setting(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.HMAC256),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        sql = _generate_views(proj)
+        assert "hmac(" in sql
+        assert "current_setting('tarkin.hmac_key')" in sql
+        assert "sha256" in sql
+        assert "encode" in sql
+
+    def test_xxhash_hide_null_uses_hashtextextended(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.XXHASH, hide_null=True),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        with pytest.warns(UserWarning):
+            sql = _generate_views(proj)
+        assert "COALESCE" in sql
+        assert "hashtextextended('', 0)" in sql
+
+    def test_sha256_hide_null_uses_digest_empty_string(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.SHA256, hide_null=True),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        with pytest.warns(UserWarning):
+            sql = _generate_views(proj)
+        assert "COALESCE" in sql
+        assert "digest('', 'sha256')" in sql
+
+    def test_hmac256_hide_null_uses_hmac_empty_string(self) -> None:
+        id_col   = _make_pk_column()
+        hash_col = ColumnConfig(
+            name="token", type="text",
+            masking_strategy=MaskingStrategy.HASH,
+            mask_config=HashMaskConfig(algorithm=HashAlgorithm.HMAC256, hide_null=True),
+        )
+        table  = TableConfig(name="users", columns=[id_col, hash_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        sql = _generate_views(proj)
+        assert "COALESCE" in sql
+        assert "hmac(''" in sql
+        assert "current_setting('tarkin.hmac_key')" in sql
+
 
 
 # =====================================================

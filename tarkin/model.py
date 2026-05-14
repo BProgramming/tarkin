@@ -88,15 +88,16 @@ class PartialMaskConfig(MaskConfig):
     mask_char:      str = "X"
 
 
+class HashAlgorithm(StrEnum):
+    XXHASH   = "xxhash"    # hashtextextended — fast, non-cryptographic
+    SHA256   = "sha256"    # pgcrypto digest — cryptographic, no key
+    SHA512   = "sha512"    # pgcrypto digest — cryptographic, no key
+    HMAC256  = "hmac256"   # pgcrypto hmac — cryptographic, requires key
+
+
 class HashMaskConfig(MaskConfig):
-    """
-    Replace value with hashtextextended(value, 0).
-    WARNING: This is NOT encryption. It masks data visibility for known users
-    but is not cryptographically secure. Use encryption (coming in v2) for
-    security requirements.
-    """
-    # seed is fixed at 0 — deterministic but not secure by design
-    pass
+    algorithm: HashAlgorithm = HashAlgorithm.XXHASH
+    hmac_key:  Optional[str] = None  # required if algorithm == HMAC256
 
 
 class EmailMaskConfig(MaskConfig):
@@ -161,6 +162,7 @@ class TarkinBaseModel(BaseModel):
 class DatabaseConfig(TarkinBaseModel):
     name:          str                  = "default_database"
     description:   Optional[str]        = None
+    encryption_enabled: bool            = False
     audit_enabled: bool                 = False
     audit_logged:  list[AuditLogLevel]  = Field(
         default_factory=lambda: [AuditLogLevel.DDL, AuditLogLevel.WRITE]
@@ -194,7 +196,6 @@ class ColumnConfig(TarkinBaseModel):
     versioned: bool = False
 
     sensitive: bool = False
-    encrypted: bool = False
 
     masking_strategy: MaskingStrategy         = MaskingStrategy.NONE
     mask_config:      Optional[AnyMaskConfig] = None
