@@ -193,6 +193,7 @@ class DatabaseConfig(TarkinBaseModel):
     host:     str            = "localhost"
     port:     int            = 5432
     database: str            = "postgres"
+    version:  str            = "14"
     engine:   DatabaseEngine = DatabaseEngine.POSTGRES
     profile:  Optional[str]  = None
     owner:    Optional[str]  = None

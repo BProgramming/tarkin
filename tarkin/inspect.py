@@ -66,6 +66,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
             host          = profile.host,
             port          = profile.port,
             database      = profile.database,
+            version       = db.version.split(',')[0],
             audit_enabled = bool(audit_enabled),
             profile       = profile.profile,
             owner         = profile.username,
@@ -551,15 +552,14 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
             if privilege == "MAINTAIN":   table_perm.maintain   = True
 
         roles.append(RoleConfig(
-            name                 = role_name,
-            description          = description,
-            can_login            = bool(can_login),
-            can_admin            = bool(is_super),
-            can_write            = bool(can_create_db or can_create_role),
-            can_maintain         = bool(is_super),
-            can_access_sensitive = False,
-            member_of            = [m for m in (member_of or [])],
-            on                   = list(schema_perms.values()),
+            name         = role_name,
+            description  = description,
+            can_login    = bool(can_login),
+            can_admin    = bool(is_super),
+            can_write    = bool(can_create_db or can_create_role),
+            can_maintain = bool(is_super) or any(tp.maintain for sp in schema_perms.values() for tp in sp.tables),
+            member_of    = [m for m in (member_of or [])],
+            on           = list(schema_perms.values()),
         ))
 
     return roles

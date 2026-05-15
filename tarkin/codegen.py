@@ -1021,16 +1021,19 @@ def _generate_grants(project: GovernanceProject) -> str:
                 if tp.trigger:    table_privs.append("TRIGGER")
 
                 if tp.maintain:
-                    if role.can_maintain:
-                        # Emitted in version-guarded block below
-                        maintain_grants.append((f"{sp.name}.{tp.name}", role.name))
+                    if int(project.database.version) < 16:
+                        warnings.warn("Grant privilege MAINTAIN is only supported on PostgreSQL 16 and above.")
                     else:
-                        warnings.warn(
-                            f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
-                            f"but can_maintain=False on the role. MAINTAIN will not be granted.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
+                        if role.can_maintain:
+                            # Emitted in version-guarded block below
+                            maintain_grants.append((f"{sp.name}.{tp.name}", role.name))
+                        else:
+                            warnings.warn(
+                                f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
+                                f"but can_maintain=False on the role. MAINTAIN will not be granted.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
 
                 if table_privs:
                     lines.append(
@@ -1210,7 +1213,7 @@ def _generate_meta_population(
     yaml_str       = _project_to_yaml_string(project)
     profile        = _escape_sql_string(project.database.profile or "")
     database_name  = _escape_sql_string(project.database.name)
-    checksum       = _project_checksum(project)
+    checksum       = project_checksum(project)
 
     existing_role_names = {r.name for r in current.roles}
 
@@ -1572,7 +1575,7 @@ def _project_to_yaml_string(project: GovernanceProject) -> str:
     return Serializer.to_yaml_string(project)
 
 
-def _project_checksum(project: GovernanceProject) -> str:
+def project_checksum(project: GovernanceProject) -> str:
     """Return a SHA-256 hex digest of the project's serialized YAML."""
     return hashlib.sha256(_project_to_yaml_string(project).encode()).hexdigest()
 

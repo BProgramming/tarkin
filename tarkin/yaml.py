@@ -1,6 +1,8 @@
 """Loads a specification YAML for a GovernanceProject."""
 from __future__ import annotations
 from pathlib import Path
+
+from docutils.nodes import version
 from ruamel.yaml import YAML
 
 from .model import (
@@ -140,6 +142,7 @@ class YamlLoader:
             host          = d.get("host", "localhost"),
             port          = d.get("port", 5432),
             database      = d.get("database", "postgres"),
+            version       = d.get("version", ""),
             engine        = DatabaseEngine(d.get("engine", "postgres")),
             profile       = d.get("profile"),
             owner         = d.get("owner"),

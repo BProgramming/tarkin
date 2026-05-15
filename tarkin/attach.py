@@ -5,7 +5,7 @@ import zipfile
 from pathlib import Path
 
 from .credentials import ConnectionProfile
-from .codegen import _project_checksum
+from .codegen import project_checksum
 from .inspect import inspect_database
 
 
@@ -27,7 +27,7 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
     print("Inspecting current database state... Done.")
 
     print("Verifying database state...", end="\r")
-    current_checksum = _project_checksum(current)
+    current_checksum = project_checksum(current)
     build_checksum   = metadata.get("db_checksum")
 
     if current_checksum != build_checksum:

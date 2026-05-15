@@ -75,6 +75,7 @@ class Serializer:
         m["host"]             = db.host
         m["port"]             = db.port
         m["database"]         = db.database
+        m["version"]          = db.version
         m["audit_enabled"]    = db.audit_enabled
         if db.audit_enabled:
             m["audit_logged"] = db.audit_logged

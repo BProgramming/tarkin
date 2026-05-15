@@ -82,7 +82,7 @@ def test_audit_enabled_with_empty_audit_logged_is_invalid() -> None:
 
 
 def test_audit_enabled_with_levels_is_valid() -> None:
-    db  = DatabaseConfig(audit_enabled=True, audit_logged=[AuditLogLevel.DDL, AuditLogLevel.WRITE])
+    db   = DatabaseConfig(audit_enabled=True, audit_logged=[AuditLogLevel.DDL, AuditLogLevel.WRITE])
     proj = GovernanceProject(
         database = db,
         schemas  = [make_schema()],
@@ -92,7 +92,7 @@ def test_audit_enabled_with_levels_is_valid() -> None:
 
 
 def test_audit_disabled_with_empty_audit_logged_is_valid() -> None:
-    db  = DatabaseConfig(audit_enabled=False, audit_logged=[])
+    db   = DatabaseConfig(audit_enabled=False, audit_logged=[])
     proj = GovernanceProject(
         database = db,
         schemas  = [make_schema()],

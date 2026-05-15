@@ -9,7 +9,7 @@ from pathlib import Path
 from .credentials import ConnectionProfile
 from .inspect import inspect_database
 from .model import GovernanceProject
-from .codegen import generate_sql, _project_checksum
+from .codegen import generate_sql, project_checksum
 
 
 OUT_DIR = Path("out")
@@ -81,8 +81,8 @@ def _build_metadata(project: GovernanceProject, current: GovernanceProject, prof
         "database":       profile.database,
         "host":           profile.host,
         "port":           profile.port,
-        "yaml_checksum":  _project_checksum(project),
-        "db_checksum":    _project_checksum(current),
+        "yaml_checksum":  project_checksum(project),
+        "db_checksum":    project_checksum(current),
         "schemas":        [s.name for s in project.schemas],
         "shadow_schemas": [f"tk_{s.name}" for s in project.schemas],
         "audit_enabled":  project.database.audit_enabled,
