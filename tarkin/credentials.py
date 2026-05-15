@@ -1,29 +1,18 @@
+"""Load and validate database credentials."""
 from __future__ import annotations
 import tomllib
 from pathlib import Path
 from typing import Optional
-
 import sqlalchemy
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 
-# =========================================================
-# DEFAULT CREDENTIALS FILE LOCATION
-# =========================================================
-
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".tarkin" / "credentials.toml"
 
 
-# =========================================================
-# MODELS
-# =========================================================
-
 class ConnectionProfile(BaseModel):
-    """
-    A named connection profile from credentials.toml.
-    Credentials never appear in the governance YAML — only the profile name does.
-    """
+    """A named connection profile from credentials.toml."""
     model_config = ConfigDict(extra="forbid")
 
     profile:  str
@@ -39,6 +28,7 @@ class ConnectionProfile(BaseModel):
     @field_validator("port")
     @classmethod
     def port_in_range(cls, v: int) -> int:
+        """Validate port range."""
         if not (1 <= v <= 65535):
             raise ValueError(f"Port must be between 1 and 65535, got {v}.")
         return v
@@ -62,9 +52,7 @@ class ConnectionProfile(BaseModel):
 
 
 class CredentialsFile(BaseModel):
-    """
-    Parsed credentials.toml. Profiles are keyed by their [profile_name] section.
-    """
+    """Parsed credentials.toml. Profiles are keyed by their [profile_name] section."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     path:     Path
@@ -72,21 +60,7 @@ class CredentialsFile(BaseModel):
 
     @classmethod
     def load(cls, path: Path | None = None) -> CredentialsFile:
-        """
-        Load and parse a credentials.toml file.
-
-        File format:
-            [dev]
-            host     = "localhost"
-            port     = 5432
-            database = "mydb"
-            username = "myuser"
-            password = "mypassword"
-
-            [prod]
-            host     = "prod.example.com"
-            ...
-        """
+        """Load and parse a credentials.toml file."""
         resolved = path or DEFAULT_CREDENTIALS_PATH
 
         if not resolved.exists():
@@ -122,11 +96,8 @@ class CredentialsFile(BaseModel):
         return list(self.profiles.keys())
 
 
-# =========================================================
-# CONNECTION TEST
-# =========================================================
-
 class ConnectionResult(BaseModel):
+    """Result of a connection attempt."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     profile:        str
@@ -144,10 +115,7 @@ class ConnectionResult(BaseModel):
 
 
 def check_connection(profile: ConnectionProfile) -> ConnectionResult:
-    """
-    Open a connection, run a minimal probe query, return a ConnectionResult.
-    Never raises — errors are captured in the result.
-    """
+    """Open a connection, run a minimal probe query, and return a ConnectionResult."""
     try:
         engine = profile.engine()
         with engine.connect() as conn:
@@ -162,32 +130,29 @@ def check_connection(profile: ConnectionProfile) -> ConnectionResult:
                 server_version = None
         engine.dispose()
         return ConnectionResult(
-            profile=profile.profile,
-            success=True,
-            server_version=server_version,
-            db_user=db_user,
+            profile        = profile.profile,
+            success        = True,
+            server_version = server_version,
+            db_user        = db_user,
         )
     except OperationalError as exc:
         return ConnectionResult(
-            profile=profile.profile,
-            success=False,
-            error=_clean_error(str(exc)),
+            profile = profile.profile,
+            success = False,
+            error   = _clean_error(str(exc)),
         )
     except SQLAlchemyError as exc:
         return ConnectionResult(
-            profile=profile.profile,
-            success=False,
-            error=str(exc),
+            profile = profile.profile,
+            success = False,
+            error   = str(exc),
         )
 
 
 def test_all_connections(creds: CredentialsFile) -> list[ConnectionResult]:
+    """Test all connections."""
     return [check_connection(p) for p in creds.profiles.values()]
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def _parse_pg_version(version_str: str) -> str:
     """Extract the short version number from PostgreSQL's version() string."""
@@ -201,7 +166,6 @@ def _parse_pg_version(version_str: str) -> str:
 def _clean_error(msg: str) -> str:
     """Strip SQLAlchemy boilerplate from connection error messages."""
     for prefix in ["(psycopg.OperationalError)", "(sqlalchemy.exc.OperationalError)"]:
-        msg = msg.replace(prefix, "").strip()
-    # Trim to first meaningful line
+        msg = str(msg.replace(prefix, "")).strip()
     first_line = msg.splitlines()[0].strip() if msg.splitlines() else msg
     return first_line.lstrip("()")

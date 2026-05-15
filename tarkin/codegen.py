@@ -1,15 +1,7 @@
-"""
-SQL code generation for Tarkin governance builds.
-
-:func:`generate_sql` is the single entry point.  It accepts a
-:class:`~tarkin.model.GovernanceProject` (the governance specification),
-the current live-database state (also a ``GovernanceProject``, produced by
-:mod:`tarkin.inspect`), and a :class:`~tarkin.credentials.ConnectionProfile`
-for HMAC key injection, and returns the full SQL string to be executed during
-``tarkin attach``.
-"""
+"""Generate the code for Tarkin model builds."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
 import hashlib
@@ -17,18 +9,23 @@ import warnings
 
 from .credentials import ConnectionProfile
 from .model import (
-    GovernanceProject, TableConfig, ColumnConfig,
-    MaskingStrategy, MaskConfig, FullMaskConfig,
-    PartialMaskConfig, HashAlgorithm, HashMaskConfig,
-    EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
-    IpAddressMaskConfig, NameMaskConfig,
+    GovernanceProject,
+    TableConfig,
+    ColumnConfig,
+    MaskingStrategy,
+    MaskConfig,
+    FullMaskConfig,
+    PartialMaskConfig,
+    HashAlgorithm,
+    HashMaskConfig,
+    EmailMaskConfig,
+    PhoneMaskConfig,
+    CreditCardMaskConfig,
+    IpAddressMaskConfig,
+    NameMaskConfig,
     PartialMaskVisibleSide,
 )
-
-
-# =========================================================
-# ENTRY POINT
-# =========================================================
+from .serialize import Serializer
 
 
 def generate_sql(
@@ -36,16 +33,7 @@ def generate_sql(
     current: GovernanceProject,
     profile: ConnectionProfile,
 ) -> str:
-    """Generate the full SQL build artifact for a governance project.
-
-    Args:
-        project: The target governance specification (from YAML).
-        current: The current live-database state (from inspect).
-        profile: The active credentials profile, used for HMAC key injection.
-
-    Returns:
-        A single SQL string suitable for execution via ``tarkin attach``.
-    """
+    """Generate the full SQL build artifact for a governance project."""
     sections = [
         _section("TARKIN BUILD", f"Generated at {datetime.now(UTC).isoformat()}"),
         _section("TRANSACTION START"),
@@ -71,16 +59,11 @@ def generate_sql(
         _section("AUDIT"),
         _generate_audit(project),
         _section("META POPULATION"),
-        _generate_meta_population(project, current),
+        _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
         _section("TRANSACTION END"),
         "COMMIT;\n",
     ]
     return "\n".join(sections)
-
-
-# =========================================================
-# META SCHEMA
-# =========================================================
 
 
 def _generate_meta_schema() -> str:
@@ -99,7 +82,7 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_builds (
     checksum                    text NOT NULL,
     yaml                        text NOT NULL,
     -- Extension tracking
-    pgcrypto_enabled_by_tarkin  bool NOT NULL DEFAULT false,
+    pgcrypto_enabled_by_tarkin  bool NOT NULL,
     -- pgaudit snapshot: values before Tarkin modified them, for restoration on detach
     pgaudit_log_before          text,
     pgaudit_log_catalog_before  text,
@@ -233,11 +216,6 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_revoked_grants (
 """.strip()
 
 
-# =========================================================
-# SHADOW SCHEMAS
-# =========================================================
-
-
 def _generate_shadow_schemas(project: GovernanceProject) -> str:
     """Generate SQL to rename existing schemas to shadow names and create fresh public schemas."""
     lines = []
@@ -248,11 +226,6 @@ def _generate_shadow_schemas(project: GovernanceProject) -> str:
         lines.append(f"CREATE SCHEMA {_q(schema.name)};")
         lines.append("")
     return "\n".join(lines)
-
-
-# =========================================================
-# VERSIONING COLUMNS
-# =========================================================
 
 
 def _generate_versioning_columns(
@@ -303,68 +276,15 @@ def _generate_versioning_columns(
     return "\n".join(lines)
 
 
-# =========================================================
-# EXTENSIONS
-# =========================================================
-
-
 def _generate_extensions(project: GovernanceProject) -> str:
-    """Emit SQL to enable extensions required by the project.
-
-    If ``pgcrypto`` is needed and not already installed, it is created and
-    ``pgcrypto_enabled_by_tarkin = true`` is recorded in ``__META__.tarkin_builds``
-    so that ``tarkin detach`` can warn the operator.
-
-    A DO block is used so we can check ``pg_extension`` before creating, avoiding
-    the ``IF NOT EXISTS`` idiom which silently succeeds even when Tarkin was
-    not the creator.
-    """
-    needs_pgcrypto = any(
-        isinstance(col.mask_config, HashMaskConfig)
-        and col.mask_config.algorithm in (
-            HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256
-        )
-        for schema in project.schemas
-        for table in schema.tables
-        for col in table.columns
-    )
-    if not needs_pgcrypto:
+    """Emit CREATE EXTENSION statements for any extensions required by the project."""
+    if not _needs_pgcrypto(project):
         return "-- No pgcrypto-dependent features in use.\n"
-
-    return """\
-DO $$
-DECLARE
-    _existed bool;
-BEGIN
-    SELECT EXISTS (
-        SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto'
-    ) INTO _existed;
-
-    IF NOT _existed THEN
-        CREATE EXTENSION pgcrypto;
-        -- Record that Tarkin enabled pgcrypto so detach can warn.
-        UPDATE __META__.tarkin_builds
-        SET pgcrypto_enabled_by_tarkin = true
-        WHERE build_id = (SELECT max(build_id) FROM __META__.tarkin_builds);
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
-"""
-
-
-# =========================================================
-# VIEWS
-# =========================================================
+    return "CREATE EXTENSION IF NOT EXISTS pgcrypto;\n"
 
 
 def _generate_views(project: GovernanceProject) -> str:
-    """Generate CREATE VIEW statements for all tables in the project.
-
-    Each table gets a full-history view in the public schema.  Versioned
-    tables additionally receive a ``_current`` view filtered to live records.
-    Masking expressions are applied according to each column's
-    ``masking_strategy`` and ``mask_config``.
-    """
+    """Generate CREATE VIEW statements for all tables in the project."""
     lines = []
 
     for schema in project.schemas:
@@ -395,16 +315,7 @@ def _generate_views(project: GovernanceProject) -> str:
 
 
 def _generate_hmac_key(project: GovernanceProject, profile: ConnectionProfile) -> str:
-    """Emit an ALTER DATABASE statement to set the HMAC key for HMAC256 masking.
-
-    The key is sourced from the credentials profile and stored as the
-    database-level GUC ``tarkin.hmac_key``.  It is evaluated at query time
-    via ``current_setting()`` and is never baked into view definitions.
-
-    Raises:
-        ValueError: If HMAC256 columns are present but no HMAC key is
-            configured in the credentials profile.
-    """
+    """Generate an ALTER DATABASE statement to set the HMAC key for HMAC256 masking."""
     needs_hmac = any(
         isinstance(col.mask_config, HashMaskConfig)
         and col.mask_config.algorithm == HashAlgorithm.HMAC256
@@ -434,18 +345,7 @@ def _generate_hmac_key(project: GovernanceProject, profile: ConnectionProfile) -
 
 
 def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
-    """Return a SQL expression for a column in a view, applying masking if configured.
-
-    Columns with ``masking_strategy='none'`` are passed through as-is.
-
-    Args:
-        col:        The column configuration.
-        shadow:     The shadow schema name (e.g. ``tk_public``).
-        table_name: The table name within the shadow schema.
-
-    Returns:
-        A SQL fragment suitable for use in a SELECT list.
-    """
+    """Return a SQL expression for a column in a view, applying masking if configured."""
     _default_mask_char = "X"
 
     strategy = MaskingStrategy(col.masking_strategy)
@@ -535,7 +435,7 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
         else:
             raise ValueError(
                 f"Column '{col.name}': unhandled hash algorithm '{algorithm}'. "
-                f"This is a Tarkin bug — please file an issue."
+                f"This is a Tarkin bug. Please file a bug report."
             )
 
         return _wrap_null(expr, cfg.hide_null)
@@ -630,7 +530,7 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
 
     raise ValueError(
         f"Column '{col.name}': unhandled masking strategy '{strategy}'. "
-        f"This is a Tarkin bug — please file an issue."
+        f"This is a Tarkin bug. Please file a bug report."
     )
 
 
@@ -652,11 +552,6 @@ def _mask_null_literal(strategy: MaskingStrategy, cfg: MaskConfig | None) -> str
     else:
         mask_char = "X"
     return f"'{mask_char}'"
-
-
-# =========================================================
-# TRIGGERS
-# =========================================================
 
 
 def _generate_triggers(project: GovernanceProject) -> str:
@@ -766,12 +661,7 @@ def _generate_immutable_checks(table: TableConfig) -> str:
 
 
 def _generate_sensitive_stubs(table: TableConfig) -> str:
-    """Generate comment stubs for sensitive columns.
-
-    Sensitive column access is enforced via column-level grants on views,
-    not trigger logic.  These stubs document the intent for developers
-    reading the generated SQL.
-    """
+    """Generate comment stubs for sensitive columns."""
     lines = []
     for col in table.columns:
         if col.sensitive:
@@ -799,24 +689,15 @@ def _attach_trigger(schema_name: str, table_name: str) -> str:
 
 
 def _pk_filter(table: TableConfig) -> str:
-    """Return a WHERE clause fragment matching the primary key columns.
-
-    Raises:
-        ValueError: If the table has no primary key defined.
-    """
+    """Return a WHERE clause fragment matching the primary key columns."""
     pk_cols = [col for idx in table.indexes if idx.primary_key for col in idx.columns]
     if not pk_cols:
         raise ValueError(
             f"Table '{table.name}' has no primary key defined. "
             f"Tarkin requires a primary key to generate safe trigger functions. "
-            f"This should have been caught by validation — please file a bug."
+            f"This should have been caught by validation. Please file a bug report."
         )
     return " AND ".join(f"{_q(col)} = NEW.{_q(col)}" for col in pk_cols)
-
-
-# =========================================================
-# ROLES
-# =========================================================
 
 
 def _generate_roles(
@@ -847,28 +728,14 @@ def _generate_roles(
     return "\n".join(lines)
 
 
-# =========================================================
-# GRANTS
-# =========================================================
-
-
 def _generate_grants(project: GovernanceProject) -> str:
-    """Generate GRANT and REVOKE statements for all roles and schemas.
-
-    Shadow schemas are revoked from all non-owner roles.  Column-level
-    restrictions are applied via revoke/re-grant patterns for SELECT, UPDATE,
-    and REFERENCES when clearance or sensitivity restricts access.
-
-    Sensitive columns generate a warning if unmasked or if all roles have
-    ``can_access_sensitive=True``.
-    """
+    """Generate GRANT and REVOKE statements for all roles and schemas."""
     lines: list[str] = []
 
     schema_map  = {s.name: s for s in project.schemas}
     table_map   = {(s.name, t.name): t for s in project.schemas for t in s.tables}
     shadow_schemas = [f"tk_{s.name}" for s in project.schemas]
 
-    # Warn if any sensitive column has no masking strategy
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
@@ -881,7 +748,6 @@ def _generate_grants(project: GovernanceProject) -> str:
                         stacklevel=2,
                     )
 
-    # Warn if all roles have can_access_sensitive and any sensitive columns exist
     has_sensitive_cols = any(
         col.sensitive
         for schema in project.schemas
@@ -896,7 +762,6 @@ def _generate_grants(project: GovernanceProject) -> str:
             stacklevel=2,
         )
 
-    # Revoke all access to shadow schemas for non-owner roles
     for role in project.roles:
         if role.name == project.database.owner:
             continue
@@ -917,7 +782,6 @@ def _generate_grants(project: GovernanceProject) -> str:
             if not schema:
                 continue
 
-            # Schema-level grants
             schema_privs = []
             if sp.usage:  schema_privs.append("USAGE")
             if sp.create: schema_privs.append("CREATE")
@@ -926,7 +790,6 @@ def _generate_grants(project: GovernanceProject) -> str:
                     f"GRANT {', '.join(schema_privs)} ON SCHEMA {_q(sp.name)} TO {_q(role.name)};"
                 )
 
-            # Table-level grants
             for tp in sp.tables:
                 table = table_map.get((sp.name, tp.name))
                 if not table:
@@ -1039,21 +902,8 @@ def _generate_grants(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-# =========================================================
-# AUDIT (pgaudit)
-# =========================================================
-
-
 def _generate_audit(project: GovernanceProject) -> str:
-    """Generate pgaudit configuration SQL.
-
-    Before modifying pgaudit settings, the current values of ``pgaudit.log``,
-    ``pgaudit.log_catalog``, and ``pgaudit.log_relation`` are captured into
-    ``__META__.tarkin_builds`` so they can be restored on detach.
-
-    Configuration is then applied additively — existing log levels are merged
-    with the declared levels rather than overwritten.
-    """
+    """Generate pgaudit configuration SQL."""
     if not project.database.audit_enabled:
         return "-- Audit logging not enabled for this database.\n"
 
@@ -1128,25 +978,12 @@ def _generate_audit(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-# =========================================================
-# META POPULATION
-# =========================================================
-
-
 def _generate_meta_population(
-    project: GovernanceProject,
-    current: GovernanceProject,
+    project:        GovernanceProject,
+    current:        GovernanceProject,
+    needs_pgcrypto: bool = False,
 ) -> str:
-    """Generate the DO block that populates all ``__META__`` tables.
-
-    Includes recording of revoked grants (for restoration on detach) and
-    the ``added_by_tarkin`` flag on roles.
-
-    Args:
-        project: The target governance specification.
-        current: The current live-database state (used to determine which
-            roles are new and which grants existed before Tarkin).
-    """
+    """Generate the DO block that populates all __META__ tables."""
     tarkin_version = pkg_version("tarkin")
     yaml_str       = _project_to_yaml_string(project)
     profile        = _escape_sql_string(project.database.profile or "")
@@ -1155,13 +992,9 @@ def _generate_meta_population(
 
     existing_role_names = {r.name for r in current.roles}
 
-    # Collect pre-existing schema grants that Tarkin will revoke on shadow schemas.
-    # Shadow schema names are tk_{schema} — the original schema had the same grants
-    # before the rename, so we record them as belonging to the original schema name.
     revoked_grants: list[tuple[str, str, str | None, str]] = []  # role, schema, table, grant_type
 
     for schema in project.schemas:
-        # Find the current role that maps to this schema (pre-rename it was called schema.name)
         for current_role in current.roles:
             for sp in current_role.on:
                 if sp.name == schema.name:
@@ -1179,21 +1012,20 @@ def _generate_meta_population(
 
     lines = ["DO $$", "DECLARE", "    v_build_id bigint;", "BEGIN"]
 
-    # Build record — use dollar-quoting for the YAML blob to avoid escaping issues
     lines += [
-        f"    INSERT INTO __META__.tarkin_builds (tarkin_version, profile, database_name, checksum, yaml)",
+        f"    INSERT INTO __META__.tarkin_builds (tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin)",
         f"    VALUES (",
         f"        '{tarkin_version}',",
         f"        '{profile}',",
         f"        '{database_name}',",
         f"        '{checksum}',",
-        f"        $tarkin_yaml${yaml_str}$tarkin_yaml$",
+        f"        $tarkin_yaml${yaml_str}$tarkin_yaml$,",
+        f"        {str(needs_pgcrypto).lower()}",
         f"    )",
         f"    RETURNING build_id INTO v_build_id;",
         "",
     ]
 
-    # Schemas
     for schema in project.schemas:
         sn = _escape_sql_string(schema.name)
         lines.append(
@@ -1208,7 +1040,6 @@ def _generate_meta_population(
         )
     lines.append("")
 
-    # Tables
     for schema in project.schemas:
         for table in schema.tables:
             sn = _escape_sql_string(schema.name)
@@ -1225,7 +1056,6 @@ def _generate_meta_population(
             )
     lines.append("")
 
-    # Columns
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
@@ -1276,7 +1106,6 @@ def _generate_meta_population(
                 )
     lines.append("")
 
-    # Foreign keys
     for schema in project.schemas:
         for table in schema.tables:
             for fk in table.foreign_keys:
@@ -1295,7 +1124,6 @@ def _generate_meta_population(
                 )
     lines.append("")
 
-    # Roles — record added_by_tarkin flag
     for role in project.roles:
         rn  = _escape_sql_string(role.name)
         moa = ("ARRAY[" + ", ".join(f"'{_escape_sql_string(m)}'" for m in role.member_of) + "]"
@@ -1322,7 +1150,6 @@ def _generate_meta_population(
         )
     lines.append("")
 
-    # Role schema permissions
     for role in project.roles:
         for sp in role.on:
             rn = _escape_sql_string(role.name)
@@ -1335,7 +1162,6 @@ def _generate_meta_population(
             )
     lines.append("")
 
-    # Role table permissions
     for role in project.roles:
         for sp in role.on:
             for tp in sp.tables:
@@ -1354,7 +1180,6 @@ def _generate_meta_population(
                 )
     lines.append("")
 
-    # Revoked grants — stored for restoration on detach
     for (role_name, schema_name, table_name, grant_type) in revoked_grants:
         rn = _escape_sql_string(role_name)
         sn = _escape_sql_string(schema_name)
@@ -1372,9 +1197,17 @@ def _generate_meta_population(
     return "\n".join(lines)
 
 
-# =========================================================
-# UTILS
-# =========================================================
+def _needs_pgcrypto(project: GovernanceProject) -> bool:
+    """Return True if any column requires pgcrypto for hashing."""
+    return any(
+        isinstance(col.mask_config, HashMaskConfig)
+        and col.mask_config.algorithm in (
+            HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256
+        )
+        for schema in project.schemas
+        for table in schema.tables
+        for col in table.columns
+    )
 
 
 def _escape_hmac_key() -> str:
@@ -1398,12 +1231,7 @@ def _section(title: str, subtitle: str = "") -> str:
 
 
 def _escape_sql_string(s: str) -> str:
-    """Escape a string value for safe inclusion in a SQL single-quoted literal.
-
-    Handles single quotes (doubled) and backslashes (doubled).  This is safe
-    with PostgreSQL's default ``standard_conforming_strings = on``.  For string
-    blobs (e.g. the governance YAML), prefer dollar-quoting instead.
-    """
+    """Escape a string value for safe inclusion in a SQL single-quoted literal."""
     if not s:
         return ""
     return s.replace("\\", "\\\\").replace("'", "''")
@@ -1411,21 +1239,14 @@ def _escape_sql_string(s: str) -> str:
 
 def _project_to_yaml_string(project: GovernanceProject) -> str:
     """Serialize a GovernanceProject to a YAML string."""
-    from .serialize import Serializer
     return Serializer.to_yaml_string(project)
 
 
 def _project_checksum(project: GovernanceProject) -> str:
-    """Return a SHA-256 hex digest of the project's serialized YAML.
-
-    Because the YAML serializer is pinned via uv.lock and only serializes
-    declared properties (no runtime values, sequences, or comments), this
-    checksum is stable across runs for structurally identical projects.
-    """
+    """Return a SHA-256 hex digest of the project's serialized YAML."""
     return hashlib.sha256(_project_to_yaml_string(project).encode()).hexdigest()
 
 
 def _object_checksum(obj: dict) -> str:  # type: ignore[type-arg]
     """Return a 16-character SHA-256 hex digest for a single governance object dict."""
-    import json
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]

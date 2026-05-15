@@ -1,23 +1,5 @@
-"""
-Tarkin diff engine.
-
-Compares two :class:`~tarkin.model.GovernanceProject` objects and produces a
-structured list of :class:`Change` objects describing every addition, removal,
-and modification.  A :func:`render_diff` function writes a human-readable
-Markdown report to ``out/``.
-
-Typical usage::
-
-    from tarkin.diff import diff_projects, render_diff
-    from tarkin.yaml import YamlLoader
-
-    before = YamlLoader.load(Path("before.yaml"))
-    after  = YamlLoader.load(Path("after.yaml"))
-    changes = diff_projects(before, after)
-    render_diff(changes, Path("out/diff_report.md"))
-"""
+"""Compares two GovernanceProjects and produces a structured list of differences."""
 from __future__ import annotations
-
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -31,14 +13,8 @@ from .model import (
 )
 
 
-# =========================================================
-# CHANGE MODEL
-# =========================================================
-
-
 class ChangeKind(str, Enum):
-    """The kind of change recorded in a :class:`Change`."""
-
+    """The kind of change recorded in a Change."""
     ADDED   = "added"
     REMOVED = "removed"
     MODIFIED = "modified"
@@ -46,7 +22,6 @@ class ChangeKind(str, Enum):
 
 class ObjectType(str, Enum):
     """The category of governance object affected by a change."""
-
     DATABASE    = "database"
     SCHEMA      = "schema"
     TABLE       = "table"
@@ -59,20 +34,7 @@ class ObjectType(str, Enum):
 
 @dataclass
 class Change:
-    """A single atomic difference between two governance specifications.
-
-    Attributes:
-        kind:        Whether the object was added, removed, or modified.
-        object_type: The category of the affected object.
-        path:        Human-readable dotted path to the object
-                     (e.g. ``"public.users.email"``).
-        field:       For MODIFIED changes, the name of the field that changed.
-                     ``None`` for ADDED/REMOVED.
-        before:      The previous value.  ``None`` for ADDED changes.
-        after:       The new value.  ``None`` for REMOVED changes.
-        note:        Optional free-text annotation (e.g. migration risk notes).
-    """
-
+    """A single atomic difference between two governance specifications."""
     kind:        ChangeKind
     object_type: ObjectType
     path:        str
@@ -82,29 +44,8 @@ class Change:
     note:        str | None      = None
 
 
-# =========================================================
-# PUBLIC ENTRY POINT
-# =========================================================
-
-
-def diff_projects(
-    before: GovernanceProject,
-    after:  GovernanceProject,
-) -> list[Change]:
-    """Compare two governance projects and return all detected changes.
-
-    Both projects should be fully validated before diffing.  The comparison
-    is purely structural — it does not connect to a live database.
-
-    Args:
-        before: The current (or baseline) governance specification.
-        after:  The target governance specification.
-
-    Returns:
-        A list of :class:`Change` objects in breadth-first order:
-        database → schemas → tables → columns → indexes → foreign keys →
-        roles → permissions.
-    """
+def diff_projects(before: GovernanceProject,after:  GovernanceProject) -> list[Change]:
+    """Compare two governance projects and return all detected changes."""
     changes: list[Change] = []
     _diff_database(before, after, changes)
     _diff_schemas(before, after, changes)
@@ -112,21 +53,8 @@ def diff_projects(
     return changes
 
 
-# =========================================================
-# RENDERER
-# =========================================================
-
-
 def render_diff(changes: list[Change], output_path: Path) -> None:
-    """Write a human-readable Markdown diff report to *output_path*.
-
-    Creates parent directories as needed.  If there are no changes, a brief
-    "no changes detected" report is written rather than an empty file.
-
-    Args:
-        changes:     The list of changes produced by :func:`diff_projects`.
-        output_path: Destination path for the Markdown report.
-    """
+    """Write a human-readable Markdown diff report to *output_path*."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = ["# Tarkin Diff Report\n"]
@@ -136,7 +64,6 @@ def render_diff(changes: list[Change], output_path: Path) -> None:
         output_path.write_text("\n".join(lines), encoding="utf-8")
         return
 
-    # Group by object type for readable sections
     by_type: dict[ObjectType, list[Change]] = {}
     for c in changes:
         by_type.setdefault(c.object_type, []).append(c)
@@ -152,8 +79,8 @@ def render_diff(changes: list[Change], output_path: Path) -> None:
         ObjectType.PERMISSION,
     ]
 
-    summary_added   = sum(1 for c in changes if c.kind == ChangeKind.ADDED)
-    summary_removed = sum(1 for c in changes if c.kind == ChangeKind.REMOVED)
+    summary_added    = sum(1 for c in changes if c.kind == ChangeKind.ADDED)
+    summary_removed  = sum(1 for c in changes if c.kind == ChangeKind.REMOVED)
     summary_modified = sum(1 for c in changes if c.kind == ChangeKind.MODIFIED)
 
     lines.append(
@@ -195,11 +122,6 @@ def _fmt(value: Any) -> str:
     return f"`{s}`"
 
 
-# =========================================================
-# DATABASE-LEVEL DIFF
-# =========================================================
-
-
 def _diff_database(
     before: GovernanceProject,
     after:  GovernanceProject,
@@ -207,26 +129,27 @@ def _diff_database(
 ) -> None:
     """Diff top-level database configuration fields."""
     db_fields = [
-        "name", "audit_enabled", "audit_logged", "engine",
-        "host", "port", "database", "owner",
+        "name",
+        "audit_enabled",
+        "audit_logged",
+        "engine",
+        "host",
+        "port",
+        "database",
+        "owner",
     ]
     for f in db_fields:
         b_val = getattr(before.database, f)
         a_val = getattr(after.database, f)
         if b_val != a_val:
             out.append(Change(
-                kind=ChangeKind.MODIFIED,
-                object_type=ObjectType.DATABASE,
-                path="database",
-                field=f,
-                before=b_val,
-                after=a_val,
+                kind        = ChangeKind.MODIFIED,
+                object_type = ObjectType.DATABASE,
+                path        = "database",
+                field       = f,
+                before      = b_val,
+                after       = a_val,
             ))
-
-
-# =========================================================
-# SCHEMA DIFF
-# =========================================================
 
 
 def _diff_schemas(
@@ -240,17 +163,17 @@ def _diff_schemas(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.SCHEMA,
-            path=name,
-            note="All tables and views in this schema will need to be rebuilt.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.SCHEMA,
+            path        = name,
+            note        = "All tables and views in this schema will need to be rebuilt.",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.SCHEMA,
-            path=name,
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.SCHEMA,
+            path        = name,
         ))
 
     for name in sorted(set(before_map) & set(after_map)):
@@ -269,12 +192,12 @@ def _diff_schema(
         a_val = getattr(after, f)
         if b_val != a_val:
             out.append(Change(
-                kind=ChangeKind.MODIFIED,
-                object_type=ObjectType.SCHEMA,
-                path=path,
-                field=f,
-                before=b_val,
-                after=a_val,
+                kind        = ChangeKind.MODIFIED,
+                object_type = ObjectType.SCHEMA,
+                path        = path,
+                field       = f,
+                before      = b_val,
+                after       = a_val,
             ))
 
     _diff_tables(before, after, out)
@@ -292,17 +215,17 @@ def _diff_tables(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.TABLE,
-            path=f"{schema}.{name}",
-            note="DROP TABLE in shadow schema required.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.TABLE,
+            path        = f"{schema}.{name}",
+            note        = "DROP TABLE in shadow schema required.",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.TABLE,
-            path=f"{schema}.{name}",
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.TABLE,
+            path        = f"{schema}.{name}",
         ))
 
     for name in sorted(set(before_map) & set(after_map)):
@@ -323,12 +246,12 @@ def _diff_table(
         a_val = getattr(after, f)
         if b_val != a_val:
             out.append(Change(
-                kind=ChangeKind.MODIFIED,
-                object_type=ObjectType.TABLE,
-                path=path,
-                field=f,
-                before=b_val,
-                after=a_val,
+                kind        = ChangeKind.MODIFIED,
+                object_type = ObjectType.TABLE,
+                path        = path,
+                field       = f,
+                before      = b_val,
+                after       = a_val,
             ))
 
     _diff_columns(schema, before, after, out)
@@ -349,23 +272,31 @@ def _diff_columns(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.COLUMN,
-            path=f"{schema}.{table}.{name}",
-            note="ALTER TABLE DROP COLUMN required in shadow schema.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.COLUMN,
+            path        = f"{schema}.{table}.{name}",
+            note        = "ALTER TABLE DROP COLUMN required in shadow schema.",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.COLUMN,
-            path=f"{schema}.{table}.{name}",
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.COLUMN,
+            path        = f"{schema}.{table}.{name}",
         ))
 
     col_fields = [
-        "type", "clearance", "nullable", "unique", "immutable",
-        "versioned", "sensitive", "masking_strategy", "default",
-        "generated_expression", "generated_storage",
+        "type",
+        "clearance",
+        "nullable",
+        "unique",
+        "immutable",
+        "versioned",
+        "sensitive",
+        "masking_strategy",
+        "default",
+        "generated_expression",
+        "generated_storage",
     ]
     for name in sorted(set(before_map) & set(after_map)):
         bc = before_map[name]
@@ -377,33 +308,32 @@ def _diff_columns(
             if b_val != a_val:
                 note = None
                 if f == "type":
-                    note = "Type changes require ALTER COLUMN TYPE — verify cast compatibility."
+                    note = "Type changes require ALTER COLUMN TYPE. Please verify cast compatibility."
                 elif f == "nullable" and not a_val:
                     note = "Adding NOT NULL requires a backfill or DEFAULT."
                 elif f in ("masking_strategy", "sensitive", "clearance"):
                     note = "View regeneration required."
                 out.append(Change(
-                    kind=ChangeKind.MODIFIED,
-                    object_type=ObjectType.COLUMN,
-                    path=path,
-                    field=f,
-                    before=b_val,
-                    after=a_val,
-                    note=note,
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.COLUMN,
+                    path        = path,
+                    field       = f,
+                    before      = b_val,
+                    after       = a_val,
+                    note        = note,
                 ))
 
-        # Diff mask_config as a blob — detailed field diffing would add noise
         b_mc = str(bc.mask_config) if bc.mask_config else None
         a_mc = str(ac.mask_config) if ac.mask_config else None
         if b_mc != a_mc:
             out.append(Change(
-                kind=ChangeKind.MODIFIED,
-                object_type=ObjectType.COLUMN,
-                path=path,
-                field="mask_config",
-                before=b_mc,
-                after=a_mc,
-                note="View regeneration required.",
+                kind        = ChangeKind.MODIFIED,
+                object_type = ObjectType.COLUMN,
+                path        = path,
+                field       = "mask_config",
+                before      = b_mc,
+                after       = a_mc,
+                note        = "View regeneration required.",
             ))
 
 
@@ -420,20 +350,26 @@ def _diff_indexes(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.INDEX,
-            path=f"{schema}.{table}.{name}",
-            note="DROP INDEX required.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.INDEX,
+            path        = f"{schema}.{table}.{name}",
+            note        = "DROP INDEX required.",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.INDEX,
-            path=f"{schema}.{table}.{name}",
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.INDEX,
+            path        = f"{schema}.{table}.{name}",
         ))
 
-    idx_fields = ["columns", "index_type", "unique", "primary_key", "partial_filter"]
+    idx_fields = [
+        "columns",
+        "index_type",
+        "unique",
+        "primary_key",
+        "partial_filter",
+    ]
     for name in sorted(set(before_map) & set(after_map)):
         bi = before_map[name]
         ai = after_map[name]
@@ -443,13 +379,13 @@ def _diff_indexes(
             a_val = getattr(ai, f)
             if b_val != a_val:
                 out.append(Change(
-                    kind=ChangeKind.MODIFIED,
-                    object_type=ObjectType.INDEX,
-                    path=path,
-                    field=f,
-                    before=b_val,
-                    after=a_val,
-                    note="DROP and recreate index required.",
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.INDEX,
+                    path        = path,
+                    field       = f,
+                    before      = b_val,
+                    after       = a_val,
+                    note        = "DROP and recreate index required.",
                 ))
 
 
@@ -466,19 +402,24 @@ def _diff_foreign_keys(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.FOREIGN_KEY,
-            path=f"{schema}.{table}.{name}",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.FOREIGN_KEY,
+            path        = f"{schema}.{table}.{name}",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.FOREIGN_KEY,
-            path=f"{schema}.{table}.{name}",
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.FOREIGN_KEY,
+            path        = f"{schema}.{table}.{name}",
         ))
 
-    fk_fields = ["column", "referenced_schema", "referenced_table", "referenced_column"]
+    fk_fields = [
+        "column",
+        "referenced_schema",
+        "referenced_table",
+        "referenced_column",
+    ]
     for name in sorted(set(before_map) & set(after_map)):
         bf = before_map[name]
         af = after_map[name]
@@ -488,19 +429,14 @@ def _diff_foreign_keys(
             a_val = getattr(af, f)
             if b_val != a_val:
                 out.append(Change(
-                    kind=ChangeKind.MODIFIED,
-                    object_type=ObjectType.FOREIGN_KEY,
-                    path=path,
-                    field=f,
-                    before=b_val,
-                    after=a_val,
-                    note="DROP CONSTRAINT and recreate required.",
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.FOREIGN_KEY,
+                    path        = path,
+                    field       = f,
+                    before      = b_val,
+                    after       = a_val,
+                    note        = "DROP CONSTRAINT and recreate required.",
                 ))
-
-
-# =========================================================
-# ROLE DIFF
-# =========================================================
 
 
 def _diff_roles(
@@ -514,22 +450,27 @@ def _diff_roles(
 
     for name in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.ROLE,
-            path=name,
-            note="Role will be dropped if it was created by Tarkin.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.ROLE,
+            path        = name,
+            note        = "Role will be dropped if it was created by Tarkin.",
         ))
 
     for name in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.ROLE,
-            path=name,
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.ROLE,
+            path        = name,
         ))
 
     role_fields = [
-        "clearance", "can_login", "can_admin", "can_write",
-        "can_maintain", "can_access_sensitive", "member_of",
+        "clearance",
+        "can_login",
+        "can_admin",
+        "can_write",
+        "can_maintain",
+        "can_access_sensitive",
+        "member_of",
     ]
     for name in sorted(set(before_map) & set(after_map)):
         br = before_map[name]
@@ -539,12 +480,12 @@ def _diff_roles(
             a_val = getattr(ar, f)
             if b_val != a_val:
                 out.append(Change(
-                    kind=ChangeKind.MODIFIED,
-                    object_type=ObjectType.ROLE,
-                    path=name,
-                    field=f,
-                    before=b_val,
-                    after=a_val,
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.ROLE,
+                    path        = name,
+                    field       = f,
+                    before      = b_val,
+                    after       = a_val,
                 ))
 
         _diff_permissions(br, ar, out)
@@ -562,17 +503,17 @@ def _diff_permissions(
 
     for schema in sorted(set(before_map) - set(after_map)):
         out.append(Change(
-            kind=ChangeKind.REMOVED,
-            object_type=ObjectType.PERMISSION,
-            path=f"{role}.{schema}",
-            note="REVOKE USAGE ON SCHEMA required.",
+            kind        = ChangeKind.REMOVED,
+            object_type = ObjectType.PERMISSION,
+            path        = f"{role}.{schema}",
+            note        = "REVOKE USAGE ON SCHEMA required.",
         ))
 
     for schema in sorted(set(after_map) - set(before_map)):
         out.append(Change(
-            kind=ChangeKind.ADDED,
-            object_type=ObjectType.PERMISSION,
-            path=f"{role}.{schema}",
+            kind        = ChangeKind.ADDED,
+            object_type = ObjectType.PERMISSION,
+            path        = f"{role}.{schema}",
         ))
 
     for schema in sorted(set(before_map) & set(after_map)):
@@ -585,12 +526,12 @@ def _diff_permissions(
             a_val = getattr(asp, f)
             if b_val != a_val:
                 out.append(Change(
-                    kind=ChangeKind.MODIFIED,
-                    object_type=ObjectType.PERMISSION,
-                    path=path,
-                    field=f,
-                    before=b_val,
-                    after=a_val,
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.PERMISSION,
+                    path        = path,
+                    field       = f,
+                    before      = b_val,
+                    after       = a_val,
                 ))
 
         # Table permissions
@@ -599,21 +540,29 @@ def _diff_permissions(
 
         for tname in sorted(set(bt_map) - set(at_map)):
             out.append(Change(
-                kind=ChangeKind.REMOVED,
-                object_type=ObjectType.PERMISSION,
-                path=f"{role}.{schema}.{tname}",
-                note="REVOKE on table required.",
+                kind        = ChangeKind.REMOVED,
+                object_type = ObjectType.PERMISSION,
+                path        = f"{role}.{schema}.{tname}",
+                note        = "REVOKE on table required.",
             ))
 
         for tname in sorted(set(at_map) - set(bt_map)):
             out.append(Change(
-                kind=ChangeKind.ADDED,
-                object_type=ObjectType.PERMISSION,
-                path=f"{role}.{schema}.{tname}",
+                kind        = ChangeKind.ADDED,
+                object_type = ObjectType.PERMISSION,
+                path        = f"{role}.{schema}.{tname}",
             ))
 
-        tp_fields = ["select", "insert", "update", "delete",
-                     "truncate", "references", "trigger", "maintain"]
+        tp_fields = [
+            "select",
+            "insert",
+            "update",
+            "delete",
+            "truncate",
+            "references",
+            "trigger",
+            "maintain",
+        ]
         for tname in sorted(set(bt_map) & set(at_map)):
             btp = bt_map[tname]
             atp = at_map[tname]
@@ -623,10 +572,10 @@ def _diff_permissions(
                 a_val = getattr(atp, f)
                 if b_val != a_val:
                     out.append(Change(
-                        kind=ChangeKind.MODIFIED,
-                        object_type=ObjectType.PERMISSION,
-                        path=tp_path,
-                        field=f,
-                        before=b_val,
-                        after=a_val,
+                        kind        = ChangeKind.MODIFIED,
+                        object_type = ObjectType.PERMISSION,
+                        path        = tp_path,
+                        field       = f,
+                        before      = b_val,
+                        after       = a_val,
                     ))

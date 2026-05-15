@@ -1,3 +1,4 @@
+"""The base logic for GovernanceProjects."""
 from __future__ import annotations
 from enum import Enum
 from typing import Optional, Union
@@ -20,7 +21,7 @@ class StrEnum(str, Enum):
 
 
 class DatabaseEngine(StrEnum):
-    """Supported database engines."""
+    """Supported database engines. Only Postgres is supported currently, but future implementations are planned."""
 
     POSTGRES = "postgres"
     MYSQL    = "mysql"
@@ -87,82 +88,73 @@ class IndexType(StrEnum):
 
 class MaskConfig(BaseModel):
     """Base class for all masking configurations."""
-
     hide_null: bool = False
 
 
 class FullMaskConfig(MaskConfig):
     """Replace entire value with mask_char repeated to match original length."""
-
     mask_char: str = "X"
 
 
 class PartialMaskConfig(MaskConfig):
     """Show a portion of the value, mask the rest."""
-
     visible_length: int
     visible_side:   PartialMaskVisibleSide = PartialMaskVisibleSide.RIGHT
     mask_char:      str = "X"
 
 
 class HashAlgorithm(StrEnum):
-    """Hash algorithms available for column masking.
+    """
+    Hash algorithms available for column masking.
 
     Note: xxhash is non-cryptographic. sha256/sha512 are cryptographic but
     vulnerable to dictionary attacks on low-entropy data. hmac256 requires
-    a secret key stored as the database setting ``tarkin.hmac_key``.
+    a secret key stored as the database setting tarkin.hmac_key.
     """
-
-    XXHASH   = "xxhash"    # hashtextextended — fast, non-cryptographic
-    SHA256   = "sha256"    # pgcrypto digest — cryptographic, no key
-    SHA512   = "sha512"    # pgcrypto digest — cryptographic, no key
-    HMAC256  = "hmac256"   # pgcrypto hmac — cryptographic, requires key
+    XXHASH   = "xxhash"
+    SHA256   = "sha256"
+    SHA512   = "sha512"
+    HMAC256  = "hmac256"
 
 
 class HashMaskConfig(MaskConfig):
-    """Configuration for hash-based masking.
+    """
+    Configuration for hash-based masking.
 
     The HMAC key for hmac256 is never stored in the governance YAML.
-    It is sourced from ``credentials.toml`` and stored as the database-level
-    setting ``tarkin.hmac_key`` during ``tarkin attach``.
+    It is sourced from credentials.toml and stored as the database-level
+    setting tarkin.hmac_key during 'tarkin attach'.
     """
-
     algorithm: HashAlgorithm = HashAlgorithm.XXHASH
 
 
 class EmailMaskConfig(MaskConfig):
     """Mask everything left of the @ symbol: j***@example.com."""
-
     mask_char: str = "X"
 
 
 class PhoneMaskConfig(MaskConfig):
     """Show last N digits, mask the rest: XXX-XXX-1234."""
-
     visible_digits: int = 4
     mask_char:      str = "X"
 
 
 class CreditCardMaskConfig(MaskConfig):
     """Show last 4 digits in standard format: XXXX-XXXX-XXXX-1234."""
-
     mask_char: str = "X"
 
 
 class IpAddressMaskConfig(MaskConfig):
     """Mask last N octets: 192.168.X.X."""
-
     visible_octets: int = 2
     mask_char:      str = "X"
 
 
 class NameMaskConfig(MaskConfig):
     """Show first letter of each word, mask the rest: J*** S***."""
-
     mask_char: str = "*"
 
 
-# Union type for mask_config field
 AnyMaskConfig = Union[
     FullMaskConfig,
     PartialMaskConfig,
@@ -176,13 +168,12 @@ AnyMaskConfig = Union[
 
 
 # =========================================================
-# BASE MODEL
+# MODELS
 # =========================================================
 
 
 class TarkinBaseModel(BaseModel):
     """Shared model configuration for all Tarkin objects."""
-
     model_config = ConfigDict(
         extra="forbid",
         validate_assignment=True,
@@ -190,14 +181,8 @@ class TarkinBaseModel(BaseModel):
     )
 
 
-# =========================================================
-# DATABASE
-# =========================================================
-
-
 class DatabaseConfig(TarkinBaseModel):
     """Top-level database configuration."""
-
     name:          str                  = "default_database"
     description:   Optional[str]        = None
     encryption_enabled: bool            = False
@@ -214,19 +199,8 @@ class DatabaseConfig(TarkinBaseModel):
     owner:    Optional[str]  = None
 
 
-# =========================================================
-# COLUMN
-# =========================================================
-
-
 class ColumnConfig(TarkinBaseModel):
-    """Configuration for a single database column.
-
-    The ``sensitive`` flag restricts column access to roles with
-    ``can_access_sensitive=True``, enforced via column-level grants on views.
-    It does not affect trigger logic.
-    """
-
+    """Configuration for a single database column."""
     name:          str           = "default_column"
     clearance:     int           = 0
     description:   Optional[str] = None
@@ -246,7 +220,7 @@ class ColumnConfig(TarkinBaseModel):
     mask_config:      Optional[AnyMaskConfig] = None
 
     generated_expression: Optional[str]          = None
-    generated_storage:    GeneratedColumnStorage  = GeneratedColumnStorage.STORED
+    generated_storage:    GeneratedColumnStorage = GeneratedColumnStorage.STORED
 
     @property
     def is_generated(self) -> bool:
@@ -254,14 +228,8 @@ class ColumnConfig(TarkinBaseModel):
         return self.generated_expression is not None
 
 
-# =========================================================
-# INDEX
-# =========================================================
-
-
 class IndexConfig(TarkinBaseModel):
     """Configuration for a database index."""
-
     name:           str        = "default_index"
     columns:        list[str]
     index_type:     IndexType  = IndexType.BTREE
@@ -270,14 +238,8 @@ class IndexConfig(TarkinBaseModel):
     partial_filter: str | None = None
 
 
-# =========================================================
-# FOREIGN KEY
-# =========================================================
-
-
 class ForeignKeyConfig(TarkinBaseModel):
     """Configuration for a foreign key constraint."""
-
     name:               str = "default_fk"
     column:             str
     referenced_schema:  str
@@ -285,22 +247,16 @@ class ForeignKeyConfig(TarkinBaseModel):
     referenced_column:  str
 
 
-# =========================================================
-# TABLE
-# =========================================================
-
-
 class TableConfig(TarkinBaseModel):
     """Configuration for a database table."""
-
     name:          str           = "default_table"
     clearance:     int           = 0
     description:   Optional[str] = None
     audit_enabled: bool          = True
 
-    columns:      list[ColumnConfig]      = Field(default_factory=list)
-    indexes:      list[IndexConfig]       = Field(default_factory=list)
-    foreign_keys: list[ForeignKeyConfig]  = Field(default_factory=list)
+    columns:      list[ColumnConfig]     = Field(default_factory=list)
+    indexes:      list[IndexConfig]      = Field(default_factory=list)
+    foreign_keys: list[ForeignKeyConfig] = Field(default_factory=list)
 
     @property
     def clearance_min(self) -> int:
@@ -318,14 +274,8 @@ class TableConfig(TarkinBaseModel):
         return self.clearance_min, self.clearance_max
 
 
-# =========================================================
-# SCHEMA
-# =========================================================
-
-
 class SchemaConfig(TarkinBaseModel):
     """Configuration for a database schema."""
-
     name:          str           = "default_schema"
     clearance:     int           = 0
     description:   Optional[str] = None
@@ -365,14 +315,8 @@ class SchemaConfig(TarkinBaseModel):
         return self.clearance_min, self.clearance_max
 
 
-# =========================================================
-# PERMISSIONS
-# =========================================================
-
-
 class TablePermissionConfig(TarkinBaseModel):
     """Privilege configuration for a role on a specific table."""
-
     name:       str  = "-"
     select:     bool = True
     insert:     bool = False
@@ -386,26 +330,20 @@ class TablePermissionConfig(TarkinBaseModel):
 
 class SchemaPermissionConfig(TarkinBaseModel):
     """Privilege configuration for a role on a specific schema."""
-
     name:   str                         = "-"
     tables: list[TablePermissionConfig] = Field(default_factory=list)
     usage:  bool                        = True
     create: bool                        = False
 
 
-# =========================================================
-# ROLES
-# =========================================================
-
-
 class RoleConfig(TarkinBaseModel):
-    """Configuration for a database role.
+    """
+    Configuration for a database role.
 
     Roles that exist in the governance YAML but not in the live database
     at build time are created by Tarkin and will be dropped on detach.
     Roles that already exist are altered but not dropped on detach.
     """
-
     name:        str           = "default_role"
     clearance:   int           = 0
     description: Optional[str] = None
@@ -420,14 +358,8 @@ class RoleConfig(TarkinBaseModel):
     on:        list[SchemaPermissionConfig] = Field(default_factory=list)
 
 
-# =========================================================
-# ROOT PROJECT
-# =========================================================
-
-
 class GovernanceProject(TarkinBaseModel):
     """Root object representing a full Tarkin governance specification."""
-
     database: DatabaseConfig
 
     schemas: list[SchemaConfig] = Field(default_factory=list)

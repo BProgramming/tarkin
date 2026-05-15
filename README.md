@@ -1,6 +1,6 @@
 # Tarkin
 
-**Governance compiler for PostgreSQL.** Tarkin takes a YAML specification of your database's access model — schemas, tables, columns, clearance levels, masking strategies, roles, and audit settings — and compiles it into a live PostgreSQL governance layer.
+**Governance compiler for PostgreSQL.** Tarkin takes a YAML specification of your database's access model: schemas, tables, columns, clearance levels, masking strategies, roles, and audit settings, and compiles it into a live PostgreSQL governance layer.
 
 ## How it works
 

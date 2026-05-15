@@ -61,11 +61,11 @@ The `xxhash` strategy uses `hashtextextended`, which is fast but non-cryptograph
 
 #### Cryptographic Hashing Without a Key (sha256, sha512)
 
-SHA256 and SHA512 are cryptographic hash functions but are still vulnerable to dictionary attacks on low-entropy data. An attacker with a list of candidate values (e.g. all valid postcodes) can hash each one and compare. Use `hmac256` with a strong secret key for maximum protection.
+SHA256 and SHA512 are cryptographic hash functions but are still vulnerable to dictionary attacks on low-entropy data. An attacker with a list of candidate values (e.g. all valid postal codes) can hash each one and compare. Use `hmac256` with a strong secret key for maximum protection.
 
 #### Sensitive Columns
 
-The `sensitive: true` flag restricts column access to roles with `can_access_sensitive: true`, enforced via column-level `REVOKE`/`GRANT SELECT` on views. This is PostgreSQL-native enforcement — it is not dependent on Tarkin's trigger layer.
+The `sensitive: true` flag restricts column access to roles with `can_access_sensitive: true`, enforced via column-level `REVOKE`/`GRANT SELECT` on views. This is PostgreSQL-native enforcement, and is not dependent on Tarkin's trigger layer.
 
 Sensitive columns that also have `masking_strategy: none` will emit a build-time warning. Roles with `can_access_sensitive: true` will see the raw value.
 

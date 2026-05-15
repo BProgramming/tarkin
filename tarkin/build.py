@@ -1,3 +1,4 @@
+"""Build a Tarkin model from a GovernanceProject."""
 from __future__ import annotations
 import json
 import zipfile
@@ -11,10 +12,6 @@ from .model import GovernanceProject
 from .codegen import generate_sql, _project_checksum
 
 
-# =========================================================
-# OUTPUT DIRECTORY
-# =========================================================
-
 OUT_DIR = Path("out")
 
 
@@ -23,26 +20,10 @@ def _ensure_out_dir(out_dir: Path) -> Path:
     return out_dir
 
 
-# =========================================================
-# BUILD ENTRY POINT
-# =========================================================
-
 def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path | None = None) -> Path:
-    """
-    Run a full Tarkin build against a live database.
-
-    1. Re-inspect the live database to capture current state
-    2. Verify no tk_ schemas exist (would indicate a prior build)
-    3. Verify pgaudit is available if audit_enabled=True
-    4. Generate SQL
-    5. Write build artifact (zip containing JSON metadata + SQL)
-    6. Return path to the zip
-
-    Raises BuildError on any failure.
-    """
+    """Run a full Tarkin build against a live database."""
     out = _ensure_out_dir(out_dir or OUT_DIR)
 
-    # Step 1 — re-inspect current state
     print("Inspecting current database state...", end="\r")
     try:
         current = inspect_database(profile)
@@ -50,34 +31,27 @@ def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path 
         raise BuildError(f"Failed to inspect database: {exc}") from exc
     print("Inspecting current database state... Done.")
 
-    # Step 2 — check for existing Tarkin build
+    print("Checking requirements...", end="\r")
     _check_no_existing_build(current)
-
-    # Step 3 — check pgaudit if required
     _check_pgaudit_requirements(project, current)
+    print("Checking requirements... Done.")
 
-    # Step 4 — generate SQL
     print("Generating SQL...", end="\r")
     sql = generate_sql(project, current, profile)
     print("Generating SQL... Done.")
 
-    # Step 5 — write artifact
     print("Building artifact...", end="\r")
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     zip_path  = out / f"tarkin_build_{timestamp}.zip"
-
     metadata = _build_metadata(project, current, profile)
     _write_artifact(zip_path, sql, metadata)
-
     print(f"Building artifact... Written to {zip_path}.")
+
     return zip_path
 
 
-# =========================================================
-# VALIDATION
-# =========================================================
-
 def _check_no_existing_build(current: GovernanceProject) -> None:
+    """Check if there are no existing build artifacts."""
     tk_schemas = [s for s in current.schemas if s.name.casefold().startswith("tk_")]
     if tk_schemas:
         names = ", ".join(s.name for s in tk_schemas)
@@ -88,7 +62,7 @@ def _check_no_existing_build(current: GovernanceProject) -> None:
 
 
 def _check_pgaudit_requirements(project: GovernanceProject, current: GovernanceProject) -> None:
-    """Fail if the YAML requires audit but the live database doesn't have pgaudit preloaded."""
+    """Fail if the YAML requires pgaudit but the live database doesn't have pgaudit preloaded."""
     if project.database.audit_enabled and not current.database.audit_enabled:
         raise BuildError(
             "The governance YAML requires audit_enabled=true, but pgaudit is not "
@@ -98,11 +72,8 @@ def _check_pgaudit_requirements(project: GovernanceProject, current: GovernanceP
         )
 
 
-# =========================================================
-# METADATA
-# =========================================================
-
 def _build_metadata(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> dict:
+    """Build a metadata dict for a GovernanceProject."""
     return {
         "tarkin_version": pkg_version("tarkin"),
         "built_at":       datetime.now(UTC).isoformat(),
@@ -119,19 +90,12 @@ def _build_metadata(project: GovernanceProject, current: GovernanceProject, prof
     }
 
 
-# =========================================================
-# ARTIFACT
-# =========================================================
-
 def _write_artifact(zip_path: Path, sql: str, metadata: dict) -> None:
+    """Write an artifact to a zip file."""
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("tarkin_build.json", json.dumps(metadata, indent=2))
         zf.writestr("tarkin_build.sql",  sql)
 
-
-# =========================================================
-# ERRORS
-# =========================================================
 
 class BuildError(Exception):
     pass

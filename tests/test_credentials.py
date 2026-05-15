@@ -1,14 +1,4 @@
-"""
-Credential loading and connection tests.
-
-Tests that don't require a live database use a mock credentials file written
-to a temp directory. Tests that require a live connection are marked with
-pytest.mark.integration and skipped unless TARKIN_TEST_DSN is set.
-
-To run integration tests:
-    TARKIN_TEST_DSN="host=localhost port=5432 database=mydb user=me password=pw" \
-        python -m pytest tests/ -m integration
-"""
+"""Credential loading and connection tests."""
 from __future__ import annotations
 import os
 import textwrap
@@ -20,20 +10,10 @@ from tarkin.credentials import (
     CredentialsFile, ConnectionProfile, ConnectionResult, check_connection,
 )
 
-
-# =====================================================
-# HELPERS
-# =====================================================
-
 def write_toml(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "credentials.toml"
     p.write_text(textwrap.dedent(content))
     return p
-
-
-# =====================================================
-# CREDENTIALS FILE LOADING
-# =====================================================
 
 def test_load_single_profile(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
@@ -80,8 +60,8 @@ def test_load_multiple_profiles(tmp_path: Path) -> None:
 def test_get_existing_profile(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost"
-        port = 5432
+        host     = "localhost"
+        port     = 5432
         database = "db"
         username = "u"
         password = "pw"
@@ -94,8 +74,8 @@ def test_get_existing_profile(tmp_path: Path) -> None:
 def test_get_missing_profile_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost"
-        port = 5432
+        host     = "localhost"
+        port     = 5432
         database = "db"
         username = "u"
         password = "pw"
@@ -113,8 +93,8 @@ def test_load_missing_file_raises() -> None:
 def test_invalid_port_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost"
-        port = 99999
+        host     = "localhost"
+        port     = 99999
         database = "db"
         username = "u"
         password = "pw"
@@ -126,8 +106,8 @@ def test_invalid_port_raises(tmp_path: Path) -> None:
 def test_missing_required_field_raises(tmp_path: Path) -> None:
     p = write_toml(tmp_path, """
         [dev]
-        host = "localhost"
-        port = 5432
+        host     = "localhost"
+        port     = 5432
         database = "db"
         password = "pw"
     """)
@@ -137,18 +117,24 @@ def test_missing_required_field_raises(tmp_path: Path) -> None:
 
 def test_dsn_does_not_expose_password() -> None:
     prof = ConnectionProfile(
-        profile="dev", host="localhost", port=5432,
-        database="db", username="user", password=SecretStr("s3cr3t"),
+        profile  = "dev",
+        host     = "localhost",
+        port     = 5432,
+        database = "db",
+        username = "user",
+        password = SecretStr("s3cr3t"),
     )
-    # DSN itself will contain the password (it's passed to the driver) —
-    # but safe_repr() must not
     assert "s3cr3t" not in prof.safe_repr()
 
 
 def test_safe_repr_contains_key_fields() -> None:
     prof = ConnectionProfile(
-        profile="dev", host="pg.example.com", port=5433,
-        database="mydb", username="alice", password=SecretStr("pw"),
+        profile  = "dev",
+        host     = "pg.example.com",
+        port     = 5433,
+        database = "mydb",
+        username = "alice",
+        password = SecretStr("pw"),
     )
     s = prof.safe_repr()
     assert "alice" in s
@@ -157,15 +143,12 @@ def test_safe_repr_contains_key_fields() -> None:
     assert "mydb" in s
     assert "dev" in s
 
-
-# =====================================================
-# MOCK CONNECTION TESTS (no live DB required)
-# =====================================================
-
 def test_connection_result_str_success() -> None:
     r = ConnectionResult(
-        profile="dev", success=True,
-        server_version="16.2", db_user="alice",
+        profile        = "dev",
+        success        = True,
+        server_version = "16.2",
+        db_user        = "alice",
     )
     s = str(r)
     assert "PASS" in s
@@ -175,8 +158,9 @@ def test_connection_result_str_success() -> None:
 
 def test_connection_result_str_failure() -> None:
     r = ConnectionResult(
-        profile="prod", success=False,
-        error="Connection refused",
+        profile = "prod",
+        success = False,
+        error   = "Connection refused",
     )
     s = str(r)
     assert "FAIL" in s
@@ -186,27 +170,19 @@ def test_connection_result_str_failure() -> None:
 def test_bad_host_returns_failed_result() -> None:
     """A profile pointing at a nonexistent host should return success=False, not raise."""
     prof = ConnectionProfile(
-        profile="bad",
-        host="this-host-does-not-exist.invalid",
-        port=5432,
-        database="db",
-        username="u",
-        password=SecretStr("pw"),
+        profile  = "bad",
+        host     = "this-host-does-not-exist.invalid",
+        port     = 5432,
+        database = "db",
+        username = "u",
+        password = SecretStr("pw"),
     )
     result = check_connection(prof)
     assert result.success is False
     assert result.error is not None
 
-
-# =====================================================
-# INTEGRATION TESTS (require live DB)
-# =====================================================
-
 def _integration_profile() -> ConnectionProfile | None:
-    """
-    Build a ConnectionProfile from TARKIN_TEST_* env vars.
-    Returns None if vars are not set, causing the test to skip.
-    """
+    """Build a ConnectionProfile from TARKIN_TEST_* env vars."""
     host     = os.environ.get("TARKIN_TEST_HOST")
     database = os.environ.get("TARKIN_TEST_DB")
     username = os.environ.get("TARKIN_TEST_USER")

@@ -1,35 +1,37 @@
-"""
-Round-trip serialization tests.
-
-These tests verify that serialize(deserialize(serialize(project))) == project
-for all fixture projects, covering the full YAML → model → YAML → model cycle.
-
-No database connection required.
-"""
+"""Round-trip serialization tests."""
 from __future__ import annotations
 
 from tarkin.model import (
-    GovernanceProject, MaskingStrategy,
-    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
-    EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
-    IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
-    HashAlgorithm, IndexType, SchemaConfig, ColumnConfig, IndexConfig, TableConfig,
+    GovernanceProject,
+    MaskingStrategy,
+    FullMaskConfig,
+    PartialMaskConfig,
+    HashMaskConfig,
+    EmailMaskConfig,
+    PhoneMaskConfig,
+    CreditCardMaskConfig,
+    IpAddressMaskConfig,
+    NameMaskConfig,
+    PartialMaskVisibleSide,
+    HashAlgorithm,
+    IndexType,
+    SchemaConfig,
+    ColumnConfig,
+    IndexConfig,
+    TableConfig,
 )
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
-
 from .fixtures import (
     build_minimal_project,
     build_cross_schema_project,
     build_clearance_project,
-    build_masking_project, make_database, make_role,
+    build_masking_project,
+    make_database,
+    make_role,
 )
 from .fixtures import make_table as _make_table
 
-
-# =====================================================
-# HELPERS
-# =====================================================
 
 def _roundtrip(project: GovernanceProject) -> GovernanceProject:
     """Serialize then deserialize a project."""
@@ -48,10 +50,6 @@ def _roundtrip_stable(project: GovernanceProject) -> None:
         "This indicates non-determinism in serialization."
     )
 
-
-# =====================================================
-# BASIC ROUNDTRIP
-# =====================================================
 
 class TestRoundtrip:
 
@@ -155,10 +153,6 @@ class TestRoundtrip:
         assert hmac256_col.mask_config.algorithm == HashAlgorithm.HMAC256
 
 
-# =====================================================
-# SERIALIZATION STABILITY
-# =====================================================
-
 class TestSerializationStability:
 
     def test_minimal_project_yaml_stable(self) -> None:
@@ -173,10 +167,6 @@ class TestSerializationStability:
     def test_masking_project_yaml_stable(self) -> None:
         _roundtrip_stable(build_masking_project())
 
-
-# =====================================================
-# FIELD PRESERVATION
-# =====================================================
 
 class TestFieldPreservation:
 
@@ -196,9 +186,14 @@ class TestFieldPreservation:
 
     def test_column_flags_preserved(self) -> None:
         col = ColumnConfig(
-            name="value", type="text",
-            nullable=False, unique=True, immutable=True,
-            versioned=True, sensitive=True, clearance=1,
+            name      = "value",
+            type      = "text",
+            nullable  = False,
+            unique    = True,
+            immutable = True,
+            versioned = True,
+            sensitive = True,
+            clearance = 1,
         )
         id_col = ColumnConfig(name="id", type="bigint", nullable=False)
         idx    = IndexConfig(name="pk_id", columns=["id"], primary_key=True, unique=True)
@@ -235,18 +230,18 @@ class TestFieldPreservation:
     def test_index_fields_preserved(self) -> None:
         col = ColumnConfig(name="id", type="bigint")
         idx = IndexConfig(
-            name="my_idx",
-            columns=["id"],
-            index_type=IndexType.GIN,
-            unique=True,
-            primary_key=True,
-            partial_filter="id > 0",
+            name           = "my_idx",
+            columns        = ["id"],
+            index_type     = IndexType.GIN,
+            unique         = True,
+            primary_key    = True,
+            partial_filter = "id > 0",
         )
-        table  = TableConfig(name="items", columns=[col], indexes=[idx])
-        schema = SchemaConfig(name="public", tables=[table])
-        proj   = GovernanceProject(database=make_database(), schemas=[schema], roles=[make_role()])
+        table    = TableConfig(name="items", columns=[col], indexes=[idx])
+        schema   = SchemaConfig(name="public", tables=[table])
+        proj     = GovernanceProject(database=make_database(), schemas=[schema], roles=[make_role()])
         restored = _roundtrip(proj)
-        r_idx = restored.schemas[0].tables[0].indexes[0]
+        r_idx    = restored.schemas[0].tables[0].indexes[0]
         assert r_idx.name           == "my_idx"
         assert r_idx.index_type     == "gin"
         assert r_idx.unique         is True
@@ -255,16 +250,16 @@ class TestFieldPreservation:
 
     def test_schema_list_fields_preserved(self) -> None:
         schema = SchemaConfig(
-            name="public",
-            tables=[make_table()],
-            views=["v_users"],
-            sequences=["user_id_seq"],
-            functions=["fn_get_user"],
-            types=["user_status"],
+            name      = "public",
+            tables    = [make_table()],
+            views     = ["v_users"],
+            sequences = ["user_id_seq"],
+            functions = ["fn_get_user"],
+            types     = ["user_status"],
         )
         proj     = GovernanceProject(database=make_database(), schemas=[schema], roles=[make_role()])
         restored = _roundtrip(proj)
-        rs = restored.schemas[0]
+        rs       = restored.schemas[0]
         assert "v_users"     in rs.views
         assert "user_id_seq" in rs.sequences
         assert "fn_get_user" in rs.functions

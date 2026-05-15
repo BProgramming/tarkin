@@ -1,18 +1,4 @@
-"""
-Tarkin detach logic.
-
-Removes a Tarkin governance model from a live database, restoring it to
-the state it was in before ``tarkin attach`` was run.  This includes:
-
-* Dropping all INSTEAD OF triggers and trigger functions on views.
-* Dropping the Tarkin-managed views in the public-facing schemas.
-* Dropping versioning columns if requested, or retaining them.
-* Dropping the ``__META__`` schema.
-* Restoring all grants that Tarkin revoked (from ``__META__.tarkin_revoked_grants``).
-* Dropping roles that Tarkin created (``added_by_tarkin = true`` in ``__META__``).
-* Renaming shadow schemas (``tk_*``) back to their original names.
-* Resetting the ``tarkin.hmac_key`` database GUC if it was set.
-"""
+"""Removes a Tarkin model from a live database."""
 from __future__ import annotations
 from sqlalchemy import text
 
@@ -21,42 +7,14 @@ from .inspect import inspect_database
 from .model import GovernanceProject
 
 
-# =========================================================
-# DETACH ENTRY POINT
-# =========================================================
-
-
 def detach(
-    profile:         ConnectionProfile,
-    keep_versioning: bool = False,
-    drop_versioning: bool = False,
-    no_warn:         bool = False,
+    profile:           ConnectionProfile,
+    keep_versioning:   bool = False,
+    drop_versioning:   bool = False,
+    no_warn:           bool = False,
+    no_restore_grants: bool = False,
 ) -> None:
-    """Remove a Tarkin governance model from a live database.
-
-    Restores the database to its pre-attach state by reversing all structural
-    changes made during ``tarkin attach``:
-
-    1. Inspect the current database state to find shadow schemas and versioned tables.
-    2. Read ``__META__`` to determine which roles Tarkin created and which
-       grants it revoked.
-    3. Validate versioning options if versioned tables exist.
-    4. Generate and execute rollback SQL inside a transaction.
-
-    Args:
-        profile:         The credentials profile to use for the database connection.
-        keep_versioning: Retain ``__valid_from__`` / ``__valid_to__`` columns
-                         and all historical records.
-        drop_versioning: Drop versioning columns, retaining only current records
-                         (``__valid_to__ = 'infinity'``).
-        no_warn:         Suppress the confirmation prompt when ``drop_versioning``
-                         is set.
-
-    Raises:
-        DetachError: If no Tarkin build is found, versioning options conflict,
-            the user declines confirmation, or the SQL execution fails.
-    """
-    # Step 1 — inspect current state
+    """Remove a Tarkin governance model from a live database."""
     print("Inspecting current database state...", end="\r")
     try:
         current = inspect_database(profile, include_tk=True)
@@ -71,6 +29,7 @@ def detach(
             "The database does not appear to have a Tarkin build applied."
         )
 
+    print("Assessing versioning...", end="\r")
     versioned_tables = [
         (s, t)
         for s in tk_schemas
@@ -79,22 +38,26 @@ def detach(
         and "__valid_to__" in {c.name for c in t.columns}
     ]
     has_versioning = bool(versioned_tables)
+    print("Assessing versioning... Done.")
 
-    # Step 2 — read META for roles and revoked grants
     print("Reading build metadata...", end="\r")
     try:
         tarkin_created_roles, revoked_grants, db_name, pgcrypto_enabled_by_tarkin, pgaudit_snapshot = _read_meta(profile)
     except Exception as exc:
-        # Non-fatal: if __META__ is corrupt or missing, proceed without restoration
-        print(f"\nWarning: could not read __META__ ({exc}). Roles and grants will not be restored.")
-        tarkin_created_roles        = []
-        revoked_grants              = []
-        db_name                     = profile.database
-        pgcrypto_enabled_by_tarkin  = False
-        pgaudit_snapshot            = {}
+        if not no_restore_grants:
+            raise DetachError(
+                f"Failed to read __META__, and cannot restore grants safely.\n"
+                f"Error: {exc}\n"
+                f"Use --no-restore-grants to detach without restoring grants."
+            ) from exc
+        print(f"\nWarning: could not read __META__ ({exc}). Proceeding without grant restoration.")
+        tarkin_created_roles = []
+        revoked_grants = []
+        db_name = profile.database
+        pgcrypto_enabled_by_tarkin = False
+        pgaudit_snapshot = {}
     print("Reading build metadata... Done.")
 
-    # Step 3 — validate versioning options
     if not has_versioning:
         if keep_versioning or drop_versioning:
             print(
@@ -112,13 +75,12 @@ def detach(
         if drop_versioning and not no_warn:
             _confirm_drop_versioning(versioned_tables)
 
-    # Step 4 — generate and execute rollback SQL
     print("Generating rollback SQL...", end="\r")
     sql = _generate_detach_sql(
         current,
         drop_versioning,
         tarkin_created_roles,
-        revoked_grants,
+        revoked_grants if not no_restore_grants else [],
         db_name,
         pgaudit_snapshot,
     )
@@ -136,7 +98,7 @@ def detach(
         engine.dispose()
     except Exception as exc:
         raise DetachError(
-            f"Failed to detach — database state may be inconsistent.\n"
+            f"Failed to detach. Database state may be inconsistent.\n"
             f"Error: {exc}"
         ) from exc
     print("Removing Tarkin model from database... Done.")
@@ -146,35 +108,14 @@ def detach(
     if pgcrypto_enabled_by_tarkin:
         print(
             "\nNote: Tarkin enabled the pgcrypto extension during attach. "
-            "It has not been dropped automatically — pgcrypto may be used by other "
+            "It has not been dropped automatically, as pgcrypto may be used by other "
             "objects in this database. If it is not otherwise in use, you can drop it with:\n"
             "    DROP EXTENSION IF EXISTS pgcrypto;"
         )
 
 
-# =========================================================
-# META READER
-# =========================================================
-
-
-def _read_meta(
-    profile: ConnectionProfile,
-) -> tuple[list[str], list[tuple[str, str, str | None, str]], str, bool, dict[str, str | None]]:
-    """Read ``__META__`` tables to retrieve roles, grants, and extension state.
-
-    Args:
-        profile: The credentials profile for the database connection.
-
-    Returns:
-        A 5-tuple of:
-        * List of role names added by Tarkin (to be dropped on detach).
-        * List of ``(role_name, schema_name, table_name_or_None, grant_type)``
-          tuples representing grants to restore.
-        * The database name recorded in the build.
-        * Boolean: whether Tarkin enabled pgcrypto (warn on detach if True).
-        * Dict with pre-attach pgaudit settings to restore:
-          keys ``pgaudit_log``, ``pgaudit_log_catalog``, ``pgaudit_log_relation``.
-    """
+def _read_meta(profile: ConnectionProfile) -> tuple[list[str], list[tuple[str, str, str | None, str]], str, bool, dict[str, str | None]]:
+    """Read __META__ tables to retrieve roles, grants, and extension state."""
     engine = profile.engine()
     try:
         with engine.connect() as conn:
@@ -216,16 +157,9 @@ def _read_meta(
         engine.dispose()
 
 
-# =========================================================
-# CONFIRMATION
-# =========================================================
-
-
-def _confirm_drop_versioning(versioned_tables: list) -> None:  # type: ignore[type-arg]
+def _confirm_drop_versioning(versioned_tables: list) -> None:
     """Prompt the user to confirm dropping versioning columns and history."""
-    table_list = "\n".join(
-        f"  {s.name}.{t.name}" for s, t in versioned_tables
-    )
+    table_list = "\n".join(f"  {s.name}.{t.name}" for s, t in versioned_tables)
     print(
         f"\nThe following tables have versioning columns that will be permanently dropped:\n"
         f"{table_list}\n"
@@ -235,11 +169,6 @@ def _confirm_drop_versioning(versioned_tables: list) -> None:  # type: ignore[ty
     response = input("Type 'y' to confirm: ").strip().casefold()
     if response != "y":
         raise DetachError("Detach cancelled by user.")
-
-
-# =========================================================
-# SQL GENERATION
-# =========================================================
 
 
 def _generate_detach_sql(
@@ -277,7 +206,7 @@ def _generate_detach_sql(
         The complete SQL string ready for execution.
     """
     tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]
-    dq = lambda name: f'"{name}"'  # noqa: E731 — inline for readability
+    dq = lambda name: f'"{name}"'
 
     lines = [
         "-- Tarkin detach",
@@ -289,7 +218,6 @@ def _generate_detach_sql(
         original_name = schema.name[3:]  # strip tk_ prefix
         shadow        = schema.name
 
-        # Drop triggers and trigger functions
         for table in schema.tables:
             lines.append(
                 f'DROP TRIGGER IF EXISTS "tr_{table.name}" '
@@ -299,7 +227,6 @@ def _generate_detach_sql(
                 f'DROP FUNCTION IF EXISTS {dq(shadow)}."tr_{table.name}"();'
             )
 
-        # Drop views in original schema
         for table in schema.tables:
             versioned = (
                 "__valid_from__" in {c.name for c in table.columns}
@@ -311,7 +238,6 @@ def _generate_detach_sql(
                     f'DROP VIEW IF EXISTS {dq(original_name)}.{dq(table.name + "_current")};'
                 )
 
-        # Drop versioning columns if requested
         if drop_versioning:
             for table in schema.tables:
                 versioned = (
@@ -335,12 +261,10 @@ def _generate_detach_sql(
                         f"DROP COLUMN __valid_to__;"
                     )
 
-        # Drop the empty public-facing schema and rename shadow back
         lines.append(f'DROP SCHEMA {dq(original_name)} CASCADE;')
         lines.append(f'ALTER SCHEMA {dq(shadow)} RENAME TO {dq(original_name)};')
         lines.append("")
 
-    # Restore revoked grants — schema-level first, then table-level
     schema_grants = [(r, s, gt) for (r, s, t, gt) in revoked_grants if t is None]
     table_grants  = [(r, s, t, gt) for (r, s, t, gt) in revoked_grants if t is not None]
 
@@ -360,20 +284,17 @@ def _generate_detach_sql(
     if schema_grants or table_grants:
         lines.append("")
 
-    # Drop __META__ schema
     lines += [
         "DROP SCHEMA IF EXISTS __META__ CASCADE;",
         "",
     ]
 
-    # Drop roles created by Tarkin — done after all privileges are resolved
     if tarkin_created_roles:
         lines.append("-- Drop roles created by Tarkin")
         for role_name in tarkin_created_roles:
             lines.append(f'DROP ROLE IF EXISTS {dq(role_name)};')
         lines.append("")
 
-    # Restore pgaudit settings to pre-attach values
     pgaudit_log          = pgaudit_snapshot.get("pgaudit_log")
     pgaudit_log_catalog  = pgaudit_snapshot.get("pgaudit_log_catalog")
     pgaudit_log_relation = pgaudit_snapshot.get("pgaudit_log_relation")
@@ -399,7 +320,6 @@ def _generate_detach_sql(
         )
     lines.append("")
 
-    # Reset tarkin.hmac_key if it was set
     lines += [
         f'-- Reset tarkin.hmac_key GUC',
         f'ALTER DATABASE {dq(db_name)} RESET tarkin.hmac_key;',
@@ -408,11 +328,6 @@ def _generate_detach_sql(
     ]
 
     return "\n".join(lines)
-
-
-# =========================================================
-# ERRORS
-# =========================================================
 
 
 class DetachError(Exception):

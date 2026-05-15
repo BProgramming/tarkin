@@ -1,3 +1,4 @@
+"""Attach a Tarkin model to the database."""
 from __future__ import annotations
 import json
 import zipfile
@@ -8,34 +9,16 @@ from .codegen import _project_checksum
 from .inspect import inspect_database
 
 
-# =========================================================
-# OUTPUT DIRECTORY
-# =========================================================
-
 OUT_DIR = Path("out")
 
 
-# =========================================================
-# ATTACH ENTRY POINT
-# =========================================================
-
 def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
-    """
-    Apply a Tarkin model to a live database.
-
-    1. Find the build artifact
-    2. Verify database state matches the build checksum
-    3. Execute the SQL
-    """
-
-    # Step 1 — find artifact
+    """Apply a Tarkin model to a live database."""
     zip_path = build_path or _find_latest_artifact()
     print(f"Using build artifact: {zip_path}")
 
-    # Step 2 — read metadata and SQL
     metadata, sql = _read_artifact(zip_path)
 
-    # Step 3 — verify database state
     print("Inspecting current database state...", end="\r")
     try:
         current = inspect_database(profile)
@@ -50,14 +33,12 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
     if current_checksum != build_checksum:
         raise AttachError(
             f"Database state has changed since the build was generated.\n"
-            f"Build checksum:   {build_checksum}\n"
-            f"Current checksum: {current_checksum}\n"
+            f"\tBuild checksum:   {build_checksum}\n"
+            f"\tCurrent checksum: {current_checksum}\n"
             f"Re-run 'tarkin build' to generate a fresh artifact."
         )
     print("Verifying database state... Done.")
 
-    # Step 4 — execute SQL
-    # attach.py
     print("Applying build to database...", end="\r")
     try:
         engine = profile.engine()
@@ -70,17 +51,13 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
         engine.dispose()
     except Exception as exc:
         raise AttachError(
-            f"Failed to apply build — database has been rolled back.\n"
-            f"Error: {exc}"
+            f"Failed to apply build. Database has been rolled back.\n"
+            f"\tError: {exc}"
         ) from exc
     print("Applying build to database... Done.")
 
     print("Tarkin model successfully attached.")
 
-
-# =========================================================
-# ARTIFACT HELPERS
-# =========================================================
 
 def _find_latest_artifact() -> Path:
     """Find the most recent build artifact in out/."""
@@ -120,10 +97,6 @@ def _read_artifact(zip_path: Path) -> tuple[dict, str]:
 
     return metadata, sql
 
-
-# =========================================================
-# ERRORS
-# =========================================================
 
 class AttachError(Exception):
     pass

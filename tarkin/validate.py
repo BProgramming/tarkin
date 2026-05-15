@@ -1,11 +1,4 @@
-"""
-Semantic validation for Tarkin governance specifications.
-
-:class:`SemanticValidator` checks a fully-parsed
-:class:`~tarkin.model.GovernanceProject` for logical consistency beyond what
-Pydantic's schema validation covers.  All errors are collected and raised
-together as a single :exc:`ValidationError`.
-"""
+"""Validates a GovernanceProjects."""
 from __future__ import annotations
 
 from .model import (
@@ -16,7 +9,6 @@ from .model import (
     IpAddressMaskConfig, NameMaskConfig,
 )
 
-# Map each strategy to the expected config class (None means no config needed/expected)
 _STRATEGY_CONFIG_MAP = {
     MaskingStrategy.NONE:        type(None),
     MaskingStrategy.FULL:        FullMaskConfig,
@@ -31,19 +23,17 @@ _STRATEGY_CONFIG_MAP = {
 
 
 class ValidationError(Exception):
-    """Raised when semantic validation of a governance project fails.
-
-    The message contains all collected errors joined by newlines.
-    """
+    """Raised when semantic validation of a governance project fails."""
     pass
 
 
 class SemanticValidator:
-    """Validates a :class:`~tarkin.model.GovernanceProject` for logical consistency."""
+    """Validates a GovernanceProject for logical consistency."""
 
     @classmethod
     def validate(cls, project: GovernanceProject) -> bool:
-        """Validate a governance project and raise on any errors.
+        """
+        Validate a GovernanceProject and raise on any errors.
 
         All validation rules are checked and errors are collected before
         raising, so the caller sees the full list of issues at once.
@@ -52,7 +42,7 @@ class SemanticValidator:
             project: The project to validate.
 
         Returns:
-            ``True`` if validation passes.
+            True if validation passes.
 
         Raises:
             ValidationError: If any semantic rule is violated.
@@ -79,29 +69,20 @@ class SemanticValidator:
     @classmethod
     def _validate_project_structure(cls, project: GovernanceProject) -> str | None:
         """Validate that the project has at least one schema and one role."""
+        errors = []
         if not project.schemas:
-            return "Database must have at least one schema."
+            errors.append("Database must have at least one schema.")
         if not project.roles:
-            return "Database must have at least one role."
-        return None
-
-    # =====================================================
-    # AUDIT CONFIG
-    # =====================================================
+            errors.append("Database must have at least one role.")
+        return "\n".join(errors) if errors else None
 
     @classmethod
     def _validate_audit_config(cls, project: GovernanceProject) -> str | None:
         """Validate audit configuration is consistent."""
+        errors = []
         if project.database.audit_enabled and not project.database.audit_logged:
-            return (
-                "Database has audit_enabled=true but audit_logged is empty. "
-                "Specify at least one audit log level (e.g. 'ddl', 'write')."
-            )
-        return None
-
-    # =====================================================
-    # SCHEMA RULES
-    # =====================================================
+            errors.append("Database has audit_enabled=true but audit_logged is empty. Specify at least one audit log level (e.g. 'ddl', 'write').")
+        return "\n".join(errors) if errors else None
 
     @classmethod
     def _validate_schemas(cls, project: GovernanceProject) -> str | None:
@@ -115,10 +96,6 @@ class SemanticValidator:
             if not schema.tables:
                 errors.append(f"Schema '{schema.name}' must have at least one table.")
         return "\n".join(errors) if errors else None
-
-    # =====================================================
-    # TABLE RULES
-    # =====================================================
 
     @classmethod
     def _validate_tables(cls, project: GovernanceProject) -> str | None:
@@ -143,10 +120,6 @@ class SemanticValidator:
                         f"Tarkin requires a primary key on all tables to generate safe trigger functions."
                     )
         return "\n".join(errors) if errors else None
-
-    # =====================================================
-    # COLUMN RULES
-    # =====================================================
 
     @classmethod
     def _validate_columns(cls, project: GovernanceProject) -> str | None:
@@ -187,29 +160,22 @@ class SemanticValidator:
                     f"Column '{path}' has masking_strategy='none' but a mask_config is present. "
                     f"Remove mask_config or set a masking strategy."
                 )
-        elif strategy == MaskingStrategy.PARTIAL:
-            if col.mask_config is None:
-                errors.append(
-                    f"Column '{path}' has masking_strategy='partial' but no mask_config. "
-                    f"Provide a PartialMaskConfig with visible_length."
-                )
-            elif not isinstance(col.mask_config, PartialMaskConfig):
-                errors.append(
-                    f"Column '{path}' has masking_strategy='partial' but mask_config is "
-                    f"{type(col.mask_config).__name__}. Expected PartialMaskConfig."
-                )
         else:
-            if col.mask_config is not None and expected_type and not isinstance(col.mask_config, expected_type):
-                errors.append(
-                    f"Column '{path}' has masking_strategy='{strategy}' but mask_config is "
-                    f"{type(col.mask_config).__name__}. Expected {expected_type.__name__}."
-                )
+            if expected_type:
+                if col.mask_config is None:
+                    errors.append(
+                        f"Column '{path}' has masking_strategy='{strategy}' but no mask_config. "
+                        f"Expected {expected_type.__name__}."
+                    )
+                elif col.mask_config is not None and not isinstance(col.mask_config, expected_type):
+                    errors.append(
+                        f"Column '{path}' has masking_strategy='{strategy}' but mask_config is "
+                        f"{type(col.mask_config).__name__}. Expected {expected_type.__name__}."
+                    )
+            elif col.mask_config is not None:
+                errors.append(f"Column '{path}' has masking_strategy='{strategy}' but no mask_config.")
 
         return "\n".join(errors) if errors else None
-
-    # =====================================================
-    # CROSS REFERENCES
-    # =====================================================
 
     @classmethod
     def _validate_cross_references(cls, project: GovernanceProject) -> str | None:
@@ -258,10 +224,6 @@ class SemanticValidator:
                         )
         return "\n".join(errors) if errors else None
 
-    # =====================================================
-    # CLEARANCE RULES
-    # =====================================================
-
     @classmethod
     def _validate_clearance_rules(cls, project: GovernanceProject) -> str | None:
         """Validate that clearance levels are consistent across the project."""
@@ -290,10 +252,6 @@ class SemanticValidator:
                 f"but lowest role clearance is {role_min}."
             )
         return "\n".join(errors) if errors else None
-
-    # =====================================================
-    # ROLE RULES
-    # =====================================================
 
     @classmethod
     def _validate_roles(cls, project: GovernanceProject) -> str | None:
@@ -325,10 +283,6 @@ class SemanticValidator:
 
         return "\n".join(errors) if errors else None
 
-    # =====================================================
-    # UTILS
-    # =====================================================
-
     @classmethod
     def _check_unique(
         cls,
@@ -337,17 +291,7 @@ class SemanticValidator:
         trim_prefix: str | None = None,
         trim_suffix: str | None = None,
     ) -> str | None:
-        """Check that a list of names contains no duplicates.
-
-        Args:
-            values:      The list of names to check.
-            label:       Human-readable label for error messages.
-            trim_prefix: Optional prefix to strip before comparison.
-            trim_suffix: Optional suffix to strip before comparison.
-
-        Returns:
-            An error string if duplicates are found, or ``None``.
-        """
+        """Check that a list of names contains no duplicates."""
         if trim_prefix:
             values = [v.removeprefix(trim_prefix) for v in values]
         if trim_suffix:

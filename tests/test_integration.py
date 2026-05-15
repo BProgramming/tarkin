@@ -1,16 +1,5 @@
-"""
-Integration tests for Tarkin.
-
-These tests require a running PostgreSQL instance configured via
-``TARKIN_TEST_PROFILE`` and ``TARKIN_TEST_CREDENTIALS`` environment variables,
-or the default credentials at ``~/.tarkin/credentials.toml`` with a profile
-named ``test``.
-
-Tests are skipped automatically if no database connection is available.
-Run with: python -m pytest tests/test_integration.py -v
-"""
+"""Integration tests for Tarkin."""
 from __future__ import annotations
-
 import os
 import pytest
 from pathlib import Path
@@ -24,11 +13,7 @@ from tarkin.model import GovernanceProject
 from tarkin.validate import SemanticValidator
 
 
-# =====================================================
-# HELPERS
-# =====================================================
-
-def _integration_profile():  # type: ignore[return]
+def _integration_profile():
     """Return a ConnectionProfile for integration tests, or None if not configured."""
     creds_path = os.environ.get("TARKIN_TEST_CREDENTIALS")
     profile    = os.environ.get("TARKIN_TEST_PROFILE", "test")
@@ -60,10 +45,6 @@ requires_db = pytest.mark.skipif(
 )
 
 
-# =====================================================
-# FIXTURES
-# =====================================================
-
 @pytest.fixture
 def live_project() -> GovernanceProject:
     """Inspect the live database and return the current project state."""
@@ -71,10 +52,6 @@ def live_project() -> GovernanceProject:
     assert prof is not None
     return inspect_database(prof)
 
-
-# =====================================================
-# INSPECT
-# =====================================================
 
 class TestInspect:
 
@@ -110,10 +87,6 @@ class TestInspect:
                 pass
 
 
-# =====================================================
-# BUILD
-# =====================================================
-
 class TestBuild:
 
     @requires_db
@@ -124,19 +97,13 @@ class TestBuild:
             proj = inspect_database(prof)
             proj.database.profile = prof.profile
 
-            # Build may fail validation for databases not designed for Tarkin
             try:
                 zip_path = build(proj, prof, out_dir=tmp_path)
                 assert zip_path.exists()
                 assert zip_path.suffix == ".zip"
             except BuildError as exc:
-                # Expected if the live database fails Tarkin validation
                 pytest.skip(f"Build failed (database may not be Tarkin-compliant): {exc}")
 
-
-# =====================================================
-# ATTACH / DETACH
-# =====================================================
 
 class TestAttachDetach:
 
@@ -148,26 +115,22 @@ class TestAttachDetach:
         proj = live_project
         proj.database.profile = prof.profile
 
-        # Build
         try:
             zip_path = build(proj, prof, out_dir=tmp_path)
         except BuildError as exc:
             pytest.skip(f"Build failed: {exc}")
             return
 
-        # Attach
         try:
             attach(prof, build_path=zip_path)
         except AttachError as exc:
             pytest.skip(f"Attach failed: {exc}")
             return
 
-        # Verify shadow schemas exist
         post_attach = inspect_database(prof, include_tk=True)
         tk_schemas  = [s for s in post_attach.schemas if s.name.startswith("tk_")]
         assert len(tk_schemas) > 0, "Expected tk_ shadow schemas after attach"
 
-        # Detach — use keep_versioning=True to be safe regardless of versioned tables
         detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
     @requires_db
@@ -202,7 +165,6 @@ class TestAttachDetach:
             with pytest.raises(AttachError, match="already"):
                 attach(prof, build_path=zip_path)
         finally:
-            # Cleanup regardless of test outcome
             try:
                 detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
             except DetachError:
@@ -214,7 +176,6 @@ class TestAttachDetach:
         prof = _integration_profile()
         assert prof is not None
 
-        # First ensure no build is present
         try:
             detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
         except DetachError:
