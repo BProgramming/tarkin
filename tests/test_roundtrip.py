@@ -8,15 +8,12 @@ No database connection required.
 """
 from __future__ import annotations
 
-import pytest
-from io import StringIO
-
 from tarkin.model import (
     GovernanceProject, MaskingStrategy,
     FullMaskConfig, PartialMaskConfig, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig, PartialMaskVisibleSide,
-    HashAlgorithm,
+    HashAlgorithm, IndexType, SchemaConfig, ColumnConfig, IndexConfig, TableConfig,
 )
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
@@ -25,8 +22,9 @@ from .fixtures import (
     build_minimal_project,
     build_cross_schema_project,
     build_clearance_project,
-    build_masking_project,
+    build_masking_project, make_database, make_role,
 )
+from .fixtures import make_table as _make_table
 
 
 # =====================================================
@@ -197,9 +195,6 @@ class TestFieldPreservation:
         assert restored.database.owner         == "dbowner"
 
     def test_column_flags_preserved(self) -> None:
-        from tarkin.model import ColumnConfig, TableConfig, SchemaConfig, IndexConfig
-        from .fixtures import make_database, make_role
-
         col = ColumnConfig(
             name="value", type="text",
             nullable=False, unique=True, immutable=True,
@@ -238,14 +233,11 @@ class TestFieldPreservation:
         assert r.on[0].create         is True
 
     def test_index_fields_preserved(self) -> None:
-        from tarkin.model import IndexConfig, TableConfig, SchemaConfig, ColumnConfig
-        from .fixtures import make_database, make_role
-
         col = ColumnConfig(name="id", type="bigint")
         idx = IndexConfig(
             name="my_idx",
             columns=["id"],
-            index_type="gin",
+            index_type=IndexType.GIN,
             unique=True,
             primary_key=True,
             partial_filter="id > 0",
@@ -262,9 +254,6 @@ class TestFieldPreservation:
         assert r_idx.partial_filter == "id > 0"
 
     def test_schema_list_fields_preserved(self) -> None:
-        from tarkin.model import SchemaConfig, TableConfig, ColumnConfig, IndexConfig
-        from .fixtures import make_database, make_role, make_column, make_index
-
         schema = SchemaConfig(
             name="public",
             tables=[make_table()],
@@ -283,5 +272,4 @@ class TestFieldPreservation:
 
 
 def make_table():  # type: ignore[return]
-    from .fixtures import make_table as _make_table
     return _make_table()

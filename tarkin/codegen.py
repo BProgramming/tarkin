@@ -23,7 +23,6 @@ from .model import (
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig,
     PartialMaskVisibleSide,
-    SchemaPermissionConfig, TablePermissionConfig, RoleConfig,
 )
 
 

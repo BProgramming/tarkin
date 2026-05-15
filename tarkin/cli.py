@@ -6,7 +6,8 @@ Entry point: ``tarkin``
 Run ``tarkin --help`` or ``tarkin help`` for a list of available commands.
 """
 from __future__ import annotations
-
+import subprocess
+import sys
 import typer
 import json
 import zipfile
@@ -56,15 +57,12 @@ _output_option = typer.Option(
 # =====================================================
 
 @app.command(name="help")
-def show_help(
-    ctx: typer.Context = typer.Option(None, hidden=True),
-) -> None:
+def show_help() -> None:
     """Show this help message and exit.
 
     Alias for ``tarkin --help``.
     """
     # Invoke the top-level help via the parent context
-    import subprocess, sys
     subprocess.run([sys.argv[0], "--help"])
 
 

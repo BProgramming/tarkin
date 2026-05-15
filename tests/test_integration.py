@@ -81,28 +81,33 @@ class TestInspect:
     @requires_db
     def test_inspect_returns_project(self) -> None:
         prof   = _integration_profile()
-        proj   = inspect_database(prof)
-        assert isinstance(proj, GovernanceProject)
-        assert proj.database is not None
-        assert len(proj.schemas) > 0
+        assert prof is not None
+        if prof:
+            proj   = inspect_database(prof)
+            assert isinstance(proj, GovernanceProject)
+            assert proj.database is not None
+            assert len(proj.schemas) > 0
 
     @requires_db
     def test_inspect_finds_roles(self) -> None:
         prof = _integration_profile()
-        proj = inspect_database(prof)
-        assert len(proj.roles) > 0
+        assert prof is not None
+        if prof:
+            proj = inspect_database(prof)
+            assert len(proj.roles) > 0
 
     @requires_db
     def test_inspect_passes_validation(self) -> None:
-        from tarkin.validate import ValidationError
         prof = _integration_profile()
-        proj = inspect_database(prof)
-        try:
-            SemanticValidator.validate(proj)
-        except Exception:
-            # Integration databases may not pass all Tarkin rules (e.g. missing PKs)
-            # This is expected — inspection should still succeed
-            pass
+        assert prof is not None
+        if prof:
+            proj = inspect_database(prof)
+            try:
+                SemanticValidator.validate(proj)
+            except Exception:
+                # Integration databases may not pass all Tarkin rules (e.g. missing PKs)
+                # This is expected — inspection should still succeed
+                pass
 
 
 # =====================================================
@@ -114,17 +119,19 @@ class TestBuild:
     @requires_db
     def test_build_produces_artifact(self, tmp_path: Path) -> None:
         prof = _integration_profile()
-        proj = inspect_database(prof)
-        proj.database.profile = prof.profile
+        assert prof is not None
+        if prof:
+            proj = inspect_database(prof)
+            proj.database.profile = prof.profile
 
-        # Build may fail validation for databases not designed for Tarkin
-        try:
-            zip_path = build(proj, prof, out_dir=tmp_path)
-            assert zip_path.exists()
-            assert zip_path.suffix == ".zip"
-        except BuildError as exc:
-            # Expected if the live database fails Tarkin validation
-            pytest.skip(f"Build failed (database may not be Tarkin-compliant): {exc}")
+            # Build may fail validation for databases not designed for Tarkin
+            try:
+                zip_path = build(proj, prof, out_dir=tmp_path)
+                assert zip_path.exists()
+                assert zip_path.suffix == ".zip"
+            except BuildError as exc:
+                # Expected if the live database fails Tarkin validation
+                pytest.skip(f"Build failed (database may not be Tarkin-compliant): {exc}")
 
 
 # =====================================================

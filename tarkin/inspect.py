@@ -614,7 +614,6 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
         roles.append(RoleConfig(
             name=role_name,
             description=description,
-            active=bool(can_login),
             can_login=bool(can_login),
             can_admin=bool(is_super),
             can_write=bool(can_create_db or can_create_role),

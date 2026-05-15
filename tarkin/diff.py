@@ -18,8 +18,7 @@ Typical usage::
 """
 from __future__ import annotations
 
-import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -28,12 +27,7 @@ from .model import (
     GovernanceProject,
     SchemaConfig,
     TableConfig,
-    ColumnConfig,
-    IndexConfig,
-    ForeignKeyConfig,
     RoleConfig,
-    SchemaPermissionConfig,
-    TablePermissionConfig,
 )
 
 

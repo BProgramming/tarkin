@@ -4,26 +4,21 @@ Tests for the Tarkin diff engine.
 These tests are purely structural — no database connection required.
 """
 from __future__ import annotations
-
-import copy
 from pathlib import Path
-
-import pytest
 
 from tarkin.diff import (
     diff_projects, render_diff,
     Change, ChangeKind, ObjectType,
 )
 from tarkin.model import (
-    GovernanceProject, SchemaConfig, TableConfig, ColumnConfig,
-    IndexConfig, ForeignKeyConfig, RoleConfig,
-    SchemaPermissionConfig, TablePermissionConfig,
+    GovernanceProject, ColumnConfig,
+    SchemaPermissionConfig,
     MaskingStrategy, FullMaskConfig,
 )
 from tests.fixtures import (
     build_minimal_project, build_clearance_project,
-    build_masking_project, make_column, make_index, make_table,
-    make_schema, make_role, make_database,
+    build_masking_project, make_table,
+    make_schema, make_role,
 )
 
 

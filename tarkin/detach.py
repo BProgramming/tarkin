@@ -14,6 +14,7 @@ the state it was in before ``tarkin attach`` was run.  This includes:
 * Resetting the ``tarkin.hmac_key`` database GUC if it was set.
 """
 from __future__ import annotations
+from sqlalchemy import text
 
 from .credentials import ConnectionProfile
 from .inspect import inspect_database
@@ -174,9 +175,6 @@ def _read_meta(
         * Dict with pre-attach pgaudit settings to restore:
           keys ``pgaudit_log``, ``pgaudit_log_catalog``, ``pgaudit_log_relation``.
     """
-    import sqlalchemy
-    from sqlalchemy import text
-
     engine = profile.engine()
     try:
         with engine.connect() as conn:
