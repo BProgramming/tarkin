@@ -21,9 +21,15 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
 
     print("Inspecting current database state...", end="\r")
     try:
-        current = inspect_database(profile)
+        current = inspect_database(profile, include_tk=True)
     except Exception as exc:
         raise AttachError(f"Failed to inspect database: {exc}") from exc
+    tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]
+    if tk_schemas:
+        raise AttachError(
+            f"Database already has an active Tarkin build. "
+            f"Run 'tarkin detach' before attaching again."
+        )
     print("Inspecting current database state... Done.")
 
     print("Verifying database state...", end="\r")
@@ -44,8 +50,10 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
         engine = profile.engine()
         raw = engine.raw_connection()
         try:
-            setattr(raw, "autocommit", True) # This is a hack to avoid a pycharm warning on a generic type
-            raw.execute(sql)
+            cursor = raw.cursor()
+            cursor.execute(sql)
+            raw.commit()
+            cursor.close()
         finally:
             raw.close()
         engine.dispose()

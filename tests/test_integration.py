@@ -132,7 +132,7 @@ class TestAttachDetach:
         """Full attach → inspect → detach cycle."""
         prof = _integration_profile()
         assert prof is not None
-        proj = live_project
+        proj = inspect_database(prof)
         proj.database.profile = prof.profile
 
         try:
@@ -152,16 +152,22 @@ class TestAttachDetach:
         detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
     @requires_db
-    def test_detach_removes_build(self, live_project: GovernanceProject) -> None:
+    def test_detach_removes_build(self, live_project: GovernanceProject, tmp_path: Path) -> None:
         prof = _integration_profile()
         assert prof is not None
+        proj = inspect_database(prof)
+        proj.database.profile = prof.profile
 
-        # Use keep_versioning=True so the test is safe regardless of whether
-        # the fixture database has versioned tables or not.
+        try:
+            zip_path = build(proj, prof, out_dir=tmp_path)
+            attach(prof, build_path=zip_path)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach for detach test: {exc}")
+
         detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
         post_detach = inspect_database(prof)
-        tk_schemas  = [s for s in post_detach.schemas if s.name.startswith("tk_")]
+        tk_schemas = [s for s in post_detach.schemas if s.name.startswith("tk_")]
         assert not tk_schemas, f"tk_ schemas still present after detach: {tk_schemas}"
 
     @requires_db
@@ -169,7 +175,7 @@ class TestAttachDetach:
         """Attaching twice to the same database should raise AttachError."""
         prof = _integration_profile()
         assert prof is not None
-        proj = live_project
+        proj = inspect_database(prof)
         proj.database.profile = prof.profile
 
         try:

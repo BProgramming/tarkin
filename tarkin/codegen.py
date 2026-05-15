@@ -892,7 +892,7 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
     """Generate CREATE/ALTER ROLE statements and membership grants."""
     lines = []
     existing_role_names = {r.name for r in current.roles}
-    if 'tarkin_audit' in existing_role_names:
+    if project.database.audit_enabled and 'tarkin_audit' in existing_role_names:
         raise ValueError(
             "Tarkin uses the 'tarkin_audit' role to handle pgaudit operations, but a role with that name already exists. "
             "Please rename the existing role and try again."
@@ -1544,6 +1544,14 @@ def _generate_meta_population (
                     f"{str(tp.trigger).lower()}, {str(tp.maintain).lower()});"
                 )
     lines.append("")
+
+    if project.database.audit_enabled:
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_roles "
+            f"(build_id, name, clearance, can_login, can_admin, can_write, "
+            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            f"VALUES (v_build_id, 'tarkin_audit', 0, false, false, false, false, false, true, ARRAY[]::text[]);"
+        )
 
     for (role_name, schema_name, table_name, grant_type) in revoked_grants:
         rn = _escape_sql_string(role_name)

@@ -38,6 +38,7 @@ until docker exec "$CONTAINER_NAME" pg_isready -U "$DB_USER" -d "$DB_NAME" > /de
 done
 
 echo "Setting up test fixtures..."
+docker exec "$CONTAINER_NAME" psql -U "$DB_USER" -d "$DB_NAME" -c "DROP ROLE IF EXISTS tarkin_audit;"
 docker exec "$CONTAINER_NAME" psql -U "$DB_USER" -d "$DB_NAME" -c "
   CREATE EXTENSION IF NOT EXISTS pgaudit;
   CREATE TABLE IF NOT EXISTS public.test_table (
@@ -57,6 +58,6 @@ TARKIN_TEST_PORT="$DB_PORT" \
 TARKIN_TEST_DB="$DB_NAME" \
 TARKIN_TEST_USER="$DB_USER" \
 TARKIN_TEST_PASSWORD="$DB_PASS" \
-.venv/bin/python -m pytest tests/ -v --basetemp="$(dirname "$0")/out"
+.venv/bin/python -m pytest tests/ -v
 
 exit $?

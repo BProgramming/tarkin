@@ -104,10 +104,12 @@ def detach(
     print("Removing Tarkin model from database...", end="\r")
     try:
         engine = profile.engine()
-        raw    = engine.raw_connection()
+        raw = engine.raw_connection()
         try:
-            setattr(raw, "autocommit", True)
-            raw.execute(sql)
+            cursor = raw.cursor()
+            cursor.execute(sql)
+            raw.commit()
+            cursor.close()
         finally:
             raw.close()
         engine.dispose()
@@ -364,6 +366,17 @@ def _generate_detach_sql(
                 lines.append(f'{alter_cmd} {_q(schema_name)}.{_q(object_name)} SET SCHEMA {_q(shadow_name)};')
         lines.append("")
 
+    if tarkin_created_roles:
+        lines.append("-- Drop roles created by Tarkin")
+        for role_name in tarkin_created_roles:
+            for schema in tk_schemas:
+                for table in schema.tables:
+                    lines.append(f'REVOKE ALL ON {_q(schema.name)}.{_q(table.name)} FROM {_q(role_name)};')
+            lines.append(f'REASSIGN OWNED BY {_q(role_name)} TO CURRENT_USER;')
+            lines.append(f'DROP OWNED BY {_q(role_name)};')
+            lines.append(f'DROP ROLE IF EXISTS {_q(role_name)};')
+        lines.append("")
+
     for schema in tk_schemas:
         original_name = schema.name[3:]
         shadow        = schema.name
@@ -389,12 +402,6 @@ def _generate_detach_sql(
         "DROP SCHEMA IF EXISTS __META__ CASCADE;",
         "",
     ]
-
-    if tarkin_created_roles:
-        lines.append("-- Drop roles created by Tarkin")
-        for role_name in tarkin_created_roles:
-            lines.append(f'DROP ROLE IF EXISTS {_q(role_name)};')
-        lines.append("")
 
     pgaudit_log          = pgaudit_snapshot.get("pgaudit_log")
     pgaudit_log_catalog  = pgaudit_snapshot.get("pgaudit_log_catalog")
