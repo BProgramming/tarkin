@@ -24,6 +24,7 @@ from .model import (
     IpAddressMaskConfig,
     NameMaskConfig,
     PartialMaskVisibleSide,
+    GeneratedColumnStorage,
 )
 from .serialize import Serializer
 
@@ -46,8 +47,12 @@ def generate_sql(
         _generate_meta_schema(),
         _section("SHADOW SCHEMAS"),
         _generate_shadow_schemas(project),
+        _section("SCHEMA OBJECTS"),
+        _generate_schema_objects(project, current),
         _section("VERSIONING COLUMNS"),
         _generate_versioning_columns(project, current),
+        _section("FOREIGN KEY CONSTRAINTS"),
+        _generate_new_foreign_keys(project, current),
         _section("VIEWS"),
         _generate_views(project),
         _section("TRIGGERS"),
@@ -164,6 +169,27 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_foreign_keys (
     referenced_column   text NOT NULL
 );
 
+-- Tracks FK constraints added by Tarkin (not present before attach) for removal on detach.
+CREATE TABLE IF NOT EXISTS __META__.tarkin_added_fks (
+    added_fk_id     bigserial PRIMARY KEY,
+    build_id        bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    shadow_schema   text NOT NULL,
+    table_name      text NOT NULL,
+    constraint_name text NOT NULL
+);
+
+-- Tracks schema objects moved to the public schema by Tarkin for reversal on detach.
+-- object_kind: 'sequence', 'function', 'trigger_function', 'type', 'domain',
+--              'collation', 'view', 'materialized_view', 'procedure'
+CREATE TABLE IF NOT EXISTS __META__.tarkin_moved_objects (
+    moved_id        bigserial PRIMARY KEY,
+    build_id        bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    schema_name     text NOT NULL,   -- public-facing schema name
+    shadow_name     text NOT NULL,   -- tk_ schema name
+    object_kind     text NOT NULL,
+    object_name     text NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS __META__.tarkin_roles (
     role_id               bigserial PRIMARY KEY,
     build_id              bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
@@ -228,6 +254,66 @@ def _generate_shadow_schemas(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
+def _generate_schema_objects(
+    project: GovernanceProject,
+    current: GovernanceProject,
+) -> str:
+    """Move schema objects from shadow schemas to the new public-facing schemas."""
+    lines: list[str] = []
+
+    current_schema_map = {s.name: s for s in current.schemas}
+
+    for schema in project.schemas:
+        shadow        = f"tk_{schema.name}"
+        current_schema = current_schema_map.get(schema.name)
+        if not current_schema:
+            continue
+
+        tarkin_view_names = {t.name for t in schema.tables} | {
+            f"{t.name}_current"
+            for t in schema.tables
+            if any(c.versioned for c in t.columns)
+        }
+
+        for seq_entry in current_schema.sequences:
+            seq_name = seq_entry.split()[0]
+            lines.append(f"ALTER SEQUENCE {_q(shadow)}.{_q(seq_name)} SET SCHEMA {_q(schema.name)};")
+
+        for fn_sig in current_schema.functions:
+            lines.append(f"ALTER FUNCTION {_q(shadow)}.{fn_sig} SET SCHEMA {_q(schema.name)};")
+
+        for fn_sig in current_schema.trigger_functions:
+            lines.append(f"ALTER FUNCTION {_q(shadow)}.{fn_sig} SET SCHEMA {_q(schema.name)};")
+
+        for proc_sig in current_schema.procedures:
+            lines.append(f"ALTER PROCEDURE {_q(shadow)}.{proc_sig} SET SCHEMA {_q(schema.name)};")
+
+        for type_entry in current_schema.types:
+            parts     = type_entry.split()
+            type_name = parts[1] if len(parts) >= 2 else parts[0]
+            lines.append(f"ALTER TYPE {_q(shadow)}.{_q(type_name)} SET SCHEMA {_q(schema.name)};")
+
+        for domain_entry in current_schema.domains:
+            domain_name = domain_entry.split()[0]
+            lines.append(f"ALTER DOMAIN {_q(shadow)}.{_q(domain_name)} SET SCHEMA {_q(schema.name)};")
+
+        for coll_name in current_schema.collations:
+            lines.append(f"ALTER COLLATION {_q(shadow)}.{_q(coll_name)} SET SCHEMA {_q(schema.name)};")
+
+        for view_name in current_schema.views:
+            if view_name not in tarkin_view_names:
+                lines.append(f"ALTER VIEW {_q(shadow)}.{_q(view_name)} SET SCHEMA {_q(schema.name)};")
+
+        for mv_name in current_schema.materialized_views:
+            if mv_name not in tarkin_view_names:
+                lines.append(f"ALTER MATERIALIZED VIEW {_q(shadow)}.{_q(mv_name)} SET SCHEMA {_q(schema.name)};")
+
+        if lines:
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def _generate_versioning_columns(
     project: GovernanceProject,
     current: GovernanceProject,
@@ -276,6 +362,39 @@ def _generate_versioning_columns(
     return "\n".join(lines)
 
 
+def _generate_new_foreign_keys(
+    project: GovernanceProject,
+    current: GovernanceProject,
+) -> str:
+    """Add FK constraints to shadow tables that are declared in the YAML but absent in the live DB."""
+    lines: list[str] = []
+
+    current_fk_map: dict[tuple[str, str], set[str]] = {}
+    for s in current.schemas:
+        for t in s.tables:
+            current_fk_map[(s.name, t.name)] = {fk.name for fk in t.foreign_keys}
+
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            existing_fks = current_fk_map.get((schema.name, table.name), set())
+            for fk in table.foreign_keys:
+                if fk.name in existing_fks:
+                    continue
+                ref_shadow = f"tk_{fk.referenced_schema}"
+                lines.append(
+                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
+                    f"ADD CONSTRAINT {_q(fk.name)} "
+                    f"FOREIGN KEY ({_q(fk.column)}) "
+                    f"REFERENCES {_q(ref_shadow)}.{_q(fk.referenced_table)} ({_q(fk.referenced_column)});"
+                )
+
+    if lines:
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _generate_extensions(project: GovernanceProject) -> str:
     """Emit CREATE EXTENSION statements for any extensions required by the project."""
     if not _needs_pgcrypto(project):
@@ -292,7 +411,12 @@ def _generate_views(project: GovernanceProject) -> str:
         for table in schema.tables:
             is_versioned = any(c.versioned for c in table.columns)
 
-            col_exprs = [_mask_expression(c, shadow, table.name) for c in table.columns]
+            selectable_cols = [
+                c for c in table.columns
+                if not c.is_generated or c.generated_storage == "stored"
+            ]
+
+            col_exprs = [_mask_expression(c, shadow, table.name) for c in selectable_cols]
             col_list  = ",\n    ".join(col_exprs)
 
             lines.append(
@@ -568,14 +692,14 @@ def _generate_triggers(project: GovernanceProject) -> str:
 
 def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
     """Generate the PL/pgSQL trigger function body for a table."""
-    col_names = [c.name for c in table.columns]
+    writable_cols = [c.name for c in table.columns if not c.is_generated]
 
-    insert_cols = ", ".join(_q(c) for c in col_names)
-    insert_vals = ", ".join(f"NEW.{_q(c)}" for c in col_names)
+    insert_cols = ", ".join(_q(c) for c in writable_cols)
+    insert_vals = ", ".join(f"NEW.{_q(c)}" for c in writable_cols)
 
     immutable_checks = _generate_immutable_checks(table) if any(c.immutable for c in table.columns) else ""
     sensitive_stubs  = _generate_sensitive_stubs(table) if any(
-        c.sensitive or c.masking_strategy != "none"
+        c.sensitive or c.masking_strategy != MaskingStrategy.NONE
         for c in table.columns
     ) else ""
 
@@ -618,7 +742,7 @@ $$;
 """.strip()
 
     else:
-        update_set = ", ".join(f"{_q(c)} = NEW.{_q(c)}" for c in col_names)
+        update_set = ", ".join(f"{_q(c)} = NEW.{_q(c)}" for c in writable_cols)
 
         return f"""
 CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
@@ -700,10 +824,7 @@ def _pk_filter(table: TableConfig) -> str:
     return " AND ".join(f"{_q(col)} = NEW.{_q(col)}" for col in pk_cols)
 
 
-def _generate_roles(
-    project: GovernanceProject,
-    current: GovernanceProject,
-) -> str:
+def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate CREATE/ALTER ROLE statements and membership grants."""
     lines = []
     existing_role_names = {r.name for r in current.roles}
@@ -714,8 +835,8 @@ def _generate_roles(
         else:
             parts = [f"CREATE ROLE {_q(role.name)}"]
 
-        parts.append("LOGIN" if role.can_login  else "NOLOGIN")
-        parts.append("SUPERUSER" if role.can_admin else "NOSUPERUSER")
+        parts.append("LOGIN"     if role.can_login  else "NOLOGIN")
+        parts.append("SUPERUSER" if role.can_admin  else "NOSUPERUSER")
         parts.append("CREATEDB CREATEROLE" if role.can_write else "NOCREATEDB NOCREATEROLE")
 
         lines.append(" ".join(parts) + ";")
@@ -732,14 +853,14 @@ def _generate_grants(project: GovernanceProject) -> str:
     """Generate GRANT and REVOKE statements for all roles and schemas."""
     lines: list[str] = []
 
-    schema_map  = {s.name: s for s in project.schemas}
-    table_map   = {(s.name, t.name): t for s in project.schemas for t in s.tables}
+    schema_map     = {s.name: s for s in project.schemas}
+    table_map      = {(s.name, t.name): t for s in project.schemas for t in s.tables}
     shadow_schemas = [f"tk_{s.name}" for s in project.schemas]
 
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
-                if col.sensitive and col.masking_strategy == "none":
+                if col.sensitive and col.masking_strategy == MaskingStrategy.NONE:
                     warnings.warn(
                         f"Column '{schema.name}.{table.name}.{col.name}' is marked "
                         f"sensitive but has no masking strategy. Roles with "
@@ -829,7 +950,15 @@ def _generate_grants(project: GovernanceProject) -> str:
                 if tp.truncate:   table_privs.append("TRUNCATE")
                 if tp.references: table_privs.append("REFERENCES")
                 if tp.trigger:    table_privs.append("TRIGGER")
-                if tp.maintain:   table_privs.append("MAINTAIN")
+                if tp.maintain and role.can_maintain:
+                    table_privs.append("MAINTAIN")
+                elif tp.maintain and not role.can_maintain:
+                    warnings.warn(
+                        f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
+                        f"but can_maintain=False on the role. MAINTAIN will not be granted.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
                 if table_privs:
                     lines.append(
@@ -992,7 +1121,7 @@ def _generate_meta_population(
 
     existing_role_names = {r.name for r in current.roles}
 
-    revoked_grants: list[tuple[str, str, str | None, str]] = []  # role, schema, table, grant_type
+    revoked_grants: list[tuple[str, str, str | None, str]] = []
 
     for schema in project.schemas:
         for current_role in current.roles:
@@ -1010,6 +1139,58 @@ def _generate_meta_population(
                                     (current_role.name, schema.name, tp.name, priv.upper())
                                 )
 
+    current_fk_map: dict[tuple[str, str], set[str]] = {}
+    for s in current.schemas:
+        for t in s.tables:
+            current_fk_map[(s.name, t.name)] = {fk.name for fk in t.foreign_keys}
+
+    added_fks: list[tuple[str, str, str]] = []  # (shadow_schema, table_name, constraint_name)
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            existing_fks = current_fk_map.get((schema.name, table.name), set())
+            for fk in table.foreign_keys:
+                if fk.name not in existing_fks:
+                    added_fks.append((shadow, table.name, fk.name))
+
+    current_schema_map = {s.name: s for s in current.schemas}
+    moved_objects: list[tuple[str, str, str, str]] = []  # (schema, shadow, kind, name)
+
+    _object_kind_map = [
+        ("sequences",          "sequence"),
+        ("functions",          "function"),
+        ("trigger_functions",  "trigger_function"),
+        ("procedures",         "procedure"),
+        ("types",              "type"),
+        ("domains",            "domain"),
+        ("collations",         "collation"),
+    ]
+
+    for schema in project.schemas:
+        shadow        = f"tk_{schema.name}"
+        current_schema = current_schema_map.get(schema.name)
+        if not current_schema:
+            continue
+
+        tarkin_view_names = {t.name for t in schema.tables} | {
+            f"{t.name}_current"
+            for t in schema.tables
+            if any(c.versioned for c in t.columns)
+        }
+
+        for attr, kind in _object_kind_map:
+            for entry in getattr(current_schema, attr):
+                obj_name = entry.split("(")[0].split()[0] if kind in ("function", "trigger_function", "procedure") else entry.split()[0]
+                moved_objects.append((schema.name, shadow, kind, obj_name))
+
+        for view_name in current_schema.views:
+            if view_name not in tarkin_view_names:
+                moved_objects.append((schema.name, shadow, "view", view_name))
+
+        for mv_name in current_schema.materialized_views:
+            if mv_name not in tarkin_view_names:
+                moved_objects.append((schema.name, shadow, "materialized_view", mv_name))
+
     lines = ["DO $$", "DECLARE", "    v_build_id bigint;", "BEGIN"]
 
     lines += [
@@ -1026,6 +1207,7 @@ def _generate_meta_population(
         "",
     ]
 
+    # Schemas
     for schema in project.schemas:
         sn = _escape_sql_string(schema.name)
         lines.append(
@@ -1089,7 +1271,6 @@ def _generate_meta_population(
                 )
     lines.append("")
 
-    # Indexes
     for schema in project.schemas:
         for table in schema.tables:
             for idx in table.indexes:
@@ -1123,6 +1304,31 @@ def _generate_meta_population(
                     f"'{_escape_sql_string(fk.referenced_column)}');"
                 )
     lines.append("")
+
+    for (shadow, table_name, constraint_name) in added_fks:
+        sh = _escape_sql_string(shadow)
+        tn = _escape_sql_string(table_name)
+        cn = _escape_sql_string(constraint_name)
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_added_fks "
+            f"(build_id, shadow_schema, table_name, constraint_name) "
+            f"VALUES (v_build_id, '{sh}', '{tn}', '{cn}');"
+        )
+    if added_fks:
+        lines.append("")
+
+    for (schema_name, shadow, kind, obj_name) in moved_objects:
+        sn = _escape_sql_string(schema_name)
+        sh = _escape_sql_string(shadow)
+        kn = _escape_sql_string(kind)
+        on = _escape_sql_string(obj_name)
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_moved_objects "
+            f"(build_id, schema_name, shadow_name, object_kind, object_name) "
+            f"VALUES (v_build_id, '{sn}', '{sh}', '{kn}', '{on}');"
+        )
+    if moved_objects:
+        lines.append("")
 
     for role in project.roles:
         rn  = _escape_sql_string(role.name)
@@ -1247,6 +1453,6 @@ def _project_checksum(project: GovernanceProject) -> str:
     return hashlib.sha256(_project_to_yaml_string(project).encode()).hexdigest()
 
 
-def _object_checksum(obj: dict) -> str:  # type: ignore[type-arg]
+def _object_checksum(obj: dict) -> str:
     """Return a 16-character SHA-256 hex digest for a single governance object dict."""
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]

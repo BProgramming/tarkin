@@ -183,11 +183,10 @@ class TarkinBaseModel(BaseModel):
 
 class DatabaseConfig(TarkinBaseModel):
     """Top-level database configuration."""
-    name:          str                  = "default_database"
-    description:   Optional[str]        = None
-    encryption_enabled: bool            = False
-    audit_enabled: bool                 = False
-    audit_logged:  list[AuditLogLevel]  = Field(
+    name:          str                 = "default_database"
+    description:   Optional[str]       = None
+    audit_enabled: bool                = False
+    audit_logged:  list[AuditLogLevel] = Field(
         default_factory=lambda: [AuditLogLevel.DDL, AuditLogLevel.WRITE]
     )
 
@@ -219,7 +218,7 @@ class ColumnConfig(TarkinBaseModel):
     masking_strategy: MaskingStrategy         = MaskingStrategy.NONE
     mask_config:      Optional[AnyMaskConfig] = None
 
-    generated_expression: Optional[str]          = None
+    generated_expression: Optional[str]         = None
     generated_storage:    GeneratedColumnStorage = GeneratedColumnStorage.STORED
 
     @property
