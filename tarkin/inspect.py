@@ -102,6 +102,8 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
     types_             = _get_custom_types(conn, schema_name)
     collations         = _get_collations(conn, schema_name)
     domains            = _get_domains(conn, schema_name)
+    operators          = _get_operators(conn, schema_name)
+    foreign_tables     = _get_foreign_tables(conn, schema_name)
 
     return SchemaConfig(
         name               = schema_name,
@@ -114,6 +116,8 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
         types              = types_,
         collations         = collations,
         domains            = domains,
+        operators          = operators,
+        foreign_tables     = foreign_tables,
     )
 
 
@@ -475,6 +479,41 @@ def _get_domains(conn: Connection, schema_name: str) -> list[str]:
             parts.append(checks)
         result.append(" ".join(parts))
     return result
+
+
+def _get_operators(conn: Connection, schema_name: str) -> list[str]:
+    """Return operator signatures as 'oprname(left_type,right_type)'."""
+    rows = conn.execute(text("""
+        SELECT
+            o.oprname,
+            CASE WHEN o.oprleft  = 0 THEN 'NONE'
+                 ELSE o.oprleft::regtype::text END AS left_type,
+            CASE WHEN o.oprright = 0 THEN 'NONE'
+                 ELSE o.oprright::regtype::text END AS right_type
+        FROM pg_operator o
+        JOIN pg_namespace n ON n.oid = o.oprnamespace
+        WHERE n.nspname = :schema
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.objid   = o.oid
+                AND d.deptype IN ('e', 'x')
+          )
+        ORDER BY o.oprname, left_type, right_type
+    """), {"schema": schema_name}).fetchall()
+    return [f"{r[0]}({r[1]},{r[2]})" for r in rows]
+
+
+def _get_foreign_tables(conn: Connection, schema_name: str) -> list[str]:
+    """Return foreign table names."""
+    rows = conn.execute(text("""
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = :schema
+          AND c.relkind = 'f'
+        ORDER BY c.relname
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
 
 
 def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]:

@@ -373,12 +373,14 @@ def _generate_detach_sql(
             "collation":         "ALTER COLLATION",
             "view":              "ALTER VIEW",
             "materialized_view": "ALTER MATERIALIZED VIEW",
+            "foreign_table":     "ALTER FOREIGN TABLE",
         }
         for (schema_name, shadow_name, object_kind, object_name) in moved_objects:
-            alter_cmd = _alter_map.get(object_kind, "ALTER")
-            lines.append(
-                f'{alter_cmd} {_q(schema_name)}.{_q(object_name)} SET SCHEMA {_q(shadow_name)};'
-            )
+            if object_kind == "operator":
+                lines.append(f'ALTER OPERATOR {_q(schema_name)}.{object_name} SET SCHEMA {_q(shadow_name)};')
+            else:
+                alter_cmd = _alter_map.get(object_kind, "ALTER")
+                lines.append(f'{alter_cmd} {_q(schema_name)}.{_q(object_name)} SET SCHEMA {_q(shadow_name)};')
         lines.append("")
 
     for schema in tk_schemas:

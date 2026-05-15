@@ -319,6 +319,12 @@ def _generate_schema_objects(project: GovernanceProject,current: GovernanceProje
             if mv_name not in tarkin_view_names:
                 lines.append(f"ALTER MATERIALIZED VIEW {_q(shadow)}.{_q(mv_name)} SET SCHEMA {_q(schema.name)};")
 
+        for op_sig in current_schema.operators:
+            lines.append(f"ALTER OPERATOR {_q(shadow)}.{op_sig} SET SCHEMA {_q(schema.name)};")
+
+        for ft_name in current_schema.foreign_tables:
+            lines.append(f"ALTER FOREIGN TABLE {_q(shadow)}.{_q(ft_name)} SET SCHEMA {_q(schema.name)};")
+
         if lines:
             lines.append("")
 
@@ -1294,6 +1300,8 @@ def _generate_meta_population (
         ("types",              "type"),
         ("domains",            "domain"),
         ("collations",         "collation"),
+        ("operators",          "operator"),
+        ("foreign_tables",     "foreign_table"),
     ]
 
     for schema in project.schemas:
@@ -1310,11 +1318,12 @@ def _generate_meta_population (
 
         for attr, kind in _object_kind_map:
             for entry in getattr(current_schema, attr):
-                obj_name = (
-                    entry.split("(")[0].split()[0]
-                    if kind in ("function", "trigger_function", "procedure")
-                    else entry.split()[0]
-                )
+                if kind in ("function", "trigger_function", "procedure"):
+                    obj_name = entry.split("(")[0].split()[0]
+                elif kind == "operator":
+                    obj_name = entry  # full signature e.g. "+(integer,integer)"
+                else:
+                    obj_name = entry.split()[0]
                 moved_objects.append((schema.name, shadow, kind, obj_name))
 
         for view_name in current_schema.views:
