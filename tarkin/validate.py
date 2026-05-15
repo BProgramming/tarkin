@@ -1,3 +1,11 @@
+"""
+Semantic validation for Tarkin governance specifications.
+
+:class:`SemanticValidator` checks a fully-parsed
+:class:`~tarkin.model.GovernanceProject` for logical consistency beyond what
+Pydantic's schema validation covers.  All errors are collected and raised
+together as a single :exc:`ValidationError`.
+"""
 from __future__ import annotations
 
 from .model import (
@@ -23,13 +31,32 @@ _STRATEGY_CONFIG_MAP = {
 
 
 class ValidationError(Exception):
+    """Raised when semantic validation of a governance project fails.
+
+    The message contains all collected errors joined by newlines.
+    """
     pass
 
 
 class SemanticValidator:
+    """Validates a :class:`~tarkin.model.GovernanceProject` for logical consistency."""
 
     @classmethod
     def validate(cls, project: GovernanceProject) -> bool:
+        """Validate a governance project and raise on any errors.
+
+        All validation rules are checked and errors are collected before
+        raising, so the caller sees the full list of issues at once.
+
+        Args:
+            project: The project to validate.
+
+        Returns:
+            ``True`` if validation passes.
+
+        Raises:
+            ValidationError: If any semantic rule is violated.
+        """
         errors = [
             cls._validate_project_structure(project),
             cls._validate_audit_config(project),
@@ -51,6 +78,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_project_structure(cls, project: GovernanceProject) -> str | None:
+        """Validate that the project has at least one schema and one role."""
         if not project.schemas:
             return "Database must have at least one schema."
         if not project.roles:
@@ -63,6 +91,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_audit_config(cls, project: GovernanceProject) -> str | None:
+        """Validate audit configuration is consistent."""
         if project.database.audit_enabled and not project.database.audit_logged:
             return (
                 "Database has audit_enabled=true but audit_logged is empty. "
@@ -76,9 +105,10 @@ class SemanticValidator:
 
     @classmethod
     def _validate_schemas(cls, project: GovernanceProject) -> str | None:
+        """Validate schema-level rules."""
         errors = []
-        names = [s.name for s in project.schemas]
-        unq = cls._check_unique(names, "schema")
+        names  = [s.name for s in project.schemas]
+        unq    = cls._check_unique(names, "schema")
         if unq:
             errors.append(unq)
         for schema in project.schemas:
@@ -92,6 +122,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_tables(cls, project: GovernanceProject) -> str | None:
+        """Validate table-level rules."""
         errors = []
         for schema in project.schemas:
             for table in schema.tables:
@@ -119,6 +150,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_columns(cls, project: GovernanceProject) -> str | None:
+        """Validate column-level rules."""
         errors = []
         for schema in project.schemas:
             for table in schema.tables:
@@ -129,9 +161,15 @@ class SemanticValidator:
         return "\n".join(errors) if errors else None
 
     @classmethod
-    def _validate_column_constraints(cls, schema_name: str, table_name: str, col: ColumnConfig) -> str | None:
+    def _validate_column_constraints(
+        cls,
+        schema_name: str,
+        table_name:  str,
+        col:         ColumnConfig,
+    ) -> str | None:
+        """Validate constraints for a single column."""
         errors = []
-        path = f"{schema_name}.{table_name}.{col.name}"
+        path   = f"{schema_name}.{table_name}.{col.name}"
 
         if col.generated_expression and col.default:
             errors.append(f"Column '{path}' cannot have both a default value and a generated expression.")
@@ -140,8 +178,7 @@ class SemanticValidator:
         if col.versioned and col.immutable:
             errors.append(f"Column '{path}' cannot be both versioned and immutable.")
 
-        # Validate mask_config matches masking_strategy
-        strategy = MaskingStrategy(col.masking_strategy)
+        strategy      = MaskingStrategy(col.masking_strategy)
         expected_type = _STRATEGY_CONFIG_MAP.get(strategy)
 
         if strategy == MaskingStrategy.NONE:
@@ -162,7 +199,6 @@ class SemanticValidator:
                     f"{type(col.mask_config).__name__}. Expected PartialMaskConfig."
                 )
         else:
-            # For all other strategies, mask_config is optional but must be the right type if present
             if col.mask_config is not None and expected_type and not isinstance(col.mask_config, expected_type):
                 errors.append(
                     f"Column '{path}' has masking_strategy='{strategy}' but mask_config is "
@@ -177,9 +213,10 @@ class SemanticValidator:
 
     @classmethod
     def _validate_cross_references(cls, project: GovernanceProject) -> str | None:
-        errors = []
+        """Validate that indexes and foreign keys reference columns that exist."""
+        errors    = []
         schema_map: dict[str, SchemaConfig] = {s.name: s for s in project.schemas}
-        table_map: dict[str, dict[str, TableConfig]] = {
+        table_map:  dict[str, dict[str, TableConfig]] = {
             s.name: {t.name: t for t in s.tables} for s in project.schemas
         }
 
@@ -227,6 +264,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_clearance_rules(cls, project: GovernanceProject) -> str | None:
+        """Validate that clearance levels are consistent across the project."""
         errors = []
         for schema in project.schemas:
             for table in schema.tables:
@@ -259,6 +297,7 @@ class SemanticValidator:
 
     @classmethod
     def _validate_roles(cls, project: GovernanceProject) -> str | None:
+        """Validate role definitions and references."""
         errors = []
 
         unq = cls._check_unique([r.name for r in project.roles], "role")
@@ -267,11 +306,11 @@ class SemanticValidator:
 
         role_names   = {r.name for r in project.roles}
         schema_names = {s.name for s in project.schemas}
-        active = False
+        has_login    = False
 
         for role in project.roles:
-            if role.active and role.can_login:
-                active = True
+            if role.can_login:
+                has_login = True
             if not role.on and not role.member_of:
                 errors.append(f"Role '{role.name}' has no assigned schemas or inherited roles.")
             for sp in role.on:
@@ -281,7 +320,7 @@ class SemanticValidator:
                 if parent not in role_names:
                     errors.append(f"Role '{role.name}' inherits from '{parent}' which does not exist.")
 
-        if not active:
+        if not has_login:
             errors.append("Database has no active login roles.")
 
         return "\n".join(errors) if errors else None
@@ -293,17 +332,28 @@ class SemanticValidator:
     @classmethod
     def _check_unique(
         cls,
-        values: list[str],
-        label: str,
+        values:      list[str],
+        label:       str,
         trim_prefix: str | None = None,
         trim_suffix: str | None = None,
     ) -> str | None:
+        """Check that a list of names contains no duplicates.
+
+        Args:
+            values:      The list of names to check.
+            label:       Human-readable label for error messages.
+            trim_prefix: Optional prefix to strip before comparison.
+            trim_suffix: Optional suffix to strip before comparison.
+
+        Returns:
+            An error string if duplicates are found, or ``None``.
+        """
         if trim_prefix:
             values = [v.removeprefix(trim_prefix) for v in values]
         if trim_suffix:
             values = [v.removesuffix(trim_suffix) for v in values]
         if len(values) != len(set(values)):
-            seen: set[str] = set()
+            seen:       set[str] = set()
             duplicates: set[str] = set()
             for value in values:
                 if value in seen:

@@ -1,3 +1,4 @@
+"""Shared test fixtures for Tarkin unit and round-trip tests."""
 from __future__ import annotations
 
 from tarkin.model import (
@@ -10,41 +11,48 @@ from tarkin.model import (
 )
 
 
-def make_database(**kwargs) -> DatabaseConfig:
+def make_database(**kwargs) -> DatabaseConfig:  # type: ignore[no-untyped-def]
+    """Return a minimal DatabaseConfig, accepting keyword overrides."""
     return DatabaseConfig(**kwargs)
 
 
-def make_column(name: str = "id", type: str = "bigint", **kwargs) -> ColumnConfig:
+def make_column(name: str = "id", type: str = "bigint", **kwargs) -> ColumnConfig:  # type: ignore[no-untyped-def]
+    """Return a minimal ColumnConfig."""
     return ColumnConfig(name=name, type=type, **kwargs)
 
 
-def make_index(name: str = "pk_id", columns: list[str] | None = None, **kwargs) -> IndexConfig:
+def make_index(name: str = "pk_id", columns: list[str] | None = None, **kwargs) -> IndexConfig:  # type: ignore[no-untyped-def]
+    """Return a primary-key IndexConfig."""
     return IndexConfig(name=name, columns=columns or ["id"], primary_key=True, unique=True, **kwargs)
 
 
-def make_table(name: str = "users", **kwargs) -> TableConfig:
+def make_table(name: str = "users", **kwargs) -> TableConfig:  # type: ignore[no-untyped-def]
+    """Return a minimal TableConfig with one column and one PK index."""
     return TableConfig(name=name, columns=[make_column()], indexes=[make_index()], **kwargs)
 
 
-def make_schema(name: str = "public", **kwargs) -> SchemaConfig:
+def make_schema(name: str = "public", **kwargs) -> SchemaConfig:  # type: ignore[no-untyped-def]
+    """Return a minimal SchemaConfig with one table."""
     return SchemaConfig(name=name, tables=[make_table()], **kwargs)
 
 
 def make_role(
-    name: str = "reader",
-    schema: str = "public",
+    name:      str  = "reader",
+    schema:    str  = "public",
     can_login: bool = True,
-    **kwargs
-) -> RoleConfig:
+    **kwargs,
+) -> RoleConfig:  # type: ignore[no-untyped-def]
+    """Return a minimal RoleConfig with USAGE on the given schema and SELECT on users."""
     perm = SchemaPermissionConfig(
         name=schema,
         usage=True,
         tables=[TablePermissionConfig(name="users", select=True)],
     )
-    return RoleConfig(name=name, can_login=can_login, active=True, on=[perm], **kwargs)
+    return RoleConfig(name=name, can_login=can_login, on=[perm], **kwargs)
 
 
 def build_minimal_project() -> GovernanceProject:
+    """Return the smallest valid GovernanceProject."""
     return GovernanceProject(
         database=make_database(),
         schemas=[make_schema()],
@@ -53,6 +61,7 @@ def build_minimal_project() -> GovernanceProject:
 
 
 def build_cross_schema_project() -> GovernanceProject:
+    """Return a project with a foreign key crossing schema boundaries."""
     orders_col = make_column(name="user_id", type="bigint")
     fk = ForeignKeyConfig(
         name="fk_orders_user_id",
@@ -88,19 +97,11 @@ def build_cross_schema_project() -> GovernanceProject:
 
 
 def build_clearance_project() -> GovernanceProject:
+    """Return a project with a sensitive high-clearance column."""
     normal_col = make_column(name="id")
-    phi_col = ColumnConfig(
-        name="ssn",
-        type="text",
-        clearance=2,
-        sensitive=True,
-    )
-    table  = TableConfig(
-        name="patients",
-        columns=[normal_col, phi_col],
-        indexes=[make_index()],
-    )
-    schema = SchemaConfig(name="clinical", clearance=0, tables=[table])
+    phi_col    = ColumnConfig(name="ssn", type="text", clearance=2, sensitive=True)
+    table      = TableConfig(name="patients", columns=[normal_col, phi_col], indexes=[make_index()])
+    schema     = SchemaConfig(name="clinical", clearance=0, tables=[table])
 
     low_role  = make_role(name="basic_reader", schema="clinical")
     high_role = RoleConfig(
@@ -123,6 +124,7 @@ def build_clearance_project() -> GovernanceProject:
 
 
 def build_masking_project() -> GovernanceProject:
+    """Return a project exercising every masking strategy and hash algorithm."""
     cols = [
         make_column(name="id"),
         ColumnConfig(

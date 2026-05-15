@@ -1,133 +1,80 @@
 # Security Policy
 
-## Supported Versions
+## Reporting Vulnerabilities
 
-| Version | Supported |
-|---------|-----------|
-| latest  | YES       |
-
-## Database Superuser
-
-Many of Tarkin's operations require a specified database owner with
-superuser access. Tarkin populates this automatically from the active user
-running it, but if that user is not the database owner then the
-specification yaml needs to be changed accordingly.
-
-All other users/roles will have access restricted based on specified
-clearances.
-
-## Reporting a Vulnerability
-
-Please do not report security vulnerabilities via public GitHub issues.
-
-Open a GitHub Security Advisory instead:
-https://github.com/BProgramming/tarkin/security/advisories/new
-
-You can expect acknowledgment within 48 hours and a resolution
-timeline within 7 days for critical issues.
+If you discover a security vulnerability in Tarkin, please report it via GitHub Security Advisories rather than opening a public issue. We aim to respond within 72 hours.
 
 ## Release Integrity
 
-All Tarkin releases are published via GitHub Actions using PyPI trusted
-publishing (Sigstore OIDC). Every release is cryptographically tied to
-a specific workflow run in this repository — a stolen token alone is
-not sufficient to publish a malicious version.
+All Tarkin releases are published to PyPI via GitHub Actions using OIDC trusted publishing — no long-lived API tokens are involved. Each release is built from a tagged commit with `SOURCE_DATE_EPOCH` set for reproducible builds.
 
-Release provenance can be verified at:
-https://pypi.org/project/tarkin/#history
+A Software Bill of Materials (SBOM) in CycloneDX format is attached to each GitHub release and generated from `uv.lock` to reflect the exact dependency tree at build time.
 
-An SBOM (Software Bill of Materials) is attached to every GitHub release.
+To verify a release:
 
-## Shadow Schema Access
+```bash
+pip download tarkin==<version> --no-deps -d /tmp/tarkin-dist
+sha256sum /tmp/tarkin-dist/tarkin-<version>*.whl
+```
 
-Tarkin renames your existing schemas to `tk_{schema_name}` and creates
-new public-facing schemas in their place. All application roles are
-explicitly revoked from shadow schemas — they must access data through
-the views Tarkin creates, not directly.
+Compare against the checksums in the GitHub release notes.
 
-The database owner retains full access to shadow schemas. Bulk loads and
-ETL operations should target shadow schemas directly using owner
-credentials, bypassing the view layer entirely. This is intentional and
-does not compromise governance — the view layer is designed for
-application-level access, not bulk ingestion.
+## Governance YAML Security Model
 
-Note that writes directly to shadow tables bypass Tarkin's immutability
-checks and versioning logic. If writing to a versioned shadow table
-directly, you are responsible for populating `__valid_from__` and
-`__valid_to__` correctly.
+Tarkin's governance YAML is a declaration of intent, not a capability boundary. It describes what the database should look like; the actual enforcement happens via PostgreSQL's native permission system (GRANT/REVOKE, column-level privileges, pgaudit).
 
-## __META__ Schema
+The YAML itself should be treated as sensitive configuration. It contains clearance levels, role definitions, masking strategies, and the full schema topology. Do not store it in public repositories or expose it to untrusted parties.
 
-Tarkin creates a `__META__` schema containing the full governance
-specification, role definitions, clearance levels, and masking
-configuration for your database. Access is restricted to the database
-owner. Do not grant access to `__META__` to application roles.
+### Shadow Schema Model
 
-## Hashing and Masking
+During `tarkin attach`, existing schemas are renamed to `tk_<schema>` (shadow schemas). The public-facing schemas are recreated with views and triggers that implement the governance model. The shadow schemas hold the actual data and are inaccessible to non-owner roles.
 
-Tarkin's masking strategies obscure data in views but do not prevent
-the database owner or sufficiently privileged roles from reading the
-underlying shadow tables directly.
+On `tarkin detach`, the process is reversed: views and triggers are dropped, shadow schemas are renamed back to their original names, and all previously revoked grants are restored. The goal of detach is to return the database to exactly the state it was in before attach.
 
-Hash masking algorithms carry the following caveats:
+### pgcrypto Extension
 
-- **xxhash**: Non-cryptographic. Trivially reversible given knowledge
-  of the source data distribution. Do not use for sensitive data.
-- **sha256 / sha512**: Cryptographic but vulnerable to dictionary
-  attacks on low-entropy data (SSNs, postcodes, phone numbers). An
-  attacker with the hash output and knowledge of the value space can
-  recover the original value by brute force.
-- **hmac256**: Cryptographically strong when the HMAC key is kept
-  secret. Resistance depends entirely on key secrecy — a leaked key
-  allows full reversal of all hashed values.
+If Tarkin enables the `pgcrypto` extension for SHA or HMAC column hashing, a record is written to `__META__.tarkin_builds` indicating this. On `tarkin detach`, a warning is printed if Tarkin was responsible for enabling it, noting that the extension can be dropped manually if it is not otherwise in use:
 
-None of these strategies constitute encryption. They are pseudonymisation
-mechanisms suitable for access control and compliance documentation, not
-for protecting data against a compromised database owner.
+```sql
+DROP EXTENSION IF EXISTS pgcrypto;
+```
 
-## HMAC Key Management
+Tarkin does not drop `pgcrypto` automatically, as it may have been in use before attach.
 
-When using `hmac256` hashing, the HMAC key is stored as a
-database-level setting (`tarkin.hmac_key`) set during `tarkin attach`.
-This value is visible to superusers via `SHOW tarkin.hmac_key` and
-`pg_db_role_setting`. Treat it as a secret.
+### HMAC Key Management
 
-The key is sourced from your `credentials.toml` file and never written
-to the governance YAML or the Tarkin build artifact.
+Tarkin supports HMAC256 column hashing, which requires a secret key. This key is handled as follows:
 
-**Key rotation**: Changing the HMAC key invalidates all existing
-hashed values. Any joins, comparisons, or lookups against previously
-hashed columns will silently return no results after rotation. Rotate
-only when necessary and ensure downstream consumers are updated.
+- The key is **never stored in the governance YAML**. It is sourced from `credentials.toml` as `hmac_key` in the relevant profile section.
+- During `tarkin attach`, the key is written to the database as a GUC (Grand Unified Configuration parameter): `ALTER DATABASE <db> SET tarkin.hmac_key = '...'`.
+- At query time, view definitions retrieve the key via `current_setting('tarkin.hmac_key')`.
+- The GUC is **visible to superusers** via `pg_settings`. Treat it as a database secret with the same care as other credentials.
+- During `tarkin detach`, the GUC is reset: `ALTER DATABASE <db> RESET tarkin.hmac_key`.
+- **Rotating the key** invalidates all existing HMAC-hashed values. If you rotate the key and re-attach, any stored HMAC values from the previous key will no longer match. Plan key rotation carefully.
+- The key is never written to `__META__` or included in build artifacts.
 
-## pgaudit Configuration
+### Column Masking Security Notes
 
-When `audit_enabled: true`, Tarkin configures pgaudit additively —
-it merges its required log levels with any existing configuration
-rather than overwriting it. However, `log_catalog` will be set to
-`off` if it is not already explicitly enabled, which may reduce audit
-coverage compared to your existing configuration. Review the generated
-SQL before applying if pgaudit is already configured on your database.
+#### Non-Cryptographic Hashing (xxhash)
 
-## Credentials File
+The `xxhash` strategy uses `hashtextextended`, which is fast but non-cryptographic. Given knowledge of the source data distribution (e.g. a list of SSNs or postcodes), hash values are trivially reversible. Use `sha256`, `sha512`, or `hmac256` for sensitive columns.
 
-Tarkin credentials (`~/.tarkin/credentials.toml` by default) contain
-database passwords and optionally HMAC keys. This file should be:
+#### Cryptographic Hashing Without a Key (sha256, sha512)
 
-- Readable only by the owning user (`chmod 600`)
-- Excluded from version control
-- Never committed to the governance YAML repository
+SHA256 and SHA512 are cryptographic hash functions but are still vulnerable to dictionary attacks on low-entropy data. An attacker with a list of candidate values (e.g. all valid postcodes) can hash each one and compare. Use `hmac256` with a strong secret key for maximum protection.
 
-Credentials never appear in governance YAMLs, build artifacts, or
-`__META__` tables. Only the profile name is stored.
+#### Sensitive Columns
 
-## Bulk Operations and the View Layer
+The `sensitive: true` flag restricts column access to roles with `can_access_sensitive: true`, enforced via column-level `REVOKE`/`GRANT SELECT` on views. This is PostgreSQL-native enforcement — it is not dependent on Tarkin's trigger layer.
 
-Application roles interact with data exclusively through Tarkin-managed
-views. These views enforce column-level access control based on
-clearance and sensitivity settings. The owner bypasses this layer when
-writing directly to shadow schemas — this is expected behaviour for
-administrative and bulk operations, and assumes the owner is trusted.
+Sensitive columns that also have `masking_strategy: none` will emit a build-time warning. Roles with `can_access_sensitive: true` will see the raw value.
 
-Tarkin does not implement row-level security. All rows in an accessible
-table are visible to any role with sufficient column clearance.
+### pgaudit Configuration
+
+When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgaudit additively: existing audit settings are merged rather than overwritten. On attach, Tarkin captures the pre-existing `pgaudit.log`, `pgaudit.log_catalog`, and `pgaudit.log_relation` values and stores them in `__META__`. These are restored on detach.
+
+## Known Limitations
+
+- Tarkin does not implement Row-Level Security (RLS). Governance is enforced at the column and table level.
+- Per-table audit exclusion is noted in comments in the generated SQL but is not yet implemented at the pgaudit object-level audit layer.
+- The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.

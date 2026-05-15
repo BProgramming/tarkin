@@ -1,4 +1,12 @@
+"""
+Tarkin command-line interface.
+
+Entry point: ``tarkin``
+
+Run ``tarkin --help`` or ``tarkin help`` for a list of available commands.
+"""
 from __future__ import annotations
+
 import typer
 import json
 import zipfile
@@ -18,6 +26,7 @@ from .yaml import YamlLoader
 from .validate import SemanticValidator, ValidationError
 from .serialize import Serializer
 from .build import build, BuildError
+from .diff import diff_projects, render_diff
 
 app = typer.Typer(no_args_is_help=True, help="Tarkin: governance compiler for PostgreSQL.")
 
@@ -43,32 +52,55 @@ _output_option = typer.Option(
 
 
 # =====================================================
+# HELP ALIAS
+# =====================================================
+
+@app.command(name="help")
+def show_help(
+    ctx: typer.Context = typer.Option(None, hidden=True),
+) -> None:
+    """Show this help message and exit.
+
+    Alias for ``tarkin --help``.
+    """
+    # Invoke the top-level help via the parent context
+    import subprocess, sys
+    subprocess.run([sys.argv[0], "--help"])
+
+
+# =====================================================
 # VERSION
 # =====================================================
 
 @app.command(name="version")
 def show_version() -> None:
-    """Show the installed Tarkin version."""
+    """Show the installed Tarkin version and exit."""
     print(version("tarkin"))
 
 
 # =====================================================
-# CONNECT — test a credentials profile
+# CONNECT
 # =====================================================
 
 @app.command(name="connect")
 def test_connections(
     credentials: Optional[Path] = _credentials_option,
-    profile: Optional[str] = typer.Option(None, "--profile", "-p",
-        help="Profile to test. Omit to test all profiles."),
+    profile:     Optional[str]  = typer.Option(
+        None, "--profile", "-p",
+        help="Profile to test. Omit to test all profiles.",
+    ),
 ) -> None:
-    """Test that credentials profiles can connect to their databases."""
+    """Test that one or more credentials profiles can connect to their databases.
+
+    Without ``--profile``, all profiles in the credentials file are tested.
+    Exits with code 1 if any connection fails.
+    """
     creds = _load_credentials(credentials)
 
     if creds:
         if profile:
             try:
-                p = creds.get(profile)
+                p      = creds.get(profile)
                 result = check_connection(p)
                 print(result)
                 if not result.success:
@@ -84,7 +116,7 @@ def test_connections(
 
 
 # =====================================================
-# INSPECT — inspect a live database → YAML
+# INSPECT
 # =====================================================
 
 @app.command(name="inspect")
@@ -92,16 +124,20 @@ def inspect_database_build_yaml(
     profile:     str            = _profile_option,
     output:      Optional[Path] = _output_option,
     credentials: Optional[Path] = _credentials_option,
-    validate:    bool           = typer.Option(True, "--validate/--no-validate",
-        help="Run semantic validation on the inspected model before writing."),
+    validate:    bool           = typer.Option(
+        True, "--validate/--no-validate",
+        help="Run semantic validation on the inspected model before writing.",
+    ),
 ) -> None:
-    """
-    Inspect a live PostgreSQL database and emit a Tarkin governance YAML.
+    """Inspect a live PostgreSQL database and emit a Tarkin governance YAML.
 
     Connects using the named profile from credentials.toml, captures the full
-    database structure (schemas, tables, columns, indexes, foreign keys, sequences,
-    views, functions, roles, and grants), and writes a governance YAML that can
-    be edited and applied back with 'tarkin attach'.
+    database structure (schemas, tables, columns, indexes, foreign keys,
+    sequences, views, functions, roles, and grants), and writes a governance
+    YAML to ``out/<database>_model.yaml`` (or the path given by ``--output``).
+
+    The YAML can be edited and applied back with ``tarkin build`` followed by
+    ``tarkin attach``.
     """
     creds = _load_credentials(credentials)
     if not creds:
@@ -157,36 +193,42 @@ def inspect_database_build_yaml(
 
 
 # =====================================================
-# VALIDATE — parse + validate a governance YAML
+# VALIDATE
 # =====================================================
 
 @app.command(name="validate")
 def validate_data_model(
     config: Path = typer.Argument(..., help="Path to governance YAML."),
 ) -> None:
-    """Parse and semantically validate a Tarkin governance YAML."""
+    """Parse and semantically validate a Tarkin governance YAML.
+
+    Exits with code 1 and prints all validation errors if the YAML fails
+    validation.  Exits with code 0 and prints ``Validation passed.`` on success.
+    """
     _load_and_validate(config)
     print("Validation passed.")
 
 
 # =====================================================
-# BUILD — compile governance YAML to a build artifact
+# BUILD
 # =====================================================
 
 @app.command(name="build")
 def build_data_model_from_yaml(
     config:      Path           = typer.Argument(..., help="Path to governance YAML."),
-    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
-        help="Override the credentials profile in the YAML."),
+    profile:     Optional[str]  = typer.Option(
+        None, "--profile", "-p",
+        help="Override the credentials profile specified in the YAML.",
+    ),
     credentials: Optional[Path] = _credentials_option,
     output:      Optional[Path] = _output_option,
 ) -> None:
-    """
-    Compile a Tarkin governance YAML into a build artifact.
+    """Compile a governance YAML into a build artifact.
 
-    Connects to the live database, inspects current state, generates the SQL
-    needed to implement the governance model, and writes a zip artifact
-    containing the SQL and build metadata to out/.
+    Connects to the live database, inspects its current state, generates the
+    SQL needed to implement the governance model, and writes a ``.zip`` artifact
+    to ``out/`` (or the path given by ``--output``).  The artifact contains the
+    generated SQL and build metadata and is consumed by ``tarkin attach``.
     """
     proj = _load_and_validate(config)
     if not proj:
@@ -220,28 +262,33 @@ def build_data_model_from_yaml(
 
 
 # =====================================================
-# ATTACH — execute a build artifact against a live database
+# ATTACH
 # =====================================================
 
 @app.command(name="attach")
 def attach_to_database(
-    build_path:  Optional[Path] = typer.Option(None, "--build", "-b",
-        help="Path to build artifact zip. Defaults to latest in out/."),
-    profile:     Optional[str]  = typer.Option(None, "--profile", "-p",
-        help="Override the credentials profile in the build artifact."),
+    build_path:  Optional[Path] = typer.Option(
+        None, "--build", "-b",
+        help="Path to build artifact zip. Defaults to the latest artifact in out/.",
+    ),
+    profile:     Optional[str]  = typer.Option(
+        None, "--profile", "-p",
+        help="Override the credentials profile in the build artifact.",
+    ),
     credentials: Optional[Path] = _credentials_option,
 ) -> None:
-    """
-    Apply a Tarkin model to a live database.
+    """Apply a Tarkin build artifact to a live database.
 
-    Verifies the database state matches the build, then executes the
-    generated SQL inside a transaction. Rolls back on any failure.
+    Verifies that the live database state matches the checksum recorded in the
+    build artifact, then executes the generated SQL.  The database is restored
+    to its pre-attach state by ``tarkin detach``.
+
+    If ``--build`` is omitted, the most recent artifact in ``out/`` is used.
     """
     creds = _load_credentials(credentials)
     if not creds:
         return
 
-    # Read profile from artifact if not overridden
     if not profile:
         zip_path = build_path or _find_latest_artifact_path()
         if zip_path:
@@ -271,27 +318,39 @@ def attach_to_database(
 
 
 # =====================================================
-# DETACH — remove Tarkin from a live database
+# DETACH
 # =====================================================
 
 @app.command(name="detach")
 def detach_from_database(
-    profile:         Optional[str]  = typer.Option(None, "--profile", "-p",
-        help="Credentials profile to use."),
+    profile:         Optional[str]  = typer.Option(
+        None, "--profile", "-p",
+        help="Credentials profile to use.",
+    ),
     credentials:     Optional[Path] = _credentials_option,
-    keep_versioning: bool           = typer.Option(False, "--keep-versioning", "-k",
-        help="Retain versioning columns and history when detaching."),
-    drop_versioning: bool           = typer.Option(False, "--drop-versioning", "-d",
-        help="Drop versioning columns, retaining only current records."),
-    no_warn:         bool           = typer.Option(False, "--no-warn", "-n",
-        help="Suppress confirmation prompt when dropping versioning data."),
+    keep_versioning: bool           = typer.Option(
+        False, "--keep-versioning", "-k",
+        help="Retain versioning columns and history when detaching.",
+    ),
+    drop_versioning: bool           = typer.Option(
+        False, "--drop-versioning", "-d",
+        help="Drop versioning columns, retaining only current records.",
+    ),
+    no_warn:         bool           = typer.Option(
+        False, "--no-warn", "-n",
+        help="Suppress the confirmation prompt when dropping versioning data.",
+    ),
 ) -> None:
-    """
-    Remove a Tarkin governance model from a live database.
+    """Remove a Tarkin governance model from a live database.
 
-    If versioned tables exist, you must specify either --keep-versioning
-    or --drop-versioning. Use --no-warn to suppress the confirmation
-    prompt when dropping versioning data.
+    Reverses all changes made by ``tarkin attach``: drops Tarkin-managed views
+    and triggers, restores previously revoked grants, drops roles that Tarkin
+    created, renames shadow schemas back to their original names, drops
+    ``__META__``, and resets the ``tarkin.hmac_key`` GUC.
+
+    If versioned tables exist, one of ``--keep-versioning`` or
+    ``--drop-versioning`` must be specified.  Use ``--no-warn`` to suppress
+    the destructive-operation confirmation prompt.
     """
     if keep_versioning and drop_versioning:
         _die("Cannot specify both --keep-versioning and --drop-versioning.")
@@ -327,17 +386,63 @@ def detach_from_database(
         _die(str(exc))
 
 
-# ==================================================================
-# PURGE — remove all build artifacts from the Tarkin out/ directory
-# ==================================================================
+# =====================================================
+# DIFF
+# =====================================================
 
+@app.command(name="diff")
+def diff_yaml(
+    before:  Path           = typer.Argument(..., help="Path to the baseline governance YAML."),
+    after:   Path           = typer.Argument(..., help="Path to the target governance YAML."),
+    output:  Optional[Path] = _output_option,
+) -> None:
+    """Compare two governance YAMLs and report all differences.
+
+    Produces a structured Markdown diff report written to
+    ``out/diff_<before>_<after>.md`` (or the path given by ``--output``).
+    Exit code is 0 when the YAMLs are identical, 1 when differences exist.
+
+    This is the primary input for future ``tarkin migrate`` functionality.
+    """
+    before_proj = _load_and_validate(before)
+    after_proj  = _load_and_validate(after)
+
+    if not before_proj or not after_proj:
+        return
+
+    changes = diff_projects(before_proj, after_proj)
+
+    if output is None:
+        before_stem = before.stem
+        after_stem  = after.stem
+        output = Path("out") / f"diff_{before_stem}_{after_stem}.md"
+
+    render_diff(changes, output)
+
+    if changes:
+        print(f"{len(changes)} change(s) detected. Report written to {output}.")
+        raise typer.Exit(1)
+    else:
+        print(f"No changes detected. Report written to {output}.")
+
+
+# =====================================================
+# PURGE
+# =====================================================
 
 @app.command(name="purge")
 def purge_output(
-    no_warn: bool = typer.Option(False, "--no-warn", "-n",
-        help="Skip confirmation prompt."),
+    no_warn: bool = typer.Option(
+        False, "--no-warn", "-n",
+        help="Skip the confirmation prompt.",
+    ),
 ) -> None:
-    """Delete all build artifacts and output files from the out/ directory."""
+    """Delete all build artifacts and output files from the ``out/`` directory.
+
+    This removes all ``.zip`` build artifacts, ``.yaml`` inspect outputs, and
+    ``.md`` diff reports.  The directory itself is recreated empty.  Use
+    ``--no-warn`` to skip the confirmation prompt.
+    """
     out_dir = Path("out")
 
     if not out_dir.exists() or not any(out_dir.iterdir()):
@@ -347,7 +452,7 @@ def purge_output(
     if not no_warn:
         print("This will delete everything in the out/ directory.")
         response = input("Type 'y' to confirm: ").strip().casefold()
-        if response != 'y':
+        if response != "y":
             print("Purge cancelled.")
             return
 
@@ -356,34 +461,46 @@ def purge_output(
     out_dir.mkdir()
     print("Directory out/ purged.")
 
+
 # =====================================================
 # INTERNAL HELPERS
 # =====================================================
 
+
 def _find_latest_artifact_path() -> Path | None:
+    """Return the path to the most recently created build artifact, or None."""
     from .attach import OUT_DIR
     if not OUT_DIR.exists():
         return None
-    artifacts: list[Path] = sorted((p for p in OUT_DIR.glob("tarkin_build_*.zip")), key=lambda p: p.name)
+    artifacts: list[Path] = sorted(
+        (p for p in OUT_DIR.glob("tarkin_build_*.zip")),
+        key=lambda p: p.name,
+    )
     return artifacts[-1] if artifacts else None
 
+
 def _load_credentials(path: Optional[Path]) -> CredentialsFile | None:
+    """Load and return a credentials file, or die with an error."""
     try:
         return CredentialsFile.load(path)
     except FileNotFoundError as exc:
         _die(str(exc))
     except ValueError as exc:
         _die(f"Invalid credentials file: {exc}.")
+    return None
 
 
 def _resolve_profile(creds: CredentialsFile, profile_name: str) -> ConnectionProfile | None:
+    """Resolve a named profile from a credentials file, or die with an error."""
     try:
         return creds.get(profile_name)
     except KeyError as exc:
         _die(str(exc))
+    return None
 
 
 def _load_and_validate(config: Path) -> GovernanceProject | None:
+    """Load a governance YAML, validate it, and return the project, or die."""
     if not config.exists():
         _die(f"File not found: {config}")
         return None
@@ -410,12 +527,13 @@ def _load_and_validate(config: Path) -> GovernanceProject | None:
 
 
 def _die(msg: str) -> None:
-    """Print an error and exit 1."""
+    """Print an error message to stderr and exit with code 1."""
     typer.echo(f"Error: {msg}", err=True)
     raise typer.Exit(1)
 
 
 def _warn(msg: str) -> None:
+    """Print a warning message to stderr."""
     typer.echo(f"Warning: {msg}", err=True)
 
 

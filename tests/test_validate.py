@@ -220,7 +220,7 @@ def test_partial_mask_with_wrong_config_type_is_invalid() -> None:
     col = ColumnConfig(
         name="x", type="text",
         masking_strategy=MaskingStrategy.PARTIAL,
-        mask_config=FullMaskConfig(),  # wrong type
+        mask_config=FullMaskConfig(),
     )
     table = TableConfig(name="t", columns=[col])
     schema = SchemaConfig(name="public", tables=[table])
@@ -252,7 +252,7 @@ def test_hash_mask_with_wrong_config_type_is_invalid() -> None:
     col = ColumnConfig(
         name="x", type="text",
         masking_strategy=MaskingStrategy.HASH,
-        mask_config=EmailMaskConfig(),  # wrong type
+        mask_config=EmailMaskConfig(),
     )
     table = TableConfig(name="t", columns=[col])
     schema = SchemaConfig(name="public", tables=[table])
@@ -392,7 +392,6 @@ def test_role_inheriting_missing_role_is_invalid() -> None:
     role = RoleConfig(
         name="child_role",
         can_login=True,
-        active=True,
         member_of=["ghost_role"],
     )
     proj = GovernanceProject(
@@ -403,7 +402,7 @@ def test_role_inheriting_missing_role_is_invalid() -> None:
     assert_invalid(proj, "ghost_role")
 
 
-def test_no_active_login_roles_is_invalid() -> None:
+def test_no_login_roles_is_invalid() -> None:
     proj = GovernanceProject(
         database=make_database(),
         schemas=[make_schema()],

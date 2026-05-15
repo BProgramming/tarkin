@@ -1,4 +1,13 @@
+"""
+YAML loading for Tarkin governance specifications.
+
+:class:`YamlLoader` parses a ``.yaml`` file (or string) produced by
+:class:`~tarkin.serialize.Serializer` into a fully-typed
+:class:`~tarkin.model.GovernanceProject`.  The ``load`` / ``loads`` /
+``serialize`` round-trip is lossless for all declared properties.
+"""
 from __future__ import annotations
+
 from pathlib import Path
 from ruamel.yaml import YAML
 
@@ -16,19 +25,27 @@ from .model import (
 
 
 def _yaml() -> YAML:
+    """Return a configured ruamel.yaml instance."""
     y = YAML()
     y.preserve_quotes = True
     return y
 
 
-def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
-    """Parse a mask_config dict into the appropriate MaskConfig subclass."""
+def _parse_mask_config(d: dict) -> AnyMaskConfig | None:  # type: ignore[type-arg]
+    """Parse a mask_config dict into the appropriate :class:`~tarkin.model.MaskConfig` subclass.
+
+    Args:
+        d: The raw YAML dict for the mask_config key.
+
+    Returns:
+        A typed mask configuration object, or ``None`` if the dict is empty.
+    """
     if not d:
         return None
 
-    cfg_type    = d.get("type", "full")
-    hide_null   = d.get("hide_null", False)
-    mask_char   = d.get("mask_char", "X")
+    cfg_type  = d.get("type", "full")
+    hide_null = d.get("hide_null", False)
+    mask_char = d.get("mask_char", "X")
 
     if cfg_type == "full":
         return FullMaskConfig(hide_null=hide_null, mask_char=mask_char)
@@ -70,13 +87,25 @@ def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
 
 
 class YamlLoader:
-    """
-    Parse a Tarkin governance YAML file into a GovernanceProject.
-    load(serialize(project)) round-trips cleanly.
+    """Parses a Tarkin governance YAML file into a :class:`~tarkin.model.GovernanceProject`.
+
+    ``load(serialize(project))`` round-trips cleanly for all declared fields.
     """
 
     @classmethod
     def load(cls, path: Path) -> GovernanceProject | None:
+        """Load and parse a governance YAML file from disk.
+
+        Args:
+            path: Path to the ``.yaml`` file.
+
+        Returns:
+            A fully-typed :class:`~tarkin.model.GovernanceProject`, or ``None``
+            if the file is empty.
+
+        Raises:
+            ValueError: If required YAML keys are missing.
+        """
         y = _yaml()
         with path.open("r", encoding="utf-8") as f:
             doc = y.load(f)
@@ -84,6 +113,18 @@ class YamlLoader:
 
     @classmethod
     def loads(cls, text: str) -> GovernanceProject | None:
+        """Load and parse a governance YAML string.
+
+        Args:
+            text: YAML content as a string.
+
+        Returns:
+            A fully-typed :class:`~tarkin.model.GovernanceProject`, or ``None``
+            if the string is empty.
+
+        Raises:
+            ValueError: If required YAML keys are missing.
+        """
         y = _yaml()
         doc = y.load(text)
         return cls._parse_project(doc, source="<string>")
@@ -93,7 +134,12 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_project(cls, doc: dict, source=None) -> GovernanceProject | None:
+    def _parse_project(
+        cls,
+        doc: dict,  # type: ignore[type-arg]
+        source: object = None,
+    ) -> GovernanceProject | None:
+        """Parse the root project document."""
         if not source:
             raise ValueError("No YAML to load.")
         if "database" not in doc:
@@ -109,7 +155,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_database(cls, d: dict) -> DatabaseConfig:
+    def _parse_database(cls, d: dict) -> DatabaseConfig:  # type: ignore[type-arg]
+        """Parse the database configuration block."""
         raw_logged = d.get("audit_logged", ["ddl", "write"])
         return DatabaseConfig(
             name=d.get("name", "default_database"),
@@ -129,7 +176,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_schema(cls, d: dict) -> SchemaConfig:
+    def _parse_schema(cls, d: dict) -> SchemaConfig:  # type: ignore[type-arg]
+        """Parse a schema configuration block."""
         return SchemaConfig(
             name=d.get("name", "default_schema"),
             description=d.get("description"),
@@ -159,7 +207,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_table(cls, d: dict) -> TableConfig:
+    def _parse_table(cls, d: dict) -> TableConfig:  # type: ignore[type-arg]
+        """Parse a table configuration block."""
         return TableConfig(
             name=d.get("name", "default_table"),
             description=d.get("description"),
@@ -175,8 +224,9 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_column(cls, d: dict) -> ColumnConfig:
-        raw_mask = d.get("mask_config") or {}
+    def _parse_column(cls, d: dict) -> ColumnConfig:  # type: ignore[type-arg]
+        """Parse a column configuration block."""
+        raw_mask    = d.get("mask_config") or {}
         mask_config = _parse_mask_config(raw_mask) if raw_mask else None
 
         return ColumnConfig(
@@ -202,7 +252,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_index(cls, d: dict) -> IndexConfig:
+    def _parse_index(cls, d: dict) -> IndexConfig:  # type: ignore[type-arg]
+        """Parse an index configuration block."""
         return IndexConfig(
             name=d.get("name", "default_index"),
             columns=list(d.get("columns", [])),
@@ -217,7 +268,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_fk(cls, d: dict) -> ForeignKeyConfig:
+    def _parse_fk(cls, d: dict) -> ForeignKeyConfig:  # type: ignore[type-arg]
+        """Parse a foreign key configuration block."""
         return ForeignKeyConfig(
             name=d.get("name", "default_fk"),
             column=d["column"],
@@ -231,7 +283,8 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_table_permission(cls, d: dict) -> TablePermissionConfig:
+    def _parse_table_permission(cls, d: dict) -> TablePermissionConfig:  # type: ignore[type-arg]
+        """Parse a table-level permission block."""
         return TablePermissionConfig(
             name=d.get("table", "-"),
             select=d.get("select", True),
@@ -245,7 +298,8 @@ class YamlLoader:
         )
 
     @classmethod
-    def _parse_schema_permission(cls, d: dict) -> SchemaPermissionConfig:
+    def _parse_schema_permission(cls, d: dict) -> SchemaPermissionConfig:  # type: ignore[type-arg]
+        """Parse a schema-level permission block."""
         return SchemaPermissionConfig(
             name=d.get("schema", "-"),
             usage=d.get("usage", True),
@@ -258,12 +312,17 @@ class YamlLoader:
     # =====================================================
 
     @classmethod
-    def _parse_role(cls, d: dict) -> RoleConfig:
+    def _parse_role(cls, d: dict) -> RoleConfig:  # type: ignore[type-arg]
+        """Parse a role configuration block.
+
+        Note: the ``active`` field was removed in Tarkin v0.2.  YAMLs that
+        contain it will raise a validation error due to ``extra='forbid'``.
+        Strip it before loading if migrating from an older specification.
+        """
         return RoleConfig(
             name=d.get("name", "default_role"),
             description=d.get("description"),
             clearance=d.get("clearance", 0),
-            active=d.get("active", True),
             can_login=d.get("can_login", False),
             can_admin=d.get("can_admin", False),
             can_write=d.get("can_write", False),

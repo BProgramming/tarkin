@@ -1,4 +1,3 @@
-# tests/test_codegen.py
 """
 Unit tests for SQL code generation.
 These test the generated SQL strings directly without a live database.
@@ -17,8 +16,8 @@ from tarkin.codegen import (
 from tarkin.model import (
     GovernanceProject, DatabaseConfig, SchemaConfig, TableConfig,
     ColumnConfig, IndexConfig, RoleConfig,
-    SchemaPermissionConfig, TablePermissionConfig, HashAlgorithm,
-    AuditLogLevel, MaskingStrategy, FullMaskConfig, HashMaskConfig,
+    SchemaPermissionConfig, TablePermissionConfig,
+    AuditLogLevel, MaskingStrategy, FullMaskConfig, HashMaskConfig, HashAlgorithm,
 )
 
 
@@ -61,7 +60,7 @@ def _make_full_role(
 ) -> RoleConfig:
     tp = TablePermissionConfig(name=table, **perms)
     sp = SchemaPermissionConfig(name=schema, usage=True, tables=[tp])
-    return RoleConfig(name=name, can_login=True, active=True, on=[sp])
+    return RoleConfig(name=name, can_login=True, on=[sp])
 
 
 # =====================================================
@@ -235,6 +234,29 @@ class TestGenerateGrants:
         sql = _generate_grants(proj)
         assert 'REVOKE SELECT ON "public"."patients" FROM "phi_reader"' not in sql
 
+    def test_sensitive_unmasked_column_emits_warning(self) -> None:
+        sensitive_col = ColumnConfig(name="ssn", type="text", clearance=0, sensitive=True,
+                                     masking_strategy=MaskingStrategy.NONE)
+        normal_col    = ColumnConfig(name="id",  type="bigint", clearance=0, nullable=False)
+        table  = TableConfig(name="t", columns=[normal_col, sensitive_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        role   = _make_full_role("r", table="t", select=True)
+        role.can_access_sensitive = True
+        proj = _make_project(schemas=[schema], roles=[role])
+        with pytest.warns(UserWarning, match="sensitive but has no masking strategy"):
+            _generate_grants(proj)
+
+    def test_all_roles_can_access_sensitive_emits_warning(self) -> None:
+        sensitive_col = ColumnConfig(name="ssn", type="text", clearance=0, sensitive=True)
+        normal_col    = ColumnConfig(name="id",  type="bigint", clearance=0, nullable=False)
+        table  = TableConfig(name="t", columns=[normal_col, sensitive_col], indexes=[_make_pk_index()])
+        schema = SchemaConfig(name="public", tables=[table])
+        role   = _make_full_role("r", table="t", select=True)
+        role.can_access_sensitive = True
+        proj = _make_project(schemas=[schema], roles=[role])
+        with pytest.warns(UserWarning, match="All roles have can_access_sensitive"):
+            _generate_grants(proj)
+
 
 # =====================================================
 # AUDIT
@@ -290,6 +312,7 @@ class TestGenerateAudit:
         assert "audit_enabled=false" in sql
 
     def test_is_additive_not_destructive(self) -> None:
+        """The generated SQL must use current_setting() to merge, not overwrite."""
         proj = _make_project()
         proj.database.audit_enabled = True
         proj.database.audit_logged = [AuditLogLevel.DDL]
@@ -460,7 +483,6 @@ class TestGenerateViews:
         assert "current_setting('tarkin.hmac_key')" in sql
 
 
-
 # =====================================================
 # TRIGGERS
 # =====================================================
@@ -527,26 +549,33 @@ class TestGenerateTriggers:
             _generate_triggers(proj)
 
     def test_pk_filter_uses_only_pk_column(self) -> None:
-        id_col = _make_pk_column("uuid")
+        id_col   = _make_pk_column("uuid")
         name_col = ColumnConfig(name="name", type="text")
-        table = TableConfig(
+        table    = TableConfig(
             name="things",
             columns=[id_col, name_col],
             indexes=[IndexConfig(name="pk_things", columns=["uuid"], primary_key=True, unique=True)],
         )
         schema = SchemaConfig(name="public", tables=[table])
-        proj = _make_project(schemas=[schema])
+        proj   = _make_project(schemas=[schema])
         sql = _generate_triggers(proj)
-        # The WHERE clause should filter on PK only
         assert 'WHERE "uuid" = NEW."uuid"' in sql
-        # name should not appear in any WHERE clause
         assert 'WHERE "name"' not in sql
+
 
 # =====================================================
 # ROLES
 # =====================================================
 
 class TestGenerateRoles:
+
+    def _make_current(self, role_names: list[str]) -> GovernanceProject:
+        roles = [
+            RoleConfig(name=n, can_login=True, on=[SchemaPermissionConfig(name="public")])
+            for n in role_names
+        ]
+        return _make_project(roles=roles)
+
     def test_creates_new_role(self) -> None:
         proj    = _make_project(roles=[_make_full_role("new_role")])
         current = _make_project(roles=[])

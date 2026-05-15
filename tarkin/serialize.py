@@ -1,4 +1,11 @@
+"""
+Serialization of :class:`~tarkin.model.GovernanceProject` to YAML.
+
+:class:`Serializer` converts the full governance object graph into a
+``ruamel.yaml`` ``CommentedMap`` tree suitable for round-trip YAML output.
+"""
 from __future__ import annotations
+
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from io import StringIO
@@ -14,6 +21,7 @@ from .model import (
 
 
 def _yaml() -> YAML:
+    """Return a configured ruamel.yaml instance."""
     y = YAML()
     y.default_flow_style = False
     y.allow_unicode = True
@@ -21,7 +29,7 @@ def _yaml() -> YAML:
     return y
 
 
-def _val(v) -> str:
+def _val(v: object) -> object:
     """Coerce enum values to their string representation for YAML output."""
     if isinstance(v, StrEnum):
         return str(v)
@@ -29,6 +37,7 @@ def _val(v) -> str:
 
 
 class Serializer:
+    """Converts a :class:`~tarkin.model.GovernanceProject` to YAML."""
 
     # =====================================================
     # PUBLIC
@@ -36,14 +45,30 @@ class Serializer:
 
     @classmethod
     def to_yaml_string(cls, project: GovernanceProject) -> str:
+        """Serialize a governance project to a YAML string.
+
+        Args:
+            project: The project to serialize.
+
+        Returns:
+            A UTF-8 YAML string suitable for writing to disk or checksumming.
+        """
         doc = cls.serialize(project)
-        y = _yaml()
+        y   = _yaml()
         buf = StringIO()
         y.dump(doc, buf)
         return buf.getvalue()
 
     @classmethod
     def serialize(cls, project: GovernanceProject) -> CommentedMap:
+        """Convert a governance project to a ``CommentedMap`` tree.
+
+        Args:
+            project: The project to serialize.
+
+        Returns:
+            A ``CommentedMap`` that ruamel.yaml can dump.
+        """
         return cls._serialize_project(project)
 
     # =====================================================
@@ -52,6 +77,7 @@ class Serializer:
 
     @classmethod
     def _serialize_project(cls, project: GovernanceProject) -> CommentedMap:
+        """Serialize the root project object."""
         doc = CommentedMap()
         doc["database"] = cls._serialize_database(project.database)
         doc["schemas"]  = CommentedSeq([cls._serialize_schema(s) for s in project.schemas])
@@ -64,6 +90,7 @@ class Serializer:
 
     @classmethod
     def _serialize_database(cls, db: DatabaseConfig) -> CommentedMap:
+        """Serialize the database configuration block."""
         m = CommentedMap()
         m["name"]             = db.name
         if db.description:
@@ -78,7 +105,7 @@ class Serializer:
         if db.profile:
             m["profile"]      = db.profile
         if db.owner:
-            m["owner"]         = db.owner
+            m["owner"]        = db.owner
         return m
 
     # =====================================================
@@ -87,6 +114,7 @@ class Serializer:
 
     @classmethod
     def _serialize_schema(cls, schema: SchemaConfig) -> CommentedMap:
+        """Serialize a schema configuration block."""
         m = CommentedMap()
         m["name"] = schema.name
         if schema.description:
@@ -134,6 +162,7 @@ class Serializer:
 
     @classmethod
     def _serialize_table(cls, table: TableConfig) -> CommentedMap:
+        """Serialize a table configuration block."""
         m = CommentedMap()
         m["name"] = table.name
         if table.description:
@@ -153,6 +182,7 @@ class Serializer:
 
     @classmethod
     def _serialize_column(cls, col: ColumnConfig) -> CommentedMap:
+        """Serialize a column configuration block."""
         m = CommentedMap()
         m["name"] = col.name
         if col.description:
@@ -176,6 +206,7 @@ class Serializer:
 
     @classmethod
     def _serialize_mask_config(cls, cfg: MaskConfig) -> CommentedMap:
+        """Serialize a masking configuration block."""
         m = CommentedMap()
         m["hide_null"] = cfg.hide_null
 
@@ -188,7 +219,7 @@ class Serializer:
             m["type"]      = "full"
             m["mask_char"] = cfg.mask_char
         elif isinstance(cfg, HashMaskConfig):
-            m["type"] = "hash"
+            m["type"]      = "hash"
             m["algorithm"] = _val(cfg.algorithm)
         elif isinstance(cfg, EmailMaskConfig):
             m["type"]      = "email"
@@ -216,11 +247,12 @@ class Serializer:
 
     @classmethod
     def _serialize_index(cls, idx: IndexConfig) -> CommentedMap:
+        """Serialize an index configuration block."""
         m = CommentedMap()
-        m["name"]       = idx.name
-        m["columns"]    = list(idx.columns)
-        m["index_type"] = _val(idx.index_type)
-        m["unique"]     = idx.unique
+        m["name"]        = idx.name
+        m["columns"]     = list(idx.columns)
+        m["index_type"]  = _val(idx.index_type)
+        m["unique"]      = idx.unique
         m["primary_key"] = idx.primary_key
         if idx.partial_filter is not None:
             m["partial_filter"] = idx.partial_filter
@@ -232,6 +264,7 @@ class Serializer:
 
     @classmethod
     def _serialize_fk(cls, fk: ForeignKeyConfig) -> CommentedMap:
+        """Serialize a foreign key configuration block."""
         m = CommentedMap()
         m["name"]               = fk.name
         m["column"]             = fk.column
@@ -246,6 +279,7 @@ class Serializer:
 
     @classmethod
     def _serialize_table_permission(cls, tp: TablePermissionConfig) -> CommentedMap:
+        """Serialize a table-level permission block."""
         m = CommentedMap()
         m["table"]      = tp.name
         m["select"]     = tp.select
@@ -260,6 +294,7 @@ class Serializer:
 
     @classmethod
     def _serialize_schema_permission(cls, sp: SchemaPermissionConfig) -> CommentedMap:
+        """Serialize a schema-level permission block."""
         m = CommentedMap()
         m["schema"] = sp.name
         m["usage"]  = sp.usage
@@ -274,12 +309,12 @@ class Serializer:
 
     @classmethod
     def _serialize_role(cls, role: RoleConfig) -> CommentedMap:
+        """Serialize a role configuration block."""
         m = CommentedMap()
         m["name"] = role.name
         if role.description:
             m["description"] = role.description
         m["clearance"]            = role.clearance
-        m["active"]               = role.active
         m["can_login"]            = role.can_login
         m["can_admin"]            = role.can_admin
         m["can_write"]            = role.can_write
