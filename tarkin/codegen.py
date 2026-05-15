@@ -65,6 +65,8 @@ def generate_sql(
         _generate_grants(project),
         _section("AUDIT"),
         _generate_audit(project),
+        _section("AUDIT GRANTS"),
+        _generate_audit_grants(project),
         _section("META POPULATION"),
         _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
         _section("TRANSACTION END"),
@@ -93,7 +95,8 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_builds (
     -- pgaudit snapshot: values before Tarkin modified them, for restoration on detach
     pgaudit_log_before          text,
     pgaudit_log_catalog_before  text,
-    pgaudit_log_relation_before text
+    pgaudit_log_relation_before text,
+    pgaudit_role_before         text
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_migrations (
@@ -265,12 +268,9 @@ def _generate_shadow_schemas(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-def _generate_schema_objects(
-    project: GovernanceProject,
-    current: GovernanceProject,
-) -> str:
+def _generate_schema_objects(project: GovernanceProject,current: GovernanceProject) -> str:
     """Move schema objects from shadow schemas to the new public-facing schemas."""
-    lines: list[str] = []
+    lines = []
 
     current_schema_map = {s.name: s for s in current.schemas}
 
@@ -325,10 +325,7 @@ def _generate_schema_objects(
     return "\n".join(lines)
 
 
-def _generate_versioning_columns(
-    project: GovernanceProject,
-    current: GovernanceProject,
-) -> str:
+def _generate_versioning_columns(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate ALTER TABLE statements to add versioning columns to shadow tables."""
     lines = []
     current_col_map = {
@@ -373,10 +370,7 @@ def _generate_versioning_columns(
     return "\n".join(lines)
 
 
-def _generate_new_generated_columns(
-    project: GovernanceProject,
-    current: GovernanceProject,
-) -> str:
+def _generate_new_generated_columns(project: GovernanceProject, current: GovernanceProject) -> str:
     """
     Add generated columns to shadow tables that are declared in the YAML but absent in the live DB.
 
@@ -388,9 +382,9 @@ def _generate_new_generated_columns(
     Generated columns that already exist in the live database are left untouched;
     they were preserved when the schema was renamed to its shadow name.
     """
-    lines: list[str] = []
+    lines = []
 
-    current_col_map: dict[tuple[str, str], set[str]] = {
+    current_col_map = {
         (s.name, t.name): {c.name for c in t.columns}
         for s in current.schemas
         for t in s.tables
@@ -429,14 +423,11 @@ def _generate_new_generated_columns(
     return "\n".join(lines)
 
 
-def _generate_new_foreign_keys(
-    project: GovernanceProject,
-    current: GovernanceProject,
-) -> str:
+def _generate_new_foreign_keys(project: GovernanceProject, current: GovernanceProject) -> str:
     """Add FK constraints to shadow tables that are declared in the YAML but absent in the live DB."""
-    lines: list[str] = []
+    lines = []
 
-    current_fk_map: dict[tuple[str, str], set[str]] = {}
+    current_fk_map = {}
     for s in current.schemas:
         for t in s.tables:
             current_fk_map[(s.name, t.name)] = {fk.name for fk in t.foreign_keys}
@@ -913,18 +904,24 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
 
         lines.append("")
 
+    if project.database.audit_enabled:
+        db_name = _q(project.database.name)
+        lines.append("CREATE ROLE tarkin_audit NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;")
+        lines.append(f"ALTER DATABASE {db_name} SET pgaudit.role = 'tarkin_audit';")
+        lines.append("")
+
     return "\n".join(lines)
 
 
 def _generate_grants(project: GovernanceProject) -> str:
     """Generate GRANT and REVOKE statements for all roles and schemas."""
-    lines: list[str] = []
+    lines = []
 
     schema_map     = {s.name: s for s in project.schemas}
     table_map      = {(s.name, t.name): t for s in project.schemas for t in s.tables}
     shadow_schemas = [f"tk_{s.name}" for s in project.schemas]
 
-    maintain_grants: list[tuple[str, str]] = []  # (schema.table, role)
+    maintain_grants = []
 
     for schema in project.schemas:
         for table in schema.tables:
@@ -1150,7 +1147,8 @@ def _generate_audit(project: GovernanceProject) -> str:
         f"    UPDATE __META__.tarkin_builds",
         f"    SET pgaudit_log_before          = current_setting('pgaudit.log', true),",
         f"        pgaudit_log_catalog_before  = current_setting('pgaudit.log_catalog', true),",
-        f"        pgaudit_log_relation_before = current_setting('pgaudit.log_relation', true)",
+        f"        pgaudit_log_relation_before = current_setting('pgaudit.log_relation', true),",
+        f"        pgaudit_role_before         = current_setting('pgaudit.role', true)",
         f"    WHERE build_id = (SELECT max(build_id) FROM __META__.tarkin_builds);",
         f"",
         f"    -- Merge log levels",
@@ -1194,8 +1192,7 @@ def _generate_audit(project: GovernanceProject) -> str:
         if not t.audit_enabled
     ]
     if excluded_tables:
-        lines.append("-- The following tables have audit_enabled=false.")
-        lines.append("-- Per-table audit exclusion requires pgaudit object-level audit (future implementation).")
+        lines.append("-- The following tables have audit_enabled=false and are excluded from object-level audit.")
         for schema_name, table_name in excluded_tables:
             lines.append(f"--   {schema_name}.{table_name}")
         lines.append("")
@@ -1203,7 +1200,28 @@ def _generate_audit(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-def _generate_meta_population(
+def _generate_audit_grants(project: GovernanceProject) -> str:
+    """Grant object-level audit privileges to tarkin_audit for tables where audit_enabled=True."""
+    if not project.database.audit_enabled:
+        return "-- Audit grants skipped (audit_enabled=false).\n"
+
+    lines = []
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            if table.audit_enabled:
+                lines.append(
+                    f"GRANT SELECT, INSERT, UPDATE, DELETE "
+                    f"ON {_q(shadow)}.{_q(table.name)} TO tarkin_audit;"
+                )
+
+    if not lines:
+        return "-- No tables have audit_enabled=true.\n"
+
+    lines.append("")
+    return "\n".join(lines)
+
+def _generate_meta_population (
     project:        GovernanceProject,
     current:        GovernanceProject,
     needs_pgcrypto: bool = False,

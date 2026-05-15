@@ -82,6 +82,19 @@ class SemanticValidator:
         errors = []
         if project.database.audit_enabled and not project.database.audit_logged:
             errors.append("Database has audit_enabled=true but audit_logged is empty. Specify at least one audit log level (e.g. 'ddl', 'write').")
+        if not project.database.audit_enabled:
+            orphaned = [
+                f"{s.name}.{t.name}"
+                for s in project.schemas
+                for t in s.tables
+                if t.audit_enabled
+            ]
+            if orphaned:
+                errors.append(
+                    f"Tables have audit_enabled=true but database.audit_enabled=false. "
+                    f"Per-table audit has no effect without database-level auditing: "
+                    f"{', '.join(orphaned)}."
+                )
         return "\n".join(errors) if errors else None
 
     @classmethod

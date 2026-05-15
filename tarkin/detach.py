@@ -150,7 +150,7 @@ def _read_meta(
       tuples representing grants to restore.
     * The database name recorded in the build.
     * Boolean: whether Tarkin enabled pgcrypto.
-    * Dict with pre-attach pgaudit settings to restore.
+    * Dict with pre-attach pgaudit settings to restore (log, log_catalog, log_relation, role).
     * List of ``(shadow_schema, table_name, constraint_name)`` tuples for FK
       constraints added by Tarkin (to be dropped on detach).
     * List of ``(schema_name, shadow_name, object_kind, object_name)`` tuples
@@ -160,9 +160,13 @@ def _read_meta(
     try:
         with engine.connect() as conn:
             row = conn.execute(text(
-                "SELECT build_id, database_name, "
+                "SELECT build_id,"
+                "database_name, "
                 "pgcrypto_enabled_by_tarkin, "
-                "pgaudit_log_before, pgaudit_log_catalog_before, pgaudit_log_relation_before "
+                "pgaudit_log_before,"
+                "pgaudit_log_catalog_before,"
+                "pgaudit_log_relation_before, "
+                "pgaudit_role_before "
                 "FROM __META__.tarkin_builds "
                 "ORDER BY built_at DESC LIMIT 1"
             )).fetchone()
@@ -176,6 +180,7 @@ def _read_meta(
                 "pgaudit_log":          row[3],
                 "pgaudit_log_catalog":  row[4],
                 "pgaudit_log_relation": row[5],
+                "pgaudit_role":         row[6],
             }
 
             role_rows = conn.execute(text(
@@ -397,6 +402,7 @@ def _generate_detach_sql(
     pgaudit_log          = pgaudit_snapshot.get("pgaudit_log")
     pgaudit_log_catalog  = pgaudit_snapshot.get("pgaudit_log_catalog")
     pgaudit_log_relation = pgaudit_snapshot.get("pgaudit_log_relation")
+    pgaudit_role         = pgaudit_snapshot.get("pgaudit_role")
 
     lines.append("-- Restore pgaudit settings to pre-attach values")
     if pgaudit_log is not None:
@@ -416,6 +422,12 @@ def _generate_detach_sql(
             f'ALTER DATABASE {_q(db_name)} SET pgaudit.log_relation = \'{pgaudit_log_relation}\';'
             if pgaudit_log_relation
             else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.log_relation;'
+        )
+    if pgaudit_role is not None:
+        lines.append(
+            f'ALTER DATABASE {_q(db_name)} SET pgaudit.role = \'{pgaudit_role}\';'
+            if pgaudit_role
+            else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.role;'
         )
     lines.append("")
 
