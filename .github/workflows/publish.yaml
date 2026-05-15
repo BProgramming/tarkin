@@ -17,14 +17,23 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
       - name: Install build dependencies
         run: pip install build cyclonedx-bom
 
       - name: Build
         run: SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct) python -m build
 
-      - name: Generate SBOM
-        run: cyclonedx-py environment --of JSON -o sbom.json
+      - name: Generate SBOM from uv.lock
+        # Export the pinned lockfile to requirements format, then generate
+        # a reproducible CycloneDX SBOM from that. This reflects the exact
+        # declared dependency tree from uv.lock rather than the installed
+        # environment, which varies by runner image.
+        run: |
+          uv export --frozen --no-dev --format requirements-txt > requirements.lock.txt
+          cyclonedx-py requirements --of JSON -o sbom.json requirements.lock.txt
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

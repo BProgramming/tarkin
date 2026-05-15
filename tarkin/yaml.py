@@ -64,7 +64,7 @@ def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
     elif cfg_type == MaskingStrategy.HASH:
         return HashMaskConfig(
             hide_null = hide_null,
-            algorithm = HashAlgorithm(HashAlgorithm(d.get("algorithm", "xxhash"))),
+            algorithm = HashAlgorithm(d.get("algorithm", "xxhash")),
         )
     elif cfg_type == MaskingStrategy.EMAIL:
         return EmailMaskConfig(

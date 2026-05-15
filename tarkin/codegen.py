@@ -669,7 +669,7 @@ def _generate_sensitive_stubs(table: TableConfig) -> str:
                 f"        -- NOTE: '{col.name}' is sensitive. Access is enforced via "
                 f"column-level grants on the view layer, not here."
             )
-        if col.masking_strategy != "none":
+        if col.masking_strategy != MaskingStrategy.NONE:
             lines.append(
                 f"        -- NOTE: '{col.name}' uses masking strategy "
                 f"'{col.masking_strategy}' in the view layer."

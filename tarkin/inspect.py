@@ -150,7 +150,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
         name     = sa_col["name"]
         pg_extra = pg_cols.get(name, {})
 
-        type    = _pg_type_string(sa_col) # noqa
+        col_type    = _pg_type_string(sa_col) # noqa
         default = pg_extra.get("column_default")
         default = str(default) if default is not None else None
 
@@ -162,7 +162,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
 
         cols.append(ColumnConfig(
             name     = name,
-            type     = type,
+            type     = col_type,
             nullable = nullable,
             unique   = unique,
             default  = default,

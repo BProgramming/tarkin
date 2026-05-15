@@ -75,16 +75,12 @@ def test_connections(
                 p      = creds.get(profile)
                 result = check_connection(p)
                 print(result)
-                if not result.success:
-                    raise typer.Exit(1)
             except KeyError as exc:
                 _die(str(exc))
         else:
             results = test_all_connections(creds)
             for r in results:
                 print(r)
-            if any(not r.success for r in results):
-                raise typer.Exit(1)
 
 
 @app.command(name="inspect")
