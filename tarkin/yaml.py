@@ -1,8 +1,6 @@
 """Loads a specification YAML for a GovernanceProject."""
 from __future__ import annotations
 from pathlib import Path
-
-from docutils.nodes import version
 from ruamel.yaml import YAML
 
 from .model import (

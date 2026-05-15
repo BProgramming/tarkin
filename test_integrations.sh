@@ -57,6 +57,6 @@ TARKIN_TEST_PORT="$DB_PORT" \
 TARKIN_TEST_DB="$DB_NAME" \
 TARKIN_TEST_USER="$DB_USER" \
 TARKIN_TEST_PASSWORD="$DB_PASS" \
-.venv/bin/python -m pytest tests/ -v
+.venv/bin/python -m pytest tests/ -v --basetemp="$(dirname "$0")/out"
 
 exit $?

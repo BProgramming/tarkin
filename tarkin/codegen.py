@@ -892,6 +892,11 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
     """Generate CREATE/ALTER ROLE statements and membership grants."""
     lines = []
     existing_role_names = {r.name for r in current.roles}
+    if 'tarkin_audit' in existing_role_names:
+        raise ValueError(
+            "Tarkin uses the 'tarkin_audit' role to handle pgaudit operations, but a role with that name already exists. "
+            "Please rename the existing role and try again."
+        )
 
     for role in project.roles:
         if role.name in existing_role_names:

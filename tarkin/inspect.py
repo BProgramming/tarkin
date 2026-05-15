@@ -66,7 +66,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
             host          = profile.host,
             port          = profile.port,
             database      = profile.database,
-            version       = db.version.split(',')[0],
+            version       = db_version.split(',')[0],
             audit_enabled = bool(audit_enabled),
             profile       = profile.profile,
             owner         = profile.username,

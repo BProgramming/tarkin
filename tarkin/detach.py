@@ -293,10 +293,10 @@ def _generate_detach_sql(
                 "__valid_from__" in {c.name for c in table.columns}
                 and "__valid_to__" in {c.name for c in table.columns}
             )
-            lines.append(f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name)};')
+            lines.append(f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name)} CASCADE;')
             if versioned:
                 lines.append(
-                    f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name + "_current")};'
+                    f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name + "_current")} CASCADE;'
                 )
 
         if drop_versioning:
@@ -342,25 +342,6 @@ def _generate_detach_sql(
             )
         lines.append("")
 
-    schema_grants = [(r, s, gt) for (r, s, t, gt) in revoked_grants if t is None]
-    table_grants  = [(r, s, t, gt) for (r, s, t, gt) in revoked_grants if t is not None]
-
-    if schema_grants or table_grants:
-        lines.append("-- Restore grants revoked by Tarkin")
-
-    for (role_name, schema_name, grant_type) in schema_grants:
-        lines.append(
-            f'GRANT {grant_type} ON SCHEMA {_q(schema_name)} TO {_q(role_name)};'
-        )
-
-    for (role_name, schema_name, table_name, grant_type) in table_grants:
-        lines.append(
-            f'GRANT {grant_type} ON {_q(schema_name)}.{_q(table_name)} TO {_q(role_name)};'
-        )
-
-    if schema_grants or table_grants:
-        lines.append("")
-
     if moved_objects:
         lines.append("-- Move schema objects back to shadow schemas")
         _alter_map = {
@@ -388,6 +369,20 @@ def _generate_detach_sql(
         shadow        = schema.name
         lines.append(f'DROP SCHEMA {_q(original_name)} CASCADE;')
         lines.append(f'ALTER SCHEMA {_q(shadow)} RENAME TO {_q(original_name)};')
+        lines.append("")
+
+    schema_grants = [(r, s, gt) for (r, s, t, gt) in revoked_grants if t is None]
+    table_grants  = [(r, s, t, gt) for (r, s, t, gt) in revoked_grants if t is not None]
+
+    if schema_grants or table_grants:
+        lines.append("-- Restore grants revoked by Tarkin")
+
+        for (role_name, schema_name, grant_type) in schema_grants:
+            lines.append(f'GRANT {grant_type} ON SCHEMA {_q(schema_name)} TO {_q(role_name)};')
+
+        for (role_name, schema_name, table_name, grant_type) in table_grants:
+            lines.append(f'GRANT {grant_type} ON {_q(schema_name)}.{_q(table_name)} TO {_q(role_name)};')
+
         lines.append("")
 
     lines += [

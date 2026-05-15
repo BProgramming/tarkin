@@ -4,6 +4,8 @@ import os
 import pytest
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from tarkin.attach import attach, AttachError
 from tarkin.build import build, BuildError
 from tarkin.credentials import CredentialsFile, DEFAULT_CREDENTIALS_PATH, check_connection
@@ -12,18 +14,36 @@ from tarkin.inspect import inspect_database
 from tarkin.model import GovernanceProject
 from tarkin.validate import SemanticValidator
 
-
 def _integration_profile():
     """Return a ConnectionProfile for integration tests, or None if not configured."""
-    creds_path = os.environ.get("TARKIN_TEST_CREDENTIALS")
-    profile    = os.environ.get("TARKIN_TEST_PROFILE", "test")
+    # Direct env vars (set by test_integrations.sh)
+    host     = os.environ.get("TARKIN_TEST_HOST")
+    port     = os.environ.get("TARKIN_TEST_PORT")
+    db       = os.environ.get("TARKIN_TEST_DB")
+    user     = os.environ.get("TARKIN_TEST_USER")
+    password = os.environ.get("TARKIN_TEST_PASSWORD")
 
-    try:
-        path  = Path(creds_path) if creds_path else DEFAULT_CREDENTIALS_PATH
-        creds = CredentialsFile.load(path)
-        return creds.get(profile)
-    except Exception:
+    if not host or not port or not db or not user or not password:
         return None
+    elif all([host, port, db, user, password]):
+        from tarkin.credentials import ConnectionProfile
+        return ConnectionProfile(
+            profile  = "test",
+            host     = host,
+            port     = int(port),
+            database = db,
+            username = user,
+            password = SecretStr(password),
+        )
+    else:
+        creds_path = os.environ.get("TARKIN_TEST_CREDENTIALS")
+        profile    = os.environ.get("TARKIN_TEST_PROFILE", "test")
+        try:
+            path  = Path(creds_path) if creds_path else DEFAULT_CREDENTIALS_PATH
+            creds = CredentialsFile.load(path)
+            return creds.get(profile)
+        except Exception:
+            return None
 
 
 def _is_db_available() -> bool:
@@ -119,13 +139,11 @@ class TestAttachDetach:
             zip_path = build(proj, prof, out_dir=tmp_path)
         except BuildError as exc:
             pytest.skip(f"Build failed: {exc}")
-            return
 
         try:
             attach(prof, build_path=zip_path)
         except AttachError as exc:
             pytest.skip(f"Attach failed: {exc}")
-            return
 
         post_attach = inspect_database(prof, include_tk=True)
         tk_schemas  = [s for s in post_attach.schemas if s.name.startswith("tk_")]
@@ -159,7 +177,6 @@ class TestAttachDetach:
             attach(prof, build_path=zip_path)
         except (BuildError, AttachError) as exc:
             pytest.skip(f"Could not attach for double-attach test: {exc}")
-            return
 
         try:
             with pytest.raises(AttachError, match="already"):
