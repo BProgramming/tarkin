@@ -51,6 +51,8 @@ def generate_sql(
         _generate_schema_objects(project, current),
         _section("VERSIONING COLUMNS"),
         _generate_versioning_columns(project, current),
+        _section("GENERATED COLUMNS"),
+        _generate_new_generated_columns(project, current),
         _section("FOREIGN KEY CONSTRAINTS"),
         _generate_new_foreign_keys(project, current),
         _section("VIEWS"),
@@ -178,6 +180,15 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_added_fks (
     constraint_name text NOT NULL
 );
 
+-- Tracks generated columns added by Tarkin (not present before attach) for removal on detach.
+CREATE TABLE IF NOT EXISTS __META__.tarkin_added_generated_cols (
+    added_col_id  bigserial PRIMARY KEY,
+    build_id      bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    shadow_schema text NOT NULL,
+    table_name    text NOT NULL,
+    column_name   text NOT NULL
+);
+
 -- Tracks schema objects moved to the public schema by Tarkin for reversal on detach.
 -- object_kind: 'sequence', 'function', 'trigger_function', 'type', 'domain',
 --              'collation', 'view', 'materialized_view', 'procedure'
@@ -264,7 +275,7 @@ def _generate_schema_objects(
     current_schema_map = {s.name: s for s in current.schemas}
 
     for schema in project.schemas:
-        shadow        = f"tk_{schema.name}"
+        shadow         = f"tk_{schema.name}"
         current_schema = current_schema_map.get(schema.name)
         if not current_schema:
             continue
@@ -362,6 +373,62 @@ def _generate_versioning_columns(
     return "\n".join(lines)
 
 
+def _generate_new_generated_columns(
+    project: GovernanceProject,
+    current: GovernanceProject,
+) -> str:
+    """
+    Add generated columns to shadow tables that are declared in the YAML but absent in the live DB.
+
+    Only STORED generated columns are supported — VIRTUAL storage is a PostgreSQL
+    syntax element that is not yet implemented in the PostgreSQL engine itself
+    (as of PG16; the keyword is reserved but raises an error if used).  Any column
+    with generated_storage='virtual' is skipped with a warning.
+
+    Generated columns that already exist in the live database are left untouched;
+    they were preserved when the schema was renamed to its shadow name.
+    """
+    lines: list[str] = []
+
+    current_col_map: dict[tuple[str, str], set[str]] = {
+        (s.name, t.name): {c.name for c in t.columns}
+        for s in current.schemas
+        for t in s.tables
+    }
+
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            existing_cols = current_col_map.get((schema.name, table.name), set())
+            for col in table.columns:
+                if not col.is_generated:
+                    continue
+                if col.name in existing_cols:
+                    continue
+
+                if col.generated_storage == GeneratedColumnStorage.VIRTUAL:
+                    warnings.warn(
+                        f"Column '{schema.name}.{table.name}.{col.name}' uses "
+                        f"generated_storage='virtual', which is not yet supported by "
+                        f"PostgreSQL. The column will be skipped. Use 'stored' instead.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    continue
+
+                expr = _escape_sql_string(col.generated_expression or "")
+                lines.append(
+                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
+                    f"ADD COLUMN {_q(col.name)} {col.type} "
+                    f"GENERATED ALWAYS AS ({expr}) STORED;"
+                )
+
+    if lines:
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _generate_new_foreign_keys(
     project: GovernanceProject,
     current: GovernanceProject,
@@ -413,7 +480,7 @@ def _generate_views(project: GovernanceProject) -> str:
 
             selectable_cols = [
                 c for c in table.columns
-                if not c.is_generated or c.generated_storage == "stored"
+                if not c.is_generated or c.generated_storage == GeneratedColumnStorage.STORED
             ]
 
             col_exprs = [_mask_expression(c, shadow, table.name) for c in selectable_cols]
@@ -857,6 +924,8 @@ def _generate_grants(project: GovernanceProject) -> str:
     table_map      = {(s.name, t.name): t for s in project.schemas for t in s.tables}
     shadow_schemas = [f"tk_{s.name}" for s in project.schemas]
 
+    maintain_grants: list[tuple[str, str]] = []  # (schema.table, role)
+
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
@@ -950,15 +1019,18 @@ def _generate_grants(project: GovernanceProject) -> str:
                 if tp.truncate:   table_privs.append("TRUNCATE")
                 if tp.references: table_privs.append("REFERENCES")
                 if tp.trigger:    table_privs.append("TRIGGER")
-                if tp.maintain and role.can_maintain:
-                    table_privs.append("MAINTAIN")
-                elif tp.maintain and not role.can_maintain:
-                    warnings.warn(
-                        f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
-                        f"but can_maintain=False on the role. MAINTAIN will not be granted.",
-                        UserWarning,
-                        stacklevel=2,
-                    )
+
+                if tp.maintain:
+                    if role.can_maintain:
+                        # Emitted in version-guarded block below
+                        maintain_grants.append((f"{sp.name}.{tp.name}", role.name))
+                    else:
+                        warnings.warn(
+                            f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
+                            f"but can_maintain=False on the role. MAINTAIN will not be granted.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
 
                 if table_privs:
                     lines.append(
@@ -1027,6 +1099,27 @@ def _generate_grants(project: GovernanceProject) -> str:
                             )
 
             lines.append("")
+
+    # MAINTAIN is a PG16+ privilege; on earlier versions this block is a no-op.
+    if maintain_grants:
+        grant_stmts = "\n        ".join(
+            f"EXECUTE 'GRANT MAINTAIN ON {table_ref} TO {_q(role_name)}';"
+            for table_ref, role_name in maintain_grants
+        )
+        lines += [
+            "-- MAINTAIN grants (PostgreSQL 16+ only)",
+            "DO $$",
+            "BEGIN",
+            "    IF current_setting('server_version_num')::int >= 160000 THEN",
+            f"        {grant_stmts}",
+            "    ELSE",
+            "        RAISE NOTICE 'Tarkin: MAINTAIN grants skipped (requires PostgreSQL 16+, "
+            "found version %)', current_setting('server_version_num');",
+            "    END IF;",
+            "END;",
+            "$$ LANGUAGE plpgsql;",
+            "",
+        ]
 
     return "\n".join(lines)
 
@@ -1144,7 +1237,7 @@ def _generate_meta_population(
         for t in s.tables:
             current_fk_map[(s.name, t.name)] = {fk.name for fk in t.foreign_keys}
 
-    added_fks: list[tuple[str, str, str]] = []  # (shadow_schema, table_name, constraint_name)
+    added_fks: list[tuple[str, str, str]] = []
     for schema in project.schemas:
         shadow = f"tk_{schema.name}"
         for table in schema.tables:
@@ -1153,8 +1246,24 @@ def _generate_meta_population(
                 if fk.name not in existing_fks:
                     added_fks.append((shadow, table.name, fk.name))
 
+    current_col_map: dict[tuple[str, str], set[str]] = {
+        (s.name, t.name): {c.name for c in t.columns}
+        for s in current.schemas
+        for t in s.tables
+    }
+    added_generated_cols: list[tuple[str, str, str]] = []
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            existing_cols = current_col_map.get((schema.name, table.name), set())
+            for col in table.columns:
+                if (col.is_generated
+                        and col.generated_storage == GeneratedColumnStorage.STORED
+                        and col.name not in existing_cols):
+                    added_generated_cols.append((shadow, table.name, col.name))
+
     current_schema_map = {s.name: s for s in current.schemas}
-    moved_objects: list[tuple[str, str, str, str]] = []  # (schema, shadow, kind, name)
+    moved_objects: list[tuple[str, str, str, str]] = []
 
     _object_kind_map = [
         ("sequences",          "sequence"),
@@ -1167,7 +1276,7 @@ def _generate_meta_population(
     ]
 
     for schema in project.schemas:
-        shadow        = f"tk_{schema.name}"
+        shadow         = f"tk_{schema.name}"
         current_schema = current_schema_map.get(schema.name)
         if not current_schema:
             continue
@@ -1180,7 +1289,11 @@ def _generate_meta_population(
 
         for attr, kind in _object_kind_map:
             for entry in getattr(current_schema, attr):
-                obj_name = entry.split("(")[0].split()[0] if kind in ("function", "trigger_function", "procedure") else entry.split()[0]
+                obj_name = (
+                    entry.split("(")[0].split()[0]
+                    if kind in ("function", "trigger_function", "procedure")
+                    else entry.split()[0]
+                )
                 moved_objects.append((schema.name, shadow, kind, obj_name))
 
         for view_name in current_schema.views:
@@ -1207,7 +1320,6 @@ def _generate_meta_population(
         "",
     ]
 
-    # Schemas
     for schema in project.schemas:
         sn = _escape_sql_string(schema.name)
         lines.append(
@@ -1315,6 +1427,18 @@ def _generate_meta_population(
             f"VALUES (v_build_id, '{sh}', '{tn}', '{cn}');"
         )
     if added_fks:
+        lines.append("")
+
+    for (shadow, table_name, col_name) in added_generated_cols:
+        sh = _escape_sql_string(shadow)
+        tn = _escape_sql_string(table_name)
+        cn = _escape_sql_string(col_name)
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_added_generated_cols "
+            f"(build_id, shadow_schema, table_name, column_name) "
+            f"VALUES (v_build_id, '{sh}', '{tn}', '{cn}');"
+        )
+    if added_generated_cols:
         lines.append("")
 
     for (schema_name, shadow, kind, obj_name) in moved_objects:

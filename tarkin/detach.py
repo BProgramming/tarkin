@@ -49,6 +49,7 @@ def detach(
             pgcrypto_enabled_by_tarkin,
             pgaudit_snapshot,
             added_fks,
+            added_generated_cols,
             moved_objects,
         ) = _read_meta(profile)
     except Exception as exc:
@@ -65,6 +66,7 @@ def detach(
         pgcrypto_enabled_by_tarkin  = False
         pgaudit_snapshot            = {}
         added_fks                   = []
+        added_generated_cols        = []
         moved_objects               = []
     print("Reading build metadata... Done.")
 
@@ -94,6 +96,7 @@ def detach(
         db_name,
         pgaudit_snapshot,
         added_fks,
+        added_generated_cols,
         moved_objects,
     )
     print("Generating rollback SQL... Done.")
@@ -135,6 +138,7 @@ def _read_meta(
     bool,
     dict[str, str | None],
     list[tuple[str, str, str]],
+    list[tuple[str, str, str]],
     list[tuple[str, str, str, str]],
 ]:
     """
@@ -163,7 +167,7 @@ def _read_meta(
                 "ORDER BY built_at DESC LIMIT 1"
             )).fetchone()
             if not row:
-                return [], [], profile.database, False, {}, [], []
+                return [], [], profile.database, False, {}, [], [], []
 
             build_id                    = row[0]
             db_name                     = row[1]
@@ -196,6 +200,14 @@ def _read_meta(
             ), {"bid": build_id}).fetchall()
             added_fks = [(r[0], r[1], r[2]) for r in fk_rows]
 
+            # Added generated columns
+            gen_col_rows = conn.execute(text(
+                "SELECT shadow_schema, table_name, column_name "
+                "FROM __META__.tarkin_added_generated_cols "
+                "WHERE build_id = :bid"
+            ), {"bid": build_id}).fetchall()
+            added_generated_cols = [(r[0], r[1], r[2]) for r in gen_col_rows]
+
             # Moved schema objects
             obj_rows = conn.execute(text(
                 "SELECT schema_name, shadow_name, object_kind, object_name "
@@ -204,7 +216,7 @@ def _read_meta(
             ), {"bid": build_id}).fetchall()
             moved_objects = [(r[0], r[1], r[2], r[3]) for r in obj_rows]
 
-            return tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin, pgaudit_snapshot, added_fks, moved_objects
+            return tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin, pgaudit_snapshot, added_fks, added_generated_cols, moved_objects
     finally:
         engine.dispose()
 
@@ -231,6 +243,7 @@ def _generate_detach_sql(
     db_name:              str,
     pgaudit_snapshot:     dict[str, str | None],
     added_fks:            list[tuple[str, str, str]],
+    added_generated_cols: list[tuple[str, str, str]],
     moved_objects:        list[tuple[str, str, str, str]],
 ) -> str:
     """
@@ -312,6 +325,15 @@ def _generate_detach_sql(
             lines.append(
                 f'ALTER TABLE {_q(shadow_schema)}.{_q(table_name)} '
                 f'DROP CONSTRAINT IF EXISTS {_q(constraint_name)};'
+            )
+        lines.append("")
+
+    if added_generated_cols:
+        lines.append("-- Drop generated columns added by Tarkin")
+        for (shadow_schema, table_name, column_name) in added_generated_cols:
+            lines.append(
+                f'ALTER TABLE {_q(shadow_schema)}.{_q(table_name)} '
+                f'DROP COLUMN IF EXISTS {_q(column_name)};'
             )
         lines.append("")
 
