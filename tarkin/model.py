@@ -252,7 +252,7 @@ class TableConfig(TarkinBaseModel):
     name:          str           = "default_table"
     clearance:     int           = 0
     description:   Optional[str] = None
-    audit_enabled: bool          = True
+    audit_enabled: bool          = False
 
     columns:      list[ColumnConfig]     = Field(default_factory=list)
     indexes:      list[IndexConfig]      = Field(default_factory=list)

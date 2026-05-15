@@ -250,20 +250,24 @@ class TestFieldPreservation:
 
     def test_schema_list_fields_preserved(self) -> None:
         schema = SchemaConfig(
-            name      = "public",
-            tables    = [make_table()],
-            views     = ["v_users"],
-            sequences = ["user_id_seq"],
-            functions = ["fn_get_user"],
-            types     = ["user_status"],
+            name           = "public",
+            tables         = [make_table()],
+            views          = ["v_users"],
+            sequences      = ["user_id_seq"],
+            functions      = ["fn_get_user"],
+            types          = ["user_status"],
+            operators      = ["+(integer,integer)"],
+            foreign_tables = ["ft_remote"],
         )
         proj     = GovernanceProject(database=make_database(), schemas=[schema], roles=[make_role()])
         restored = _roundtrip(proj)
         rs       = restored.schemas[0]
-        assert "v_users"     in rs.views
-        assert "user_id_seq" in rs.sequences
-        assert "fn_get_user" in rs.functions
-        assert "user_status" in rs.types
+        assert "v_users"          in rs.views
+        assert "user_id_seq"      in rs.sequences
+        assert "fn_get_user"      in rs.functions
+        assert "user_status"      in rs.types
+        assert "+(integer,integer)" in rs.operators
+        assert "ft_remote"        in rs.foreign_tables
 
 
 def make_table():  # type: ignore[return]

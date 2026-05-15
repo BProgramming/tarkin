@@ -1,6 +1,6 @@
 """Serializes a GovernanceProject to YAML."""
 from __future__ import annotations
-
+from enum import Enum
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from io import StringIO
@@ -35,6 +35,12 @@ def _yaml() -> YAML:
     y.default_flow_style = False
     y.allow_unicode      = True
     y.width              = 120
+    y.representer.add_representer(
+        None,
+        lambda dumper, data: dumper.represent_str(str(data))
+        if isinstance(data, Enum)
+        else dumper.represent_undefined(data)
+    )
     return y
 
 

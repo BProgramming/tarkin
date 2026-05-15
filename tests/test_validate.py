@@ -341,10 +341,6 @@ def test_index_referencing_missing_column_is_invalid() -> None:
     assert_invalid(proj, "missing column 'nonexistent'")
 
 
-# =====================================================
-# CLEARANCE RULES
-# =====================================================
-
 def test_column_clearance_below_table_minimum_is_invalid() -> None:
     col    = ColumnConfig(name="id", type="bigint", clearance=0)
     table  = TableConfig(name="secure", columns=[col], clearance=1)
@@ -356,10 +352,6 @@ def test_column_clearance_below_table_minimum_is_invalid() -> None:
     )
     assert_invalid(proj, "clearance below required minimum")
 
-
-# =====================================================
-# ROLE RULES
-# =====================================================
 
 def test_role_with_no_schemas_is_invalid() -> None:
     role = RoleConfig(name="empty_role", on=[])
@@ -405,3 +397,19 @@ def test_no_login_roles_is_invalid() -> None:
         roles    = [make_role(can_login=False)],
     )
     assert_invalid(proj, "no active login roles")
+
+
+def test_table_audit_enabled_without_database_audit_is_invalid() -> None:
+    table  = TableConfig(
+        name          = "noisy",
+        columns       = [make_column()],
+        indexes       = [make_index()],
+        audit_enabled = True,
+    )
+    schema = SchemaConfig(name="public", tables=[table])
+    proj   = GovernanceProject(
+        database = DatabaseConfig(audit_enabled=False),
+        schemas  = [schema],
+        roles    = [make_role()],
+    )
+    assert_invalid(proj, "database.audit_enabled=false")

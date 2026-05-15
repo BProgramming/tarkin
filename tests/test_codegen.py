@@ -5,6 +5,7 @@ import pytest
 from tarkin.codegen import (
     _generate_grants,
     _generate_audit,
+    _generate_audit_grants,
     _generate_views,
     _generate_triggers,
     _generate_shadow_schemas,
@@ -552,10 +553,6 @@ class TestGenerateTriggers:
         assert 'WHERE "name"' not in sql
 
 
-# =====================================================
-# ROLES
-# =====================================================
-
 class TestGenerateRoles:
 
     def _make_current(self, role_names: list[str]) -> GovernanceProject:
@@ -612,3 +609,114 @@ class TestGenerateRoles:
         sql     = _generate_roles(proj, current)
         assert "SUPERUSER" in sql
         assert "NOSUPERUSER" not in sql
+
+
+class TestGenerateAuditGrants:
+
+    def test_returns_comment_when_audit_disabled(self) -> None:
+        proj = _make_project()
+        proj.database.audit_enabled = False
+        sql  = _generate_audit_grants(proj)
+        assert "GRANT" not in sql
+        assert "skipped" in sql.lower()
+
+    def test_grants_on_audited_shadow_table(self) -> None:
+        table  = TableConfig(
+            name          = "orders",
+            columns       = [ColumnConfig(name="id", type="bigint")],
+            indexes       = [_make_pk_index()],
+            audit_enabled = True,
+        )
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        proj.database.audit_enabled = True
+        proj.database.audit_logged  = [AuditLogLevel.DDL]
+        sql    = _generate_audit_grants(proj)
+        assert 'GRANT SELECT, INSERT, UPDATE, DELETE ON "tk_public"."orders" TO tarkin_audit' in sql
+
+    def test_skips_non_audited_table(self) -> None:
+        audited     = TableConfig(
+            name          = "audited",
+            columns       = [ColumnConfig(name="id", type="bigint")],
+            indexes       = [_make_pk_index()],
+            audit_enabled = True,
+        )
+        not_audited = TableConfig(
+            name          = "silent",
+            columns       = [ColumnConfig(name="id", type="bigint")],
+            indexes       = [_make_pk_index()],
+            audit_enabled = False,
+        )
+        schema = SchemaConfig(name="public", tables=[audited, not_audited])
+        proj   = _make_project(schemas=[schema])
+        proj.database.audit_enabled = True
+        proj.database.audit_logged  = [AuditLogLevel.DDL]
+        sql    = _generate_audit_grants(proj)
+        assert '"tk_public"."audited"' in sql
+        assert '"tk_public"."silent"' not in sql
+
+    def test_returns_no_tables_comment_when_all_disabled(self) -> None:
+        table  = TableConfig(
+            name          = "quiet",
+            columns       = [ColumnConfig(name="id", type="bigint")],
+            indexes       = [_make_pk_index()],
+            audit_enabled = False,
+        )
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        proj.database.audit_enabled = True
+        proj.database.audit_logged  = [AuditLogLevel.DDL]
+        sql    = _generate_audit_grants(proj)
+        assert "GRANT" not in sql
+        assert "No tables" in sql
+
+
+class TestGenerateRolesAudit:
+
+    def test_tarkin_audit_role_created_when_audit_enabled(self) -> None:
+        proj = _make_project()
+        proj.database.audit_enabled = True
+        proj.database.audit_logged  = [AuditLogLevel.DDL]
+        current = _make_project()
+        sql     = _generate_roles(proj, current)
+        assert "CREATE ROLE tarkin_audit" in sql
+        assert "pgaudit.role" in sql
+
+    def test_tarkin_audit_role_not_created_when_audit_disabled(self) -> None:
+        proj    = _make_project()
+        proj.database.audit_enabled = False
+        current = _make_project()
+        sql     = _generate_roles(proj, current)
+        assert "tarkin_audit" not in sql
+
+
+class TestGenerateGrantsMaintain:
+
+    def test_maintain_grant_emits_version_guard_block(self) -> None:
+        role = _make_full_role("maintainer", maintain=True)
+        role.can_maintain = True
+        proj = _make_project(roles=[role])
+        proj.database.version = "16"
+        sql  = _generate_grants(proj)
+        assert "server_version_num" in sql
+        assert "160000" in sql
+        assert "MAINTAIN" in sql
+
+    def test_maintain_skipped_when_can_maintain_false(self) -> None:
+        role = _make_full_role("reader", maintain=True)
+        role.can_maintain = False
+        proj = _make_project(roles=[role])
+        proj.database.version = "16"
+        with pytest.warns(UserWarning, match="can_maintain=False"):
+            sql = _generate_grants(proj)
+        assert "GRANT MAINTAIN" not in sql
+        assert "server_version_num" not in sql
+
+    def test_maintain_skipped_with_warning_on_old_version(self) -> None:
+        role = _make_full_role("maintainer", maintain=True)
+        role.can_maintain = True
+        proj = _make_project(roles=[role])
+        proj.database.version = "15"
+        with pytest.warns(UserWarning, match="MAINTAIN"):
+            sql = _generate_grants(proj)
+        assert "server_version_num" not in sql

@@ -140,8 +140,9 @@ class TestTableDiff:
 
     def test_table_audit_enabled_change(self) -> None:
         before        = build_minimal_project()
+        before.schemas[0].tables[0].audit_enabled = True
         after         = _clone(before)
-        after.schemas[0].tables[0].audit_enabled = False
+        after.schemas[0].tables[0].audit_enabled  = False
         changes       = diff_projects(before, after)
         table_changes = _changes_for(changes, ObjectType.TABLE)
         modified      = [c for c in table_changes if c.kind == ChangeKind.MODIFIED]
