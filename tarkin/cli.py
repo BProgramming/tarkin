@@ -11,6 +11,7 @@ from typing import Optional
 
 from .attach import attach, AttachError
 from .detach import detach, DetachError
+from .erase import erase_check, erase_apply, EraseError
 from .credentials import (
     CredentialsFile, DEFAULT_CREDENTIALS_PATH,
     check_connection, test_all_connections, ConnectionProfile,
@@ -65,7 +66,7 @@ def test_connections(
     """
     Test that one or more credentials profiles can connect to their databases.
 
-    Without ``--profile``, all profiles in the credentials file are tested.
+    Without --profile, all profiles in the credentials file are tested.
     """
     creds = _load_credentials(credentials)
 
@@ -367,6 +368,97 @@ def diff_yaml(
         print(f"{len(changes)} change(s) detected. Report written to {output}.")
     else:
         print(f"No changes detected. Report written to {output}.")
+
+
+@app.command(name="erase")
+def erase_subject(
+    profile:     str            = _profile_option,
+    credentials: Optional[Path] = _credentials_option,
+    column:      list[str]      = typer.Option(
+        ..., "--column", "-col",
+        help="Identifier column name to match on. Repeat for multiple columns.",
+    ),
+    value:       list[str]      = typer.Option(
+        ..., "--value", "-val",
+        help="Value corresponding to each --column (in the same order). Repeat for multiple values.",
+    ),
+    check:       bool           = typer.Option(
+        False, "--check",
+        help="Preview which rows would be affected without modifying any data.",
+    ),
+    apply:       bool           = typer.Option(
+        False, "--apply",
+        help="Execute the erasure and log the result to __META__.tarkin_erasures.",
+    ),
+    output:      Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Directory to write the result JSON. Defaults to 'out/'.",
+    ),
+) -> None:
+    """
+    Erase data subject records from a Tarkin-attached database.
+
+    Calls __META__.tarkin_erase_check (with --check) or
+    __META__.tarkin_erase_apply (with --apply) on the live database.
+
+    --check previews the rows that would be affected and writes the result to
+    a timestamped JSON in 'out/' (or --output).
+
+    --apply executes the erasure according to each table's erase_strategy,
+    logs the operation to __META__.tarkin_erasures, and writes a result JSON.
+
+    Exactly one of --check or --apply must be specified.
+    """
+    if check == apply:
+        _die("Specify exactly one of --check or --apply.")
+        return
+
+    if len(column) != len(value):
+        _die(f"Provide the same number of --column and --value arguments ({len(column)} vs {len(value)}).")
+        return
+
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    out_dir = output or Path("out")
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.")
+
+    try:
+        if check:
+            rows = erase_check(prof, list(column), list(value), out_dir=out_dir)
+            print(f"\nErase check results ({len(rows)} table(s) matched):")
+            for row in rows:
+                print(
+                    f"  {row['schema_name']}.{row['table_name']}"
+                    f"  strategy={row['erase_strategy']}"
+                    f"  rows_matched={row['rows_matched']}"
+                )
+            if not rows:
+                print("  No matching rows found.")
+        else:
+            rows = erase_apply(prof, list(column), list(value), out_dir=out_dir)
+            print(f"\nErase apply results ({len(rows)} table(s) affected):")
+            for row in rows:
+                print(
+                    f"  {row['schema_name']}.{row['table_name']}"
+                    f"  strategy={row['erase_strategy']}"
+                    f"  rows_affected={row['rows_affected']}"
+                )
+            if not rows:
+                print("  No matching rows found.")
+    except EraseError as exc:
+        _die(str(exc))
 
 
 @app.command(name="purge")

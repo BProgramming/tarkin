@@ -25,6 +25,7 @@ from .model import (
     NameMaskConfig,
     PartialMaskVisibleSide,
     GeneratedColumnStorage,
+    ErasureStrategy,
 )
 from .serialize import Serializer
 
@@ -67,6 +68,10 @@ def generate_sql(
         _generate_audit(project),
         _section("AUDIT GRANTS"),
         _generate_audit_grants(project),
+        _section("SUBJECT IDENTIFIER INDEXES"),
+        _generate_subject_identifier_indexes(project),
+        _section("ERASURE FUNCTIONS"),
+        _generate_erase_functions(project),
         _section("META POPULATION"),
         _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
         _section("TRANSACTION END"),
@@ -252,6 +257,33 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_revoked_grants (
     schema_name text NOT NULL,
     table_name  text,          -- NULL means schema-level grant
     grant_type  text NOT NULL  -- e.g. 'SELECT', 'INSERT', 'USAGE', 'CREATE'
+);
+
+-- Tracks tables with subject-identifier columns and their erasure strategy.
+-- The erase functions query this table at runtime to discover what to do per table.
+CREATE TABLE IF NOT EXISTS __META__.tarkin_subject_identifiers (
+    subject_id      bigserial PRIMARY KEY,
+    build_id        bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    schema_name     text NOT NULL,        -- public-facing schema name
+    table_name      text NOT NULL,        -- public-facing table name
+    shadow_schema   text NOT NULL,        -- tk_ schema where operations execute
+    shadow_table    text NOT NULL,        -- shadow table name (same as table_name)
+    identifier_cols text[] NOT NULL,      -- columns marked is_subject_identifier
+    identifier_types text[] NOT NULL,     -- corresponding PostgreSQL types
+    erase_strategy  text NOT NULL         -- 'delete', 'nullify', or 'obfuscate'
+);
+
+-- Audit log of erasure operations.  Populated by tarkin_erase_apply().
+CREATE TABLE IF NOT EXISTS __META__.tarkin_erasures (
+    erasure_id    bigserial PRIMARY KEY,
+    erased_at     timestamptz NOT NULL DEFAULT now(),
+    erased_by     text        NOT NULL DEFAULT current_user,
+    schema_name   text        NOT NULL,   -- public-facing schema name
+    table_name    text        NOT NULL,   -- public-facing table name
+    column_names  text[]      NOT NULL,   -- identifier columns matched
+    column_values text[]      NOT NULL,   -- values provided by caller
+    strategy      text        NOT NULL,
+    rows_affected bigint      NOT NULL
 );
 """.strip()
 
@@ -1232,6 +1264,289 @@ def _generate_audit_grants(project: GovernanceProject) -> str:
     lines.append("")
     return "\n".join(lines)
 
+def _generate_subject_identifier_indexes(project: GovernanceProject) -> str:
+    """Generate per-column btree indexes for subject identifier columns on shadow tables."""
+    lines: list[str] = []
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            id_cols = [c for c in table.columns if c.is_subject_identifier]
+            if not id_cols:
+                continue
+            for col in id_cols:
+                idx_name = _q(f"tarkin_subject_{table.name}_{col.name}")
+                lines.append(
+                    f"CREATE INDEX {idx_name} "
+                    f"ON {_q(shadow)}.{_q(table.name)} ({_q(col.name)});"
+                )
+    if not lines:
+        return "-- No subject identifier columns defined.\n"
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _generate_erase_functions(project: GovernanceProject) -> str:
+    """
+    Generate tarkin_erase_check() and tarkin_erase_apply() in __META__.
+
+    Both functions take:
+        p_columns text[]  -- identifier column names to match on
+        p_values  text[]  -- corresponding values (as text; cast internally)
+
+    tarkin_erase_check returns a result set describing what would be affected.
+    tarkin_erase_apply executes the erasure and logs to tarkin_erasures.
+
+    The functions iterate over tarkin_subject_identifiers at runtime, so they
+    work correctly without being regenerated when the data changes.  Only
+    the index and tarkin_subject_identifiers rows need updating on re-attach.
+    """
+    subject_tables = [
+        (schema, table)
+        for schema in project.schemas
+        for table in schema.tables
+        if table.erase_strategy is not None
+        and any(c.is_subject_identifier for c in table.columns)
+    ]
+
+    if not subject_tables:
+        return "-- No subject identifier tables defined; erasure functions skipped.\n"
+
+    check_fn = f"""
+CREATE OR REPLACE FUNCTION __META__.tarkin_erase_check(
+    p_columns text[],
+    p_values  text[]
+)
+RETURNS TABLE (
+    schema_name   text,
+    table_name    text,
+    erase_strategy text,
+    rows_matched  bigint
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    rec         __META__.tarkin_subject_identifiers%ROWTYPE;
+    where_clause text;
+    col_name    text;
+    col_type    text;
+    i           int;
+    row_count   bigint;
+BEGIN
+    IF array_length(p_columns, 1) IS DISTINCT FROM array_length(p_values, 1) THEN
+        RAISE EXCEPTION 'tarkin_erase_check: p_columns and p_values must have the same length';
+    END IF;
+
+    FOR rec IN
+        SELECT * FROM __META__.tarkin_subject_identifiers
+    LOOP
+        -- Build WHERE clause only for columns that are both in p_columns and are
+        -- identifier columns for this table.
+        where_clause := '';
+        FOR i IN 1..array_length(p_columns, 1) LOOP
+            col_name := p_columns[i];
+            IF col_name = ANY(rec.identifier_cols) THEN
+                col_type := rec.identifier_types[
+                    array_position(rec.identifier_cols, col_name)
+                ];
+                IF where_clause <> '' THEN
+                    where_clause := where_clause || ' AND ';
+                END IF;
+                where_clause := where_clause || format(
+                    '%I = $%s::%s',
+                    col_name, i, col_type
+                );
+            END IF;
+        END LOOP;
+
+        IF where_clause = '' THEN
+            CONTINUE;
+        END IF;
+
+        EXECUTE format(
+            'SELECT count(*) FROM %I.%I WHERE %s',
+            rec.shadow_schema, rec.shadow_table, where_clause
+        ) USING p_values[1], p_values[2], p_values[3], p_values[4],
+                p_values[5], p_values[6], p_values[7], p_values[8]
+          INTO row_count;
+
+        schema_name    := rec.schema_name;
+        table_name     := rec.table_name;
+        erase_strategy := rec.erase_strategy;
+        rows_matched   := COALESCE(row_count, 0);
+        RETURN NEXT;
+    END LOOP;
+END;
+$$;
+""".strip()
+
+    apply_fn = f"""
+CREATE OR REPLACE FUNCTION __META__.tarkin_erase_apply(
+    p_columns text[],
+    p_values  text[]
+)
+RETURNS TABLE (
+    schema_name   text,
+    table_name    text,
+    erase_strategy text,
+    rows_affected bigint
+)
+LANGUAGE plpgsql AS $$
+DECLARE
+    rec          __META__.tarkin_subject_identifiers%ROWTYPE;
+    where_clause text;
+    set_clause   text;
+    col_name     text;
+    col_type     text;
+    orig_val     text;
+    i            int;
+    j            int;
+    non_id_cols  text[];
+    non_id_types text[];
+    row_count    bigint;
+    all_cols     text[];
+    all_types    text[];
+BEGIN
+    IF array_length(p_columns, 1) IS DISTINCT FROM array_length(p_values, 1) THEN
+        RAISE EXCEPTION 'tarkin_erase_apply: p_columns and p_values must have the same length';
+    END IF;
+
+    FOR rec IN
+        SELECT * FROM __META__.tarkin_subject_identifiers
+    LOOP
+        where_clause := '';
+        FOR i IN 1..array_length(p_columns, 1) LOOP
+            col_name := p_columns[i];
+            IF col_name = ANY(rec.identifier_cols) THEN
+                col_type := rec.identifier_types[
+                    array_position(rec.identifier_cols, col_name)
+                ];
+                IF where_clause <> '' THEN
+                    where_clause := where_clause || ' AND ';
+                END IF;
+                where_clause := where_clause || format(
+                    '%I = $%s::%s',
+                    col_name, i, col_type
+                );
+            END IF;
+        END LOOP;
+
+        IF where_clause = '' THEN
+            CONTINUE;
+        END IF;
+
+        IF rec.erase_strategy = 'delete' THEN
+            EXECUTE format(
+                'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
+                 SELECT count(*) FROM deleted',
+                rec.shadow_schema, rec.shadow_table, where_clause
+            ) USING p_values[1], p_values[2], p_values[3], p_values[4],
+                    p_values[5], p_values[6], p_values[7], p_values[8]
+              INTO row_count;
+
+        ELSIF rec.erase_strategy IN ('nullify', 'obfuscate') THEN
+            -- Retrieve non-identifier column names and types from information_schema
+            SELECT array_agg(column_name ORDER BY ordinal_position),
+                   array_agg(udt_name    ORDER BY ordinal_position)
+            INTO non_id_cols, non_id_types
+            FROM information_schema.columns
+            WHERE table_schema = rec.shadow_schema
+              AND table_name   = rec.shadow_table
+              AND column_name  <> ALL(rec.identifier_cols);
+
+            set_clause := '';
+            IF non_id_cols IS NOT NULL THEN
+                FOR j IN 1..array_length(non_id_cols, 1) LOOP
+                    col_name := non_id_cols[j];
+                    col_type := non_id_types[j];
+                    IF set_clause <> '' THEN
+                        set_clause := set_clause || ', ';
+                    END IF;
+
+                    IF rec.erase_strategy = 'nullify' THEN
+                        -- Try NULL first; fall back to '[ERASED]' cast for non-nullable columns
+                        set_clause := set_clause || format(
+                            '%I = CASE WHEN (SELECT is_nullable = ''YES'' '
+                            'FROM information_schema.columns '
+                            'WHERE table_schema = %L AND table_name = %L AND column_name = %L) '
+                            'THEN NULL ELSE ''[ERASED]''::%s END',
+                            col_name, rec.shadow_schema, rec.shadow_table, col_name, col_type
+                        );
+                    ELSE -- obfuscate
+                        -- Fetch current value, hash it, cast back
+                        set_clause := set_clause || format(
+                            $$%I = (
+                                SELECT CASE
+                                    WHEN udt_name ILIKE 'text' OR udt_name ILIKE 'varchar'
+                                      OR udt_name ILIKE 'bpchar'
+                                        THEN encode(digest(%I::text, 'sha256'), 'hex')
+                                    WHEN udt_name ILIKE 'uuid'
+                                        THEN (
+                                            left(encode(digest(%I::text,'sha256'),'hex'),8)      ||'-'||
+                                            substr(encode(digest(%I::text,'sha256'),'hex'),9,4)  ||'-'||
+                                            substr(encode(digest(%I::text,'sha256'),'hex'),13,4) ||'-'||
+                                            substr(encode(digest(%I::text,'sha256'),'hex'),17,4) ||'-'||
+                                            substr(encode(digest(%I::text,'sha256'),'hex'),21,12)
+                                        )
+                                    WHEN udt_name ILIKE 'int4' OR udt_name ILIKE 'int8'
+                                      OR udt_name ILIKE 'int2' OR udt_name ILIKE 'numeric'
+                                      OR udt_name ILIKE 'float4' OR udt_name ILIKE 'float8'
+                                        THEN (('x'||left(encode(digest(%I::text,'sha256'),'hex'),16))::bit(64)::bigint)::text
+                                    WHEN udt_name ILIKE 'bool'
+                                        THEN (get_byte(digest(%I::text,'sha256'),0)%%2=0)::text
+                                    ELSE '[ERASED]'
+                                END::%s
+                                FROM information_schema.columns
+                                WHERE table_schema=%L AND table_name=%L AND column_name=%L
+                            )$$,
+                            col_name,
+                            col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name,
+                            col_type,
+                            rec.shadow_schema, rec.shadow_table, col_name
+                        );
+                    END IF;
+                END LOOP;
+            END IF;
+
+            IF set_clause = '' THEN
+                -- Table has only identifier columns; treat as delete
+                EXECUTE format(
+                    'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
+                     SELECT count(*) FROM deleted',
+                    rec.shadow_schema, rec.shadow_table, where_clause
+                ) USING p_values[1], p_values[2], p_values[3], p_values[4],
+                        p_values[5], p_values[6], p_values[7], p_values[8]
+                  INTO row_count;
+            ELSE
+                EXECUTE format(
+                    'WITH updated AS (UPDATE %I.%I SET %s WHERE %s RETURNING 1)
+                     SELECT count(*) FROM updated',
+                    rec.shadow_schema, rec.shadow_table, set_clause, where_clause
+                ) USING p_values[1], p_values[2], p_values[3], p_values[4],
+                        p_values[5], p_values[6], p_values[7], p_values[8]
+                  INTO row_count;
+            END IF;
+        END IF;
+
+        row_count := COALESCE(row_count, 0);
+
+        INSERT INTO __META__.tarkin_erasures
+            (schema_name, table_name, column_names, column_values, strategy, rows_affected)
+        VALUES
+            (rec.schema_name, rec.table_name, p_columns, p_values,
+             rec.erase_strategy, row_count);
+
+        schema_name    := rec.schema_name;
+        table_name     := rec.table_name;
+        erase_strategy := rec.erase_strategy;
+        rows_affected  := row_count;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$;
+""".strip()
+
+    return check_fn + "\n\n" + apply_fn + "\n"
+
+
 def _generate_meta_population (
     project:        GovernanceProject,
     current:        GovernanceProject,
@@ -1566,13 +1881,34 @@ def _generate_meta_population (
     if revoked_grants:
         lines.append("")
 
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            id_cols = [c for c in table.columns if c.is_subject_identifier]
+            if not id_cols or table.erase_strategy is None:
+                continue
+            sn  = _escape_sql_string(schema.name)
+            tn  = _escape_sql_string(table.name)
+            sh  = _escape_sql_string(shadow)
+            es  = _escape_sql_string(str(table.erase_strategy))
+            col_names = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.name)}'" for c in id_cols) + "]"
+            col_types = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.type)}'" for c in id_cols) + "]"
+            lines.append(
+                f"    INSERT INTO __META__.tarkin_subject_identifiers "
+                f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
+                f"identifier_cols, identifier_types, erase_strategy) "
+                f"VALUES (v_build_id, '{sn}', '{tn}', '{sh}', '{tn}', "
+                f"{col_names}, {col_types}, '{es}');"
+            )
+    lines.append("")
+
     lines += ["END;", "$$;"]
     return "\n".join(lines)
 
 
 def _needs_pgcrypto(project: GovernanceProject) -> bool:
-    """Return True if any column requires pgcrypto for hashing."""
-    return any(
+    """Return True if any column requires pgcrypto for hashing or erasure obfuscation."""
+    has_hash = any(
         isinstance(col.mask_config, HashMaskConfig)
         and col.mask_config.algorithm in (
             HashAlgorithm.SHA256, HashAlgorithm.SHA512, HashAlgorithm.HMAC256
@@ -1581,6 +1917,12 @@ def _needs_pgcrypto(project: GovernanceProject) -> bool:
         for table in schema.tables
         for col in table.columns
     )
+    has_obfuscate = any(
+        table.erase_strategy == ErasureStrategy.OBFUSCATE
+        for schema in project.schemas
+        for table in schema.tables
+    )
+    return has_hash or has_obfuscate
 
 
 def _escape_hmac_key() -> str:

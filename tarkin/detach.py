@@ -51,6 +51,7 @@ def detach(
             added_fks,
             added_generated_cols,
             moved_objects,
+            subject_identifier_indexes,
         ) = _read_meta(profile)
     except Exception as exc:
         if not no_restore_grants:
@@ -68,6 +69,7 @@ def detach(
         added_fks                   = []
         added_generated_cols        = []
         moved_objects               = []
+        subject_identifier_indexes  = []
     print("Reading build metadata... Done.")
 
     if not has_versioning:
@@ -98,6 +100,7 @@ def detach(
         added_fks,
         added_generated_cols,
         moved_objects,
+        subject_identifier_indexes,
     )
     print("Generating rollback SQL... Done.")
 
@@ -142,6 +145,7 @@ def _read_meta(
     list[tuple[str, str, str]],
     list[tuple[str, str, str]],
     list[tuple[str, str, str, str]],
+    list[tuple[str, str, list[str]]],
 ]:
     """
     Read __META__ tables to retrieve all state needed for a clean detach.
@@ -173,7 +177,7 @@ def _read_meta(
                 "ORDER BY built_at DESC LIMIT 1"
             )).fetchone()
             if not row:
-                return [], [], profile.database, False, {}, [], [], []
+                return [], [], profile.database, False, {}, [], [], [], []
 
             build_id                    = row[0]
             db_name                     = row[1]
@@ -223,7 +227,21 @@ def _read_meta(
             ), {"bid": build_id}).fetchall()
             moved_objects = [(r[0], r[1], r[2], r[3]) for r in obj_rows]
 
-            return tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin, pgaudit_snapshot, added_fks, added_generated_cols, moved_objects
+            # Subject identifier indexes (need explicit drops on detach)
+            subj_rows = conn.execute(text(
+                "SELECT shadow_schema, shadow_table, identifier_cols "
+                "FROM __META__.tarkin_subject_identifiers "
+                "WHERE build_id = :bid"
+            ), {"bid": build_id}).fetchall()
+            subject_identifier_indexes = [
+                (r[0], r[1], list(r[2])) for r in subj_rows
+            ]
+
+            return (
+                tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin,
+                pgaudit_snapshot, added_fks, added_generated_cols, moved_objects,
+                subject_identifier_indexes,
+            )
     finally:
         engine.dispose()
 
@@ -243,15 +261,16 @@ def _confirm_drop_versioning(versioned_tables: list) -> None:  # type: ignore[ty
 
 
 def _generate_detach_sql(
-    current:              GovernanceProject,
-    drop_versioning:      bool,
-    tarkin_created_roles: list[str],
-    revoked_grants:       list[tuple[str, str, str | None, str]],
-    db_name:              str,
-    pgaudit_snapshot:     dict[str, str | None],
-    added_fks:            list[tuple[str, str, str]],
-    added_generated_cols: list[tuple[str, str, str]],
-    moved_objects:        list[tuple[str, str, str, str]],
+    current:                    GovernanceProject,
+    drop_versioning:            bool,
+    tarkin_created_roles:       list[str],
+    revoked_grants:             list[tuple[str, str, str | None, str]],
+    db_name:                    str,
+    pgaudit_snapshot:           dict[str, str | None],
+    added_fks:                  list[tuple[str, str, str]],
+    added_generated_cols:       list[tuple[str, str, str]],
+    moved_objects:              list[tuple[str, str, str, str]],
+    subject_identifier_indexes: list[tuple[str, str, list[str]]],
 ) -> str:
     """
     Generate the full rollback SQL for a detach operation.
@@ -260,14 +279,16 @@ def _generate_detach_sql(
 
     1. Triggers and views are removed.
     2. Added FK constraints are dropped from shadow tables.
-    3. Versioning columns are dropped if requested.
-    4. Revoked grants are restored (schema-level first, then table-level).
-    5. Moved schema objects are moved back to shadow schemas.
-    6. Shadow schemas are renamed back to their original names.
-    7. ``__META__`` is dropped.
+    3. Added generated columns are dropped from shadow tables.
+    4. Subject identifier indexes are dropped from shadow tables.
+    5. Versioning columns are dropped if requested.
+    6. Revoked grants are restored (schema-level first, then table-level).
+    7. Moved schema objects are moved back to shadow schemas.
     8. Tarkin-created roles are dropped.
-    9. pgaudit settings are restored to their pre-attach values.
-    10. The ``tarkin.hmac_key`` GUC is reset.
+    9. Shadow schemas are renamed back to their original names.
+    10. ``__META__`` is dropped.
+    11. pgaudit settings are restored to their pre-attach values.
+    12. The ``tarkin.hmac_key`` GUC is reset.
     """
     tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]
 
@@ -342,6 +363,14 @@ def _generate_detach_sql(
                 f'ALTER TABLE {_q(shadow_schema)}.{_q(table_name)} '
                 f'DROP COLUMN IF EXISTS {_q(column_name)};'
             )
+        lines.append("")
+
+    if subject_identifier_indexes:
+        lines.append("-- Drop subject identifier indexes added by Tarkin")
+        for (shadow_schema, table_name, col_names) in subject_identifier_indexes:
+            for col_name in col_names:
+                idx_name = _q(f"tarkin_subject_{table_name}_{col_name}")
+                lines.append(f'DROP INDEX IF EXISTS {_q(shadow_schema)}.{idx_name};')
         lines.append("")
 
     if moved_objects:

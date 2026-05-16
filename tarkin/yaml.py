@@ -19,6 +19,7 @@ from .model import (
     GeneratedColumnStorage,
     IndexType,
     AuditLogLevel,
+    ErasureStrategy,
     FullMaskConfig,
     PartialMaskConfig,
     HashMaskConfig,
@@ -176,14 +177,16 @@ class YamlLoader:
     @classmethod
     def _parse_table(cls, d: dict) -> TableConfig:
         """Parse a table configuration block."""
+        raw_erase = d.get("erase_strategy")
         return TableConfig(
-            name          = d.get("name", "default_table"),
-            description   = d.get("description"),
-            clearance     = d.get("clearance", 0),
-            audit_enabled = d.get("audit_enabled", True),
-            columns       = [cls._parse_column(c) for c in d.get("columns", [])],
-            indexes       = [cls._parse_index(i) for i in d.get("indexes", [])],
-            foreign_keys  = [cls._parse_fk(f) for f in d.get("foreign_keys", [])],
+            name           = d.get("name", "default_table"),
+            description    = d.get("description"),
+            clearance      = d.get("clearance", 0),
+            audit_enabled  = d.get("audit_enabled", True),
+            erase_strategy = ErasureStrategy(raw_erase) if raw_erase else None,
+            columns        = [cls._parse_column(c) for c in d.get("columns", [])],
+            indexes        = [cls._parse_index(i) for i in d.get("indexes", [])],
+            foreign_keys   = [cls._parse_fk(f) for f in d.get("foreign_keys", [])],
         )
 
     @classmethod
@@ -193,21 +196,22 @@ class YamlLoader:
         mask_config = _parse_mask_config(raw_mask) if raw_mask else None
 
         return ColumnConfig(
-            name                 = d.get("name", "default_column"),
-            description          = d.get("description"),
-            clearance            = d.get("clearance", 0),
-            audit_enabled        = d.get("audit_enabled", True),
-            type                 = d.get("type", "str"),
-            default              = d.get("default"),
-            unique               = d.get("unique", False),
-            nullable             = d.get("nullable", True),
-            immutable            = d.get("immutable", False),
-            versioned            = d.get("versioned", False),
-            sensitive            = d.get("sensitive", False),
-            masking_strategy     = MaskingStrategy(d.get("masking_strategy", "none")),
-            mask_config          = mask_config,
-            generated_expression = d.get("generated_expression"),
-            generated_storage    = GeneratedColumnStorage(d.get("generated_storage", "stored")),
+            name                  = d.get("name", "default_column"),
+            description           = d.get("description"),
+            clearance             = d.get("clearance", 0),
+            audit_enabled         = d.get("audit_enabled", True),
+            type                  = d.get("type", "str"),
+            default               = d.get("default"),
+            unique                = d.get("unique", False),
+            nullable              = d.get("nullable", True),
+            immutable             = d.get("immutable", False),
+            versioned             = d.get("versioned", False),
+            sensitive             = d.get("sensitive", False),
+            is_subject_identifier = d.get("is_subject_identifier", False),
+            masking_strategy      = MaskingStrategy(d.get("masking_strategy", "none")),
+            mask_config           = mask_config,
+            generated_expression  = d.get("generated_expression"),
+            generated_storage     = GeneratedColumnStorage(d.get("generated_storage", "stored")),
         )
 
     @classmethod

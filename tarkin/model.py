@@ -81,6 +81,14 @@ class IndexType(StrEnum):
     BRIN  = "brin"
 
 
+class ErasureStrategy(StrEnum):
+    """Strategy for erasing subject-identified rows from a table."""
+
+    DELETE    = "delete"
+    NULLIFY   = "nullify"
+    OBFUSCATE = "obfuscate"
+
+
 # =========================================================
 # MASK CONFIGS
 # =========================================================
@@ -215,6 +223,7 @@ class ColumnConfig(TarkinBaseModel):
     versioned: bool = False
 
     sensitive: bool = False
+    is_subject_identifier: bool = False
 
     masking_strategy: MaskingStrategy         = MaskingStrategy.NONE
     mask_config:      Optional[AnyMaskConfig] = None
@@ -249,10 +258,11 @@ class ForeignKeyConfig(TarkinBaseModel):
 
 class TableConfig(TarkinBaseModel):
     """Configuration for a database table."""
-    name:          str           = "default_table"
-    clearance:     int           = 0
-    description:   Optional[str] = None
-    audit_enabled: bool          = False
+    name:           str                       = "default_table"
+    clearance:      int                       = 0
+    description:    Optional[str]             = None
+    audit_enabled:  bool                      = False
+    erase_strategy: Optional[ErasureStrategy] = None
 
     columns:      list[ColumnConfig]     = Field(default_factory=list)
     indexes:      list[IndexConfig]      = Field(default_factory=list)

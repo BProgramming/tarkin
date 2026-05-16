@@ -7,6 +7,7 @@ from .model import (
     FullMaskConfig, PartialMaskConfig, HashMaskConfig,
     EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
     IpAddressMaskConfig, NameMaskConfig,
+    ErasureStrategy,
 )
 
 _STRATEGY_CONFIG_MAP = {
@@ -50,6 +51,7 @@ class SemanticValidator:
         errors = [
             cls._validate_project_structure(project),
             cls._validate_audit_config(project),
+            cls._validate_erasure_config(project),
             cls._validate_schemas(project),
             cls._validate_tables(project),
             cls._validate_columns(project),
@@ -95,6 +97,62 @@ class SemanticValidator:
                     f"Per-table audit has no effect without database-level auditing: "
                     f"{', '.join(orphaned)}."
                 )
+        return "\n".join(errors) if errors else None
+
+    @classmethod
+    def _validate_erasure_config(cls, project: GovernanceProject) -> str | None:
+        """Validate erasure configuration is internally consistent."""
+        errors = []
+
+        # Build a map of (schema, table) -> set of identifier column names for FK checking
+        identifier_tables: set[tuple[str, str]] = set()
+
+        for schema in project.schemas:
+            for table in schema.tables:
+                has_identifier = any(c.is_subject_identifier for c in table.columns)
+                has_strategy   = table.erase_strategy is not None
+
+                if has_identifier and not has_strategy:
+                    errors.append(
+                        f"Table '{schema.name}.{table.name}' has is_subject_identifier columns "
+                        f"but no erase_strategy. Specify delete, nullify, or obfuscate."
+                    )
+
+                if has_strategy and not has_identifier:
+                    errors.append(
+                        f"Table '{schema.name}.{table.name}' has erase_strategy="
+                        f"'{table.erase_strategy}' but no columns marked is_subject_identifier. "
+                        f"The strategy is unreachable."
+                    )
+
+                if has_identifier and has_strategy:
+                    identifier_tables.add((schema.name, table.name))
+
+                    if table.erase_strategy == ErasureStrategy.OBFUSCATE:
+                        for col in table.columns:
+                            if col.is_subject_identifier:
+                                continue
+                            if not col.nullable and not _is_text_compatible(col.type):
+                                errors.append(
+                                    f"Column '{schema.name}.{table.name}.{col.name}' is non-nullable "
+                                    f"and non-text-compatible (type '{col.type}'). OBFUSCATE on this "
+                                    f"column will fall back to the '[ERASED]' sentinel. "
+                                    f"Consider using NULLIFY or ensuring the column is nullable."
+                                )
+
+        for schema in project.schemas:
+            for table in schema.tables:
+                for fk in table.foreign_keys:
+                    target = (fk.referenced_schema, fk.referenced_table)
+                    if target in identifier_tables and table.erase_strategy is None:
+                        errors.append(
+                            f"Table '{schema.name}.{table.name}' has a foreign key "
+                            f"'{fk.name}' referencing '{fk.referenced_schema}.{fk.referenced_table}' "
+                            f"which is a subject-identified table with DELETE strategy. "
+                            f"Assign an erase_strategy to '{schema.name}.{table.name}' or ensure "
+                            f"the FK has ON DELETE CASCADE / ON DELETE SET NULL defined."
+                        )
+
         return "\n".join(errors) if errors else None
 
     @classmethod
@@ -324,3 +382,9 @@ class SemanticValidator:
                 msg += f" (Suffix '{trim_suffix}' is ignored)."
             return msg
         return None
+
+
+def _is_text_compatible(pg_type: str) -> bool:
+    """Return True if the PostgreSQL type can store a SHA-256 hex string without casting issues."""
+    t = pg_type.lower().strip()
+    return any(t.startswith(p) for p in ("text", "varchar", "char", "character varying"))

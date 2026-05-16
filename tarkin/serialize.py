@@ -139,16 +139,18 @@ class Serializer:
     def _serialize_table(cls, table: TableConfig) -> CommentedMap:
         """Serialize a table configuration block."""
         m = CommentedMap()
-        m["name"]             = table.name
+        m["name"]               = table.name
         if table.description:
-            m["description"]  = table.description
-        m["clearance"]        = table.clearance
-        m["audit_enabled"]    = table.audit_enabled
-        m["columns"]          = CommentedSeq([cls._serialize_column(c) for c in table.columns])
+            m["description"]    = table.description
+        m["clearance"]          = table.clearance
+        m["audit_enabled"]      = table.audit_enabled
+        if table.erase_strategy is not None:
+            m["erase_strategy"] = table.erase_strategy
+        m["columns"]            = CommentedSeq([cls._serialize_column(c) for c in table.columns])
         if table.indexes:
-            m["indexes"]      = CommentedSeq([cls._serialize_index(i) for i in table.indexes])
+            m["indexes"]        = CommentedSeq([cls._serialize_index(i) for i in table.indexes])
         if table.foreign_keys:
-            m["foreign_keys"] = CommentedSeq([cls._serialize_fk(f) for f in table.foreign_keys])
+            m["foreign_keys"]   = CommentedSeq([cls._serialize_fk(f) for f in table.foreign_keys])
         return m
 
     @classmethod
@@ -165,6 +167,7 @@ class Serializer:
         m["immutable"]                = col.immutable
         m["versioned"]                = col.versioned
         m["sensitive"]                = col.sensitive
+        m["is_subject_identifier"]    = col.is_subject_identifier
         m["masking_strategy"]         = col.masking_strategy
         if col.mask_config is not None:
             m["mask_config"]          = cls._serialize_mask_config(col.mask_config)
