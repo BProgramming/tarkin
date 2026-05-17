@@ -408,8 +408,13 @@ class TestGenerateMigrationSql:
 
     def test_no_changes_raises(self) -> None:
         proj = _simple_project()
-        with pytest.raises(MigrateError, match="No differences"):
-            _generate_migration_sql(proj, proj, [])
+        checksum = project_checksum(proj)
+        prof = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            with pytest.raises(MigrateError, match="No differences"):
+                migrate(proj, prof, out_dir=Path("/tmp"))
 
 
 class TestMigrateFunction:
