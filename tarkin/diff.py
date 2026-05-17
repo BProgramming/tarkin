@@ -241,7 +241,8 @@ def _diff_table(
     """Diff a single table's fields, columns, indexes, and foreign keys."""
     path = f"{schema}.{before.name}"
 
-    for f in ("clearance", "audit_enabled"):
+    for f in ("clearance", "audit_enabled", "erase_strategy",
+              "rls_enabled", "rls_force", "rls_security_barrier"):
         b_val = getattr(before, f)
         a_val = getattr(after, f)
         if b_val != a_val:
@@ -252,6 +253,43 @@ def _diff_table(
                 field       = f,
                 before      = b_val,
                 after       = a_val,
+            ))
+
+    before_policies = before.rls_policies
+    after_policies  = after.rls_policies
+    for i, (bp, ap) in enumerate(zip(before_policies, after_policies)):
+        for f in ("roles", "using_expr", "check_expr"):
+            b_val = getattr(bp, f)
+            a_val = getattr(ap, f)
+            if b_val != a_val:
+                out.append(Change(
+                    kind        = ChangeKind.MODIFIED,
+                    object_type = ObjectType.TABLE,
+                    path        = path,
+                    field       = f"rls_policies[{i}].{f}",
+                    before      = b_val,
+                    after       = a_val,
+                    note        = "DROP POLICY and recreate required.",
+                ))
+    if len(after_policies) > len(before_policies):
+        for i in range(len(before_policies), len(after_policies)):
+            out.append(Change(
+                kind        = ChangeKind.ADDED,
+                object_type = ObjectType.TABLE,
+                path        = path,
+                field       = f"rls_policies[{i}]",
+                after       = str(after_policies[i].using_expr),
+                note        = "CREATE POLICY required.",
+            ))
+    elif len(before_policies) > len(after_policies):
+        for i in range(len(after_policies), len(before_policies)):
+            out.append(Change(
+                kind        = ChangeKind.REMOVED,
+                object_type = ObjectType.TABLE,
+                path        = path,
+                field       = f"rls_policies[{i}]",
+                before      = str(before_policies[i].using_expr),
+                note        = "DROP POLICY required.",
             ))
 
     _diff_columns(schema, before, after, out)

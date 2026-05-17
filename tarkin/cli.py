@@ -9,7 +9,7 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
-from .attach import attach, AttachError
+from .attach import attach, AttachError, OUT_DIR
 from .detach import detach, DetachError
 from .erase import erase_check, erase_apply, EraseError
 from .credentials import (
@@ -494,7 +494,6 @@ def purge_output(
 
 def _find_latest_artifact_path() -> Path | None:
     """Return the path to the most recently created build artifact, or None."""
-    from .attach import OUT_DIR
     if not OUT_DIR.exists():
         return None
     artifacts: list[Path] = sorted(

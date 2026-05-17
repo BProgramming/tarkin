@@ -256,6 +256,27 @@ class ForeignKeyConfig(TarkinBaseModel):
     referenced_column:  str
 
 
+class RLSPolicyConfig(TarkinBaseModel):
+    """
+    Configuration for a single PostgreSQL row-level security policy.
+
+    The policy name is auto-generated as 'tarkin_rls_{table}_{index}' so
+    that detach can discover all Tarkin-managed policies by prefix from
+    pg_policies without a META tracking table.
+
+    'roles' may include the special value 'PUBLIC' to apply the policy
+    to all roles.
+
+    'using_expr' is the USING predicate (SELECT/UPDATE/DELETE row filter).
+    'check_expr' is the optional WITH CHECK predicate (INSERT/UPDATE value
+    validation).  When omitted, PostgreSQL defaults it to 'using_expr'.
+    """
+
+    roles:      list[str]     = Field(default_factory=list)
+    using_expr: str
+    check_expr: Optional[str] = None
+
+
 class TableConfig(TarkinBaseModel):
     """Configuration for a database table."""
     name:           str                       = "default_table"
@@ -264,9 +285,14 @@ class TableConfig(TarkinBaseModel):
     audit_enabled:  bool                      = False
     erase_strategy: Optional[ErasureStrategy] = None
 
+    rls_enabled:          bool = False
+    rls_force:            bool = False
+    rls_security_barrier: bool = False
+
     columns:      list[ColumnConfig]     = Field(default_factory=list)
     indexes:      list[IndexConfig]      = Field(default_factory=list)
     foreign_keys: list[ForeignKeyConfig] = Field(default_factory=list)
+    rls_policies: list[RLSPolicyConfig]  = Field(default_factory=list)
 
     @property
     def clearance_min(self) -> int:

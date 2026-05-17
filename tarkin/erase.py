@@ -9,38 +9,32 @@ from .credentials import ConnectionProfile
 
 
 def erase_check(
-    profile:  ConnectionProfile,
-    columns:  list[str],
-    values:   list[str],
-    out_dir:  Path | None = None,
+    profile: ConnectionProfile,
+    columns: list[str],
+    values:  list[str],
+    out_dir: Path | None = None,
 ) -> list[dict]:
-    """Call tarkin_erase_check() and, optionally, write the result."""
+    """Call __META__.tarkin_erase_check() and return (and optionally write) the result."""
     if len(columns) != len(values):
         raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
-
     results = _call_function(profile, "tarkin_erase_check", columns, values)
-
     if out_dir is not None:
         _write_result(out_dir, "erase_check", columns, values, results)
-
     return results
 
 
 def erase_apply(
-    profile:  ConnectionProfile,
-    columns:  list[str],
-    values:   list[str],
-    out_dir:  Path | None = None,
+    profile: ConnectionProfile,
+    columns: list[str],
+    values:  list[str],
+    out_dir: Path | None = None,
 ) -> list[dict]:
-    """Call tarkin_erase_apply() and, optionally, write the result."""
+    """Call __META__.tarkin_erase_apply() and return (and optionally write) the result."""
     if len(columns) != len(values):
         raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
-
     results = _call_function(profile, "tarkin_erase_apply", columns, values)
-
     if out_dir is not None:
         _write_result(out_dir, "erase_apply", columns, values, results)
-
     return results
 
 
@@ -74,22 +68,22 @@ def _call_function(
 
 
 def _write_result(
-    out_dir:       Path,
-    operation:     str,
-    columns:       list[str],
-    values:        list[str],
-    results:       list[dict],
+    out_dir:   Path,
+    operation: str,
+    columns:   list[str],
+    values:    list[str],
+    results:   list[dict],
 ) -> Path:
     """Write erasure results to a timestamped JSON file in out_dir."""
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     path      = out_dir / f"tarkin_{operation}_{timestamp}.json"
     payload   = {
-        "operation":    operation,
-        "executed_at":  datetime.now(UTC).isoformat(),
-        "columns":      columns,
-        "values":       values,
-        "results":      results,
+        "operation":   operation,
+        "executed_at": datetime.now(UTC).isoformat(),
+        "columns":     columns,
+        "values":      values,
+        "results":     results,
     }
     path.write_text(json.dumps(payload, indent=2, default=str))
     return path

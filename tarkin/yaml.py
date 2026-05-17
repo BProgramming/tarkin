@@ -31,6 +31,7 @@ from .model import (
     PartialMaskVisibleSide,
     AnyMaskConfig,
     HashAlgorithm,
+    RLSPolicyConfig,
 )
 
 
@@ -179,14 +180,27 @@ class YamlLoader:
         """Parse a table configuration block."""
         raw_erase = d.get("erase_strategy")
         return TableConfig(
-            name           = d.get("name", "default_table"),
-            description    = d.get("description"),
-            clearance      = d.get("clearance", 0),
-            audit_enabled  = d.get("audit_enabled", True),
-            erase_strategy = ErasureStrategy(raw_erase) if raw_erase else None,
-            columns        = [cls._parse_column(c) for c in d.get("columns", [])],
-            indexes        = [cls._parse_index(i) for i in d.get("indexes", [])],
-            foreign_keys   = [cls._parse_fk(f) for f in d.get("foreign_keys", [])],
+            name                 = d.get("name", "default_table"),
+            description          = d.get("description"),
+            clearance            = d.get("clearance", 0),
+            audit_enabled        = d.get("audit_enabled", True),
+            erase_strategy       = ErasureStrategy(raw_erase) if raw_erase else None,
+            rls_enabled          = d.get("rls_enabled", False),
+            rls_force            = d.get("rls_force", False),
+            rls_security_barrier = d.get("rls_security_barrier", False),
+            columns              = [cls._parse_column(c) for c in d.get("columns", [])],
+            indexes              = [cls._parse_index(i) for i in d.get("indexes", [])],
+            foreign_keys         = [cls._parse_fk(f) for f in d.get("foreign_keys", [])],
+            rls_policies         = [cls._parse_rls_policy(p) for p in d.get("rls_policies", [])],
+        )
+
+    @classmethod
+    def _parse_rls_policy(cls, d: dict) -> RLSPolicyConfig:
+        """Parse a row-level security policy block."""
+        return RLSPolicyConfig(
+            roles      = list(d.get("roles", [])),
+            using_expr = d["using_expr"],
+            check_expr = d.get("check_expr"),
         )
 
     @classmethod

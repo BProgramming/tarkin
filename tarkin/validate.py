@@ -1,5 +1,6 @@
 """Validates a GovernanceProjects."""
 from __future__ import annotations
+import warnings
 
 from .model import (
     GovernanceProject, SchemaConfig, TableConfig, ColumnConfig,
@@ -52,6 +53,7 @@ class SemanticValidator:
             cls._validate_project_structure(project),
             cls._validate_audit_config(project),
             cls._validate_erasure_config(project),
+            cls._validate_rls_config(project),
             cls._validate_schemas(project),
             cls._validate_tables(project),
             cls._validate_columns(project),
@@ -102,9 +104,7 @@ class SemanticValidator:
     @classmethod
     def _validate_erasure_config(cls, project: GovernanceProject) -> str | None:
         """Validate erasure configuration is internally consistent."""
-        errors = []
-
-        # Build a map of (schema, table) -> set of identifier column names for FK checking
+        errors: list[str] = []
         identifier_tables: set[tuple[str, str]] = set()
 
         for schema in project.schemas:
@@ -152,6 +152,73 @@ class SemanticValidator:
                             f"Assign an erase_strategy to '{schema.name}.{table.name}' or ensure "
                             f"the FK has ON DELETE CASCADE / ON DELETE SET NULL defined."
                         )
+
+        return "\n".join(errors) if errors else None
+
+    @classmethod
+    def _validate_rls_config(cls, project: GovernanceProject) -> str | None:
+        """Validate row-level security configuration is internally consistent."""
+        errors: list[str] = []
+        role_names = {r.name for r in project.roles} | {"PUBLIC"}
+
+        db_version = 0
+        if project.database.version:
+            try:
+                db_version = int(project.database.version.split(".")[0])
+            except (ValueError, IndexError):
+                pass
+
+        for schema in project.schemas:
+            for table in schema.tables:
+                path = f"{schema.name}.{table.name}"
+
+                if table.rls_policies and not table.rls_enabled:
+                    errors.append(
+                        f"Table '{path}' has rls_policies defined but rls_enabled=false. "
+                        f"Set rls_enabled=true or remove the policies."
+                    )
+
+                if table.rls_force and not table.rls_enabled:
+                    errors.append(
+                        f"Table '{path}' has rls_force=true but rls_enabled=false. "
+                        f"rls_force has no effect without rls_enabled=true."
+                    )
+
+                if table.rls_security_barrier and not table.rls_enabled:
+                    errors.append(
+                        f"Table '{path}' has rls_security_barrier=true but rls_enabled=false. "
+                        f"rls_security_barrier has no effect without rls_enabled=true."
+                    )
+
+                if table.rls_enabled and db_version and db_version < 15:
+                    warnings.warn(
+                        f"Table '{path}' has rls_enabled=true but the configured database "
+                        f"version is PostgreSQL {db_version} (< 15). The security_invoker "
+                        f"view option is not available before PG15, so RLS policies will "
+                        f"evaluate as the view owner rather than the querying user, silently "
+                        f"defeating access control. Upgrade to PostgreSQL 15+ before using "
+                        f"RLS with Tarkin.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                for i, policy in enumerate(table.rls_policies):
+                    policy_path = f"{path} policy[{i}]"
+
+                    if not policy.using_expr.strip():
+                        errors.append(f"{policy_path}: using_expr cannot be empty.")
+
+                    if not policy.roles:
+                        errors.append(
+                            f"{policy_path}: roles list cannot be empty. "
+                            f"Use ['PUBLIC'] to apply the policy to all roles."
+                        )
+
+                    for role in policy.roles:
+                        if role != "PUBLIC" and role not in role_names:
+                            errors.append(
+                                f"{policy_path}: role '{role}' is not defined in the project."
+                            )
 
         return "\n".join(errors) if errors else None
 

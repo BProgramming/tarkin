@@ -270,5 +270,5 @@ class TestFieldPreservation:
         assert "ft_remote"        in rs.foreign_tables
 
 
-def make_table():  # type: ignore[return]
+def make_table():
     return _make_table()

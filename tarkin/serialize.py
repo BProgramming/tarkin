@@ -26,6 +26,7 @@ from .model import (
     IpAddressMaskConfig,
     NameMaskConfig,
     MaskingStrategy,
+    RLSPolicyConfig,
 )
 
 
@@ -139,18 +140,36 @@ class Serializer:
     def _serialize_table(cls, table: TableConfig) -> CommentedMap:
         """Serialize a table configuration block."""
         m = CommentedMap()
-        m["name"]               = table.name
+        m["name"]                     = table.name
         if table.description:
-            m["description"]    = table.description
-        m["clearance"]          = table.clearance
-        m["audit_enabled"]      = table.audit_enabled
+            m["description"]          = table.description
+        m["clearance"]                = table.clearance
+        m["audit_enabled"]            = table.audit_enabled
         if table.erase_strategy is not None:
-            m["erase_strategy"] = table.erase_strategy
-        m["columns"]            = CommentedSeq([cls._serialize_column(c) for c in table.columns])
+            m["erase_strategy"]       = table.erase_strategy
+        if table.rls_enabled:
+            m["rls_enabled"]          = table.rls_enabled
+        if table.rls_force:
+            m["rls_force"]            = table.rls_force
+        if table.rls_security_barrier:
+            m["rls_security_barrier"] = table.rls_security_barrier
+        m["columns"]                  = CommentedSeq([cls._serialize_column(c) for c in table.columns])
         if table.indexes:
-            m["indexes"]        = CommentedSeq([cls._serialize_index(i) for i in table.indexes])
+            m["indexes"]              = CommentedSeq([cls._serialize_index(i) for i in table.indexes])
         if table.foreign_keys:
-            m["foreign_keys"]   = CommentedSeq([cls._serialize_fk(f) for f in table.foreign_keys])
+            m["foreign_keys"]         = CommentedSeq([cls._serialize_fk(f) for f in table.foreign_keys])
+        if table.rls_policies:
+            m["rls_policies"]         = CommentedSeq([cls._serialize_rls_policy(p) for p in table.rls_policies])
+        return m
+
+    @classmethod
+    def _serialize_rls_policy(cls, policy: RLSPolicyConfig) -> CommentedMap:
+        """Serialize a row-level security policy block."""
+        m = CommentedMap()
+        m["roles"]          = list(policy.roles)
+        m["using_expr"]     = policy.using_expr
+        if policy.check_expr is not None:
+            m["check_expr"] = policy.check_expr
         return m
 
     @classmethod

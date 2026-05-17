@@ -68,6 +68,8 @@ def generate_sql(
         _generate_audit(project),
         _section("AUDIT GRANTS"),
         _generate_audit_grants(project),
+        _section("ROW LEVEL SECURITY"),
+        _generate_rls(project),
         _section("SUBJECT IDENTIFIER INDEXES"),
         _generate_subject_identifier_indexes(project),
         _section("ERASURE FUNCTIONS"),
@@ -262,20 +264,20 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_revoked_grants (
 -- Tracks tables with subject-identifier columns and their erasure strategy.
 -- The erase functions query this table at runtime to discover what to do per table.
 CREATE TABLE IF NOT EXISTS __META__.tarkin_subject_identifiers (
-    subject_id      bigserial PRIMARY KEY,
-    build_id        bigint NOT NULL REFERENCES __META__.tarkin_builds(build_id),
-    schema_name     text NOT NULL,        -- public-facing schema name
-    table_name      text NOT NULL,        -- public-facing table name
-    shadow_schema   text NOT NULL,        -- tk_ schema where operations execute
-    shadow_table    text NOT NULL,        -- shadow table name (same as table_name)
-    identifier_cols text[] NOT NULL,      -- columns marked is_subject_identifier
-    identifier_types text[] NOT NULL,     -- corresponding PostgreSQL types
-    erase_strategy  text NOT NULL         -- 'delete', 'nullify', or 'obfuscate'
+    subject_id       bigserial PRIMARY KEY,
+    build_id         bigint    NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    schema_name      text      NOT NULL,   -- public-facing schema name
+    table_name       text      NOT NULL,   -- public-facing table name
+    shadow_schema    text      NOT NULL,   -- tk_ schema where operations execute
+    shadow_table     text      NOT NULL,   -- shadow table name (same as table_name)
+    identifier_cols  text[]    NOT NULL,   -- columns marked is_subject_identifier
+    identifier_types text[]    NOT NULL,   -- corresponding PostgreSQL types
+    erase_strategy   text      NOT NULL    -- 'delete', 'nullify', or 'obfuscate'
 );
 
 -- Audit log of erasure operations.  Populated by tarkin_erase_apply().
 CREATE TABLE IF NOT EXISTS __META__.tarkin_erasures (
-    erasure_id    bigserial PRIMARY KEY,
+    erasure_id    bigserial   PRIMARY KEY,
     erased_at     timestamptz NOT NULL DEFAULT now(),
     erased_by     text        NOT NULL DEFAULT current_user,
     schema_name   text        NOT NULL,   -- public-facing schema name
@@ -501,6 +503,12 @@ def _generate_extensions(project: GovernanceProject) -> str:
 def _generate_views(project: GovernanceProject) -> str:
     """Generate CREATE VIEW statements for all tables in the project."""
     lines = []
+    db_version = 0
+    if project.database.version:
+        try:
+            db_version = int(project.database.version.split(".")[0])
+        except (ValueError, IndexError):
+            pass
 
     for schema in project.schemas:
         shadow = f"tk_{schema.name}"
@@ -515,15 +523,22 @@ def _generate_views(project: GovernanceProject) -> str:
             col_exprs = [_mask_expression(c, shadow, table.name) for c in selectable_cols]
             col_list  = ",\n    ".join(col_exprs)
 
+            with_opts: list[str] = []
+            if table.rls_enabled and db_version >= 15:
+                with_opts.append("security_invoker = true")
+            if table.rls_security_barrier:
+                with_opts.append("security_barrier = true")
+            with_clause = f" WITH ({', '.join(with_opts)})" if with_opts else ""
+
             lines.append(
-                f"CREATE VIEW {_q(schema.name)}.{_q(table.name)} AS\n"
+                f"CREATE VIEW {_q(schema.name)}.{_q(table.name)}{with_clause} AS\n"
                 f"    SELECT\n    {col_list}\n"
                 f"    FROM {_q(shadow)}.{_q(table.name)};"
             )
 
             if is_versioned:
                 lines.append(
-                    f"CREATE VIEW {_q(schema.name)}.{_q(table.name + '_current')} AS\n"
+                    f"CREATE VIEW {_q(schema.name)}.{_q(table.name + '_current')}{with_clause} AS\n"
                     f"    SELECT\n    {col_list}\n"
                     f"    FROM {_q(shadow)}.{_q(table.name)}\n"
                     f"    WHERE __valid_to__ >= now();"
@@ -1887,10 +1902,10 @@ def _generate_meta_population (
             id_cols = [c for c in table.columns if c.is_subject_identifier]
             if not id_cols or table.erase_strategy is None:
                 continue
-            sn  = _escape_sql_string(schema.name)
-            tn  = _escape_sql_string(table.name)
-            sh  = _escape_sql_string(shadow)
-            es  = _escape_sql_string(str(table.erase_strategy))
+            sn        = _escape_sql_string(schema.name)
+            tn        = _escape_sql_string(table.name)
+            sh        = _escape_sql_string(shadow)
+            es        = _escape_sql_string(str(table.erase_strategy))
             col_names = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.name)}'" for c in id_cols) + "]"
             col_types = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.type)}'" for c in id_cols) + "]"
             lines.append(
@@ -1904,6 +1919,74 @@ def _generate_meta_population (
 
     lines += ["END;", "$$;"]
     return "\n".join(lines)
+
+
+def _generate_rls(project: GovernanceProject) -> str:
+    """Generate ENABLE ROW LEVEL SECURITY and CREATE POLICY statements."""
+    import warnings
+    lines: list[str] = []
+
+    db_version = 0
+    if project.database.version:
+        try:
+            db_version = int(project.database.version.split(".")[0])
+        except (ValueError, IndexError):
+            pass
+
+    rls_tables = [
+        f"{schema.name}.{table.name}"
+        for schema in project.schemas
+        for table in schema.tables
+        if table.rls_enabled
+    ]
+
+    if rls_tables and db_version and db_version < 15:
+        warnings.warn(
+            f"Database version is PostgreSQL {db_version} (< 15). "
+            f"The security_invoker view option is not available before PG15 — "
+            f"RLS policies on {', '.join(rls_tables)} will evaluate as the view "
+            f"owner rather than the querying user, silently defeating access control. "
+            f"Upgrade to PostgreSQL 15+ for correct RLS behaviour.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            if not table.rls_enabled:
+                continue
+
+            tbl_ref = f"{_q(shadow)}.{_q(table.name)}"
+            lines.append(f"ALTER TABLE {tbl_ref} ENABLE ROW LEVEL SECURITY;")
+            if table.rls_force:
+                lines.append(f"ALTER TABLE {tbl_ref} FORCE ROW LEVEL SECURITY;")
+
+            for i, policy in enumerate(table.rls_policies):
+                policy_name  = _q(f"tarkin_rls_{table.name}_{i}")
+                roles_clause = ", ".join(
+                    r if r == "PUBLIC" else _q(r)
+                    for r in policy.roles
+                )
+                check_clause = (
+                    f"\n    WITH CHECK ({policy.check_expr})"
+                    if policy.check_expr is not None
+                    else ""
+                )
+                lines.append(
+                    f"CREATE POLICY {policy_name}\n"
+                    f"    ON {tbl_ref}\n"
+                    f"    TO {roles_clause}\n"
+                    f"    USING ({policy.using_expr}){check_clause};"
+                )
+
+            lines.append("")
+
+    if not lines:
+        return "-- No row-level security policies defined.\n"
+
+    return "\n".join(lines)
+
 
 
 def _needs_pgcrypto(project: GovernanceProject) -> bool:

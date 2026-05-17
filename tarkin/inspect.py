@@ -19,6 +19,7 @@ from .model import (
     RoleConfig,
     DatabaseEngine,
     IndexType,
+    RLSPolicyConfig,
 )
 
 
@@ -136,12 +137,16 @@ def _build_table(conn: Connection, inspector: Inspector, schema_name: str, table
     columns      = _build_columns(conn, inspector, schema_name, table_name)
     indexes      = _build_indexes(conn, schema_name, table_name)
     foreign_keys = _build_foreign_keys(inspector, schema_name, table_name)
+    rls_enabled, rls_force, rls_policies = _build_rls(conn, schema_name, table_name)
 
     return TableConfig(
         name         = table_name,
         columns      = columns,
         indexes      = indexes,
         foreign_keys = foreign_keys,
+        rls_enabled  = rls_enabled,
+        rls_force    = rls_force,
+        rls_policies = rls_policies,
     )
 
 
@@ -514,6 +519,59 @@ def _get_foreign_tables(conn: Connection, schema_name: str) -> list[str]:
         ORDER BY c.relname
     """), {"schema": schema_name}).fetchall()
     return [r[0] for r in rows]
+
+
+def _build_rls(
+    conn:        Connection,
+    schema_name: str,
+    table_name:  str,
+) -> tuple[bool, bool, list[RLSPolicyConfig]]:
+    """
+    Return (rls_enabled, rls_force, policies) for a table from pg_class and pg_policies.
+
+    Only non-Tarkin policies are returned.
+    """
+    rls_row = conn.execute(text("""
+        SELECT c.relrowsecurity, c.relforcerowsecurity
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = :schema AND c.relname = :table AND c.relkind = 'r'
+    """), {"schema": schema_name, "table": table_name}).fetchone()
+
+    if not rls_row:
+        return False, False, []
+
+    rls_enabled = bool(rls_row[0])
+    rls_force   = bool(rls_row[1])
+
+    if not rls_enabled:
+        return False, False, []
+
+    policy_rows = conn.execute(text("""
+        SELECT
+            policyname,
+            roles,
+            qual,         -- USING expression
+            with_check    -- WITH CHECK expression
+        FROM pg_policies
+        WHERE schemaname = :schema
+          AND tablename  = :table
+          AND policyname NOT LIKE 'tarkin_rls_%'
+        ORDER BY policyname
+    """), {"schema": schema_name, "table": table_name}).fetchall()
+
+    policies: list[RLSPolicyConfig] = []
+    for row in policy_rows:
+        _, roles_arr, using_expr, check_expr = row
+        roles = ["PUBLIC" if r2.lower() == "public" else r2 for r2 in [r.strip('"') for r in (roles_arr or [])]]
+        if using_expr:
+            policies.append(RLSPolicyConfig(
+                roles      = roles,
+                using_expr = using_expr,
+                check_expr = check_expr if check_expr else None,
+            ))
+
+    return rls_enabled, rls_force, policies
 
 
 def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]:

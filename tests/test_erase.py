@@ -1,6 +1,8 @@
 """Tests for subject identifier erasure configuration and codegen."""
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from tarkin.model import (
@@ -10,10 +12,13 @@ from tarkin.model import (
     ColumnConfig,
     ForeignKeyConfig,
     ErasureStrategy,
+    RLSPolicyConfig,
 )
 from tarkin.codegen import (
     _generate_subject_identifier_indexes,
     _generate_erase_functions,
+    _generate_rls,
+    _generate_views,
     _needs_pgcrypto,
 )
 from tarkin.validate import SemanticValidator, ValidationError
@@ -43,11 +48,40 @@ def _make_subject_table(
     )
 
 
-def _make_project(schemas=None, roles=None) -> GovernanceProject:
+def _make_project(schemas=None, roles=None, version="16") -> GovernanceProject:
     return GovernanceProject(
-        database = make_database(),
+        database = make_database(version=version),
         schemas  = schemas or [SchemaConfig(name="public", tables=[_make_subject_table()])],
         roles    = roles   or [make_role()],
+    )
+
+
+def _rls_table(
+    name: str = "patients",
+    force: bool = False,
+    barrier: bool = False,
+    policies: list[RLSPolicyConfig] | None = None,
+) -> TableConfig:
+    return TableConfig(
+        name                 = name,
+        columns              = [ColumnConfig(name="id", type="bigint", nullable=False)],
+        indexes              = [make_index("pk_" + name, ["id"])],
+        rls_enabled          = True,
+        rls_force            = force,
+        rls_security_barrier = barrier,
+        rls_policies         = policies or [
+            RLSPolicyConfig(roles=["reader"], using_expr="owner_id = current_user_id()")
+        ],
+    )
+
+
+def _rls_project(table: TableConfig | None = None, version: str = "15") -> GovernanceProject:
+    t      = table or _rls_table()
+    schema = SchemaConfig(name="public", tables=[t])
+    return GovernanceProject(
+        database = make_database(version=version),
+        schemas  = [schema],
+        roles    = [make_role()],
     )
 
 
@@ -83,9 +117,7 @@ class TestErasureValidation:
     def test_identifier_without_strategy_is_invalid(self) -> None:
         table = TableConfig(
             name    = "t",
-            columns = [
-                ColumnConfig(name="id", type="bigint", is_subject_identifier=True),
-            ],
+            columns = [ColumnConfig(name="id", type="bigint", is_subject_identifier=True),],
             indexes = [make_index()],
         )
         schema = SchemaConfig(name="public", tables=[table])
@@ -263,7 +295,7 @@ class TestEraseFunctions:
         assert "sha256" in sql
 
 
-class TestNeedsPgcryptoErasure:
+class TestNeedsPgcrypto:
 
     def test_obfuscate_strategy_requires_pgcrypto(self) -> None:
         table  = _make_subject_table(strategy=ErasureStrategy.OBFUSCATE)
@@ -330,3 +362,263 @@ class TestErasureRoundtrip:
         )
         yaml_str = Serializer.to_yaml_string(proj)
         assert "erase_strategy" not in yaml_str
+
+
+class TestRLSModel:
+
+    def test_rls_enabled_defaults_false(self) -> None:
+        assert TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")]).rls_enabled is False
+
+    def test_rls_force_defaults_false(self) -> None:
+        assert TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")]).rls_force is False
+
+    def test_rls_security_barrier_defaults_false(self) -> None:
+        assert TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")]).rls_security_barrier is False
+
+    def test_rls_policies_defaults_empty(self) -> None:
+        assert TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")]).rls_policies == []
+
+    def test_rls_policy_config_fields(self) -> None:
+        p = RLSPolicyConfig(roles=["reader"], using_expr="owner_id = 1")
+        assert p.roles == ["reader"]
+        assert p.using_expr == "owner_id = 1"
+        assert p.check_expr is None
+
+    def test_rls_policy_with_check_expr(self) -> None:
+        p = RLSPolicyConfig(roles=["writer"], using_expr="x = 1", check_expr="status != 'locked'")
+        assert p.check_expr == "status != 'locked'"
+
+
+class TestRLSValidation:
+
+    def test_valid_rls_config_passes(self) -> None:
+        assert SemanticValidator.validate(_rls_project()) is True
+
+    def test_policies_without_rls_enabled_is_invalid(self) -> None:
+        table = TableConfig(
+            name         = "t",
+            columns      = [ColumnConfig(name="id", type="bigint")],
+            indexes      = [make_index()],
+            rls_enabled  = False,
+            rls_policies = [RLSPolicyConfig(roles=["reader"], using_expr="true")],
+        )
+        proj = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="rls_enabled=false"):
+            SemanticValidator.validate(proj)
+
+    def test_rls_force_without_rls_enabled_is_invalid(self) -> None:
+        table = TableConfig(
+            name="t", columns=[ColumnConfig(name="id", type="bigint")],
+            indexes=[make_index()], rls_enabled=False, rls_force=True,
+        )
+        proj = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="rls_force"):
+            SemanticValidator.validate(proj)
+
+    def test_rls_security_barrier_without_rls_enabled_is_invalid(self) -> None:
+        table = TableConfig(
+            name="t", columns=[ColumnConfig(name="id", type="bigint")],
+            indexes=[make_index()], rls_enabled=False, rls_security_barrier=True,
+        )
+        proj = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="rls_security_barrier"):
+            SemanticValidator.validate(proj)
+
+    def test_empty_using_expr_is_invalid(self) -> None:
+        table = _rls_table(policies=[RLSPolicyConfig(roles=["reader"], using_expr="   ")])
+        proj  = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="using_expr cannot be empty"):
+            SemanticValidator.validate(proj)
+
+    def test_empty_roles_is_invalid(self) -> None:
+        table = _rls_table(policies=[RLSPolicyConfig(roles=[], using_expr="true")])
+        proj  = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="roles list cannot be empty"):
+            SemanticValidator.validate(proj)
+
+    def test_undefined_role_is_invalid(self) -> None:
+        table = _rls_table(policies=[RLSPolicyConfig(roles=["ghost_role"], using_expr="true")])
+        proj  = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        with pytest.raises(ValidationError, match="ghost_role"):
+            SemanticValidator.validate(proj)
+
+    def test_public_role_is_valid(self) -> None:
+        proj = _rls_project(table=_rls_table(policies=[RLSPolicyConfig(roles=["PUBLIC"], using_expr="true")]))
+        assert SemanticValidator.validate(proj) is True
+
+    def test_rls_enabled_with_no_policies_passes(self) -> None:
+        table = TableConfig(
+            name="t", columns=[ColumnConfig(name="id", type="bigint")],
+            indexes=[make_index()], rls_enabled=True,
+        )
+        proj  = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert SemanticValidator.validate(proj) is True
+
+    def test_pre_pg15_rls_emits_warning(self) -> None:
+        proj = _rls_project(version="14")
+        with pytest.warns(UserWarning, match="PG15"):
+            SemanticValidator.validate(proj)
+
+    def test_pg15_rls_does_not_warn(self) -> None:
+        proj = _rls_project(version="15")
+        with warnings.catch_warnings(record=False):
+            warnings.simplefilter("error", UserWarning)
+            SemanticValidator.validate(proj)  # must not raise
+
+    def test_pg16_rls_does_not_warn(self) -> None:
+        proj = _rls_project(version="16")
+        with warnings.catch_warnings(record=False):
+            warnings.simplefilter("error", UserWarning)
+            SemanticValidator.validate(proj)
+
+
+class TestGenerateRLS:
+
+    def test_no_rls_tables_returns_comment(self) -> None:
+        table  = TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")], indexes=[make_index()])
+        proj   = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "No row-level security" in _generate_rls(proj)
+
+    def test_enable_rls_on_shadow_table(self) -> None:
+        proj = _rls_project()
+        assert 'ALTER TABLE "tk_public"."patients" ENABLE ROW LEVEL SECURITY' in _generate_rls(proj)
+
+    def test_force_rls_emitted_when_set(self) -> None:
+        proj = _rls_project(table=_rls_table(force=True))
+        assert "FORCE ROW LEVEL SECURITY" in _generate_rls(proj)
+
+    def test_force_rls_not_emitted_when_false(self) -> None:
+        proj = _rls_project(table=_rls_table(force=False))
+        assert "FORCE ROW LEVEL SECURITY" not in _generate_rls(proj)
+
+    def test_policy_named_tarkin_rls_table_index(self) -> None:
+        proj = _rls_project()
+        assert '"tarkin_rls_patients_0"' in _generate_rls(proj)
+
+    def test_using_expr_in_policy(self) -> None:
+        proj = _rls_project()
+        assert "owner_id = current_user_id()" in _generate_rls(proj)
+
+    def test_check_expr_present_when_set(self) -> None:
+        table = _rls_table(policies=[
+            RLSPolicyConfig(roles=["reader"], using_expr="x = 1", check_expr="status != 'locked'")
+        ])
+        sql = _generate_rls(_rls_project(table=table))
+        assert "WITH CHECK" in sql
+        assert "status != 'locked'" in sql
+
+    def test_check_expr_absent_when_not_set(self) -> None:
+        assert "WITH CHECK" not in _generate_rls(_rls_project())
+
+    def test_multiple_policies_sequential_names(self) -> None:
+        table = _rls_table(policies=[
+            RLSPolicyConfig(roles=["reader"], using_expr="a = 1"),
+            RLSPolicyConfig(roles=["writer"], using_expr="b = 2"),
+        ])
+        sql = _generate_rls(_rls_project(table=table))
+        assert '"tarkin_rls_patients_0"' in sql
+        assert '"tarkin_rls_patients_1"' in sql
+
+    def test_public_role_not_quoted(self) -> None:
+        table = _rls_table(policies=[RLSPolicyConfig(roles=["PUBLIC"], using_expr="true")])
+        sql   = _generate_rls(_rls_project(table=table))
+        assert "TO PUBLIC" in sql
+        assert 'TO "PUBLIC"' not in sql
+
+    def test_pre_pg15_emits_warning(self) -> None:
+        proj = _rls_project(version="14")
+        with pytest.warns(UserWarning, match="PG15"):
+            _generate_rls(proj)
+
+    def test_pg15_does_not_warn(self) -> None:
+        proj = _rls_project(version="15")
+        with warnings.catch_warnings(record=False):
+            warnings.simplefilter("error", UserWarning)
+            _generate_rls(proj)
+
+
+class TestRLSViews:
+
+    def test_security_invoker_added_on_pg15(self) -> None:
+        table  = _rls_table()
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_invoker = true" in _generate_views(proj)
+
+    def test_security_invoker_added_on_pg16(self) -> None:
+        table  = _rls_table()
+        proj   = GovernanceProject(database=make_database(version="16"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_invoker = true" in _generate_views(proj)
+
+    def test_security_invoker_not_added_on_pg14(self) -> None:
+        table  = _rls_table()
+        proj   = GovernanceProject(database=make_database(version="14"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_invoker" not in _generate_views(proj)
+
+    def test_security_invoker_not_added_when_rls_disabled(self) -> None:
+        table  = TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")], indexes=[make_index()], rls_enabled=False)
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_invoker" not in _generate_views(proj)
+
+    def test_security_barrier_added_when_set(self) -> None:
+        table  = _rls_table(barrier=True)
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_barrier = true" in _generate_views(proj)
+
+    def test_security_barrier_not_added_when_false(self) -> None:
+        table  = _rls_table(barrier=False)
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        assert "security_barrier" not in _generate_views(proj)
+
+    def test_both_options_combined(self) -> None:
+        table  = _rls_table(barrier=True)
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        sql    = _generate_views(proj)
+        assert "security_invoker = true" in sql
+        assert "security_barrier = true" in sql
+
+    def test_no_rls_no_extra_options(self) -> None:
+        table  = TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")], indexes=[make_index()])
+        proj   = GovernanceProject(database=make_database(version="15"), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        sql    = _generate_views(proj)
+        assert "WITH (" not in sql
+
+
+class TestRLSRoundtrip:
+
+    def test_rls_fields_roundtrip(self) -> None:
+        table = TableConfig(
+            name                 = "t",
+            columns              = [ColumnConfig(name="id", type="bigint")],
+            indexes              = [make_index()],
+            rls_enabled          = True,
+            rls_force            = True,
+            rls_security_barrier = True,
+            rls_policies         = [
+                RLSPolicyConfig(
+                    roles      = ["reader", "PUBLIC"],
+                    using_expr = "tenant_id = current_setting('app.tenant')::bigint",
+                    check_expr = "tenant_id = current_setting('app.tenant')::bigint",
+                )
+            ],
+        )
+        proj     = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        restored = YamlLoader.loads(Serializer.to_yaml_string(proj))
+        assert restored is not None
+        rt = restored.schemas[0].tables[0]
+        assert rt.rls_enabled          is True
+        assert rt.rls_force            is True
+        assert rt.rls_security_barrier is True
+        assert len(rt.rls_policies)    == 1
+        p = rt.rls_policies[0]
+        assert p.roles      == ["reader", "PUBLIC"]
+        assert "tenant_id"  in p.using_expr
+        assert p.check_expr is not None
+
+    def test_no_rls_omitted_from_yaml(self) -> None:
+        table    = TableConfig(name="t", columns=[ColumnConfig(name="id", type="bigint")], indexes=[make_index()])
+        proj     = GovernanceProject(database=make_database(), schemas=[SchemaConfig(name="public", tables=[table])], roles=[make_role()])
+        yaml_str = Serializer.to_yaml_string(proj)
+        assert "rls_enabled"          not in yaml_str
+        assert "rls_force"            not in yaml_str
+        assert "rls_security_barrier" not in yaml_str
+        assert "rls_policies"         not in yaml_str

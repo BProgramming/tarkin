@@ -286,9 +286,9 @@ def _generate_detach_sql(
     7. Moved schema objects are moved back to shadow schemas.
     8. Tarkin-created roles are dropped.
     9. Shadow schemas are renamed back to their original names.
-    10. ``__META__`` is dropped.
+    10. __META__ is dropped.
     11. pgaudit settings are restored to their pre-attach values.
-    12. The ``tarkin.hmac_key`` GUC is reset.
+    12. The tarkin.hmac_key GUC is reset.
     """
     tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]
 
@@ -412,6 +412,32 @@ def _generate_detach_sql(
         lines.append(f'DROP SCHEMA {_q(original_name)} CASCADE;')
         lines.append(f'ALTER SCHEMA {_q(shadow)} RENAME TO {_q(original_name)};')
         lines.append("")
+
+    original_schema_names = [s.name[3:] for s in tk_schemas]
+    schema_array = "ARRAY[" + ", ".join(f"'{n}'" for n in original_schema_names) + "]"
+    lines += [
+        "-- Drop tarkin_rls_* policies and disable RLS on restored tables",
+        "DO $$",
+        "DECLARE",
+        "    r record;",
+        "BEGIN",
+        "    FOR r IN",
+        "        SELECT schemaname, tablename, policyname",
+        "        FROM pg_policies",
+        f"        WHERE policyname LIKE 'tarkin_rls_%'",
+        f"          AND schemaname = ANY({schema_array})",
+        "    LOOP",
+        "        EXECUTE format('DROP POLICY IF EXISTS %I ON %I.%I',",
+        "            r.policyname, r.schemaname, r.tablename);",
+        "        EXECUTE format('ALTER TABLE %I.%I DISABLE ROW LEVEL SECURITY',",
+        "            r.schemaname, r.tablename);",
+        "        EXECUTE format('ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY',",
+        "            r.schemaname, r.tablename);",
+        "    END LOOP;",
+        "END;",
+        "$$ LANGUAGE plpgsql;",
+        "",
+    ]
 
     schema_grants = [(r, s, gt) for (r, s, t, gt) in revoked_grants if t is None]
     table_grants  = [(r, s, t, gt) for (r, s, t, gt) in revoked_grants if t is not None]
