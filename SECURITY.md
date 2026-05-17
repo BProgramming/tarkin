@@ -19,9 +19,21 @@ sha256sum /tmp/tarkin-dist/tarkin-<version>*.whl
 
 Compare against the checksums in the GitHub release notes.
 
+### Audit Trail and Tamper Evidence
+
+When `audit_enabled: true` is configured, Tarkin sets `pgaudit.log = write`, which causes PostgreSQL to log every INSERT, UPDATE, and DELETE against the shadow tables. These log entries are written to the OS-level log infrastructure (syslog, journald, CloudWatch Logs, or equivalent) which is not accessible to database users. A database superuser can modify or delete rows in `__META__`, but cannot retroactively edit what pgaudit has already written to the system log.
+
+This means that while `__META__` itself is not tamper-proof (see Known Limitations), the audit trail of any tampering is, provided the OS log infrastructure is appropriately secured and retained.
+In practice this means:
+- Restrict OS-level access to the PostgreSQL log destination independently of database access
+- Ensure logs are shipped to an external system (e.g. CloudWatch, a SIEM) in near-real-time so that local log deletion does not erase the record
+- The `tarkin_audit` role created by Tarkin is granted object-level SELECT/INSERT/UPDATE/DELETE on audited shadow tables, so pgaudit can attribute log entries correctly
+
+Tarkin does not provide log retention, shipping, or alerting; those are the operator's responsibility. The guarantee Tarkin provides is that the instrumentation is in place.
+
 ## Governance YAML Security Model
 
-Tarkin's governance YAML is a declaration of intent, not a capability boundary. It describes what the database should look like; the actual enforcement happens via PostgreSQL's native permission system (GRANT/REVOKE, column-level privileges, pgaudit).
+Tarkin's governance YAML is a declaration of intent, not a capability boundary: it describes what the database should look like, and the actual enforcement happens via PostgreSQL's native permission system (GRANT/REVOKE, column-level privileges, pgaudit).
 
 The YAML itself should be treated as sensitive configuration. It contains clearance levels, role definitions, masking strategies, and the full schema topology. Do not store it in public repositories or expose it to untrusted parties.
 
@@ -75,6 +87,5 @@ When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgau
 
 ## Known Limitations
 
-- Tarkin does not implement Row-Level Security (RLS). Governance is enforced at the column and table level.
-- Per-table audit exclusion is noted in comments in the generated SQL but is not yet implemented at the pgaudit object-level audit layer.
 - The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.
+

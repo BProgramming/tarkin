@@ -1,10 +1,24 @@
 # Tarkin
 
-**Governance compiler for PostgreSQL.** Tarkin takes a YAML specification of your database's access model: schemas, tables, columns, clearance levels, masking strategies, roles, and audit settings, and compiles it into a live PostgreSQL governance layer.
+Governance compiler for PostgreSQL.
+
+## Why?
+
+Data governance is tough. Regulations aren't made with implementation in mind, and data engineers often aren't the ones making decisions about it.
+
+The result:
+- A lot of ad-hoc work in triggers, functions, and manual grants
+- Constant required fixes
+- Limited documentation (or a ton of work to write it all)
+Or, you take an off-the-shelf solution that's a complete black-box.
+
+But it's rocket-science, just a lot of work. I made this to help. And also so that I don't have to write out column GRANTs ever again.
 
 ## How it works
 
-`tarkin attach` renames your existing schemas to shadow schemas (`tk_<schema>`), creates fresh public-facing schemas with views and INSTEAD OF triggers implementing your governance model, and populates a `__META__` schema with full build metadata. `tarkin detach` reverses all of this, restoring the database to exactly the state it was in before attach.
+By design, Tarkin is an open book: open source, fully accessible code, fully human-readable output. The point of data governance is to keep things secure, so having any aspect of the process live in a black-box is counterintuitive.
+
+Tarkin is run through a Command Line Interface (CLI) tool built in Python with Typer. Some commands generate YAMLs for you to view and modify, or SQL scripts for you to validate, and others apply those scripts once you've decided they're ready. Nothing happens without your direct approval. And don't just take my word for it — check the GitHub repo [https://github.com/BProgramming/tarkin] yourself.
 
 ## Installation
 
@@ -12,7 +26,7 @@
 pip install tarkin
 ```
 
-Requires Python 3.11+ and PostgreSQL 14+.
+Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security (RLS), or PostgreSQL 16+ for MAINTAIN priviledges.
 
 ## Quick start
 
@@ -61,6 +75,23 @@ On `tarkin detach`:
 
 The versioning index (`idx_<table>_current`) is dropped when `--drop-versioning` is used, and retained otherwise.
 
+## Retention columns
+
+When a table has `retention_days` set, Tarkin adds `__expires_at__` and `__erase_on_expiry__` columns to the shadow table to support time-based data expiry. These columns are intentionally **not exposed through the public-facing view** — the view layer presents only the declared columns.
+
+`__expires_at__` is a `timestamptz` column with a default of `now() + interval '<retention_days> days'`, computed at INSERT time. `__erase_on_expiry__` is a `bool` column defaulting to `true`. A partial index on `__expires_at__ WHERE __erase_on_expiry__ = true` is created to keep the scheduled sweep performant.
+
+Setting `__erase_on_expiry__ = false` on any individual row exempts it from scheduled deletion — this is the mechanism for legal holds when a record must be retained beyond its normal expiry.
+
+When `retention_schedule` is configured on the database, Tarkin registers a pg_cron job named `tarkin_retention_<database>` that calls `__META__.tarkin_erase_expired_records()` on the configured cron schedule. That function sweeps all tables registered in `__META__.tarkin_retention`, finds rows where `__expires_at__ <= now() AND __erase_on_expiry__ = true`, and applies the table's `erase_strategy` (`delete`, `nullify`, or `obfuscate`). Each sweep is logged to `__META__.tarkin_erasures` with `was_scheduled = true`.
+
+On `tarkin detach`:
+- The pg_cron job is unscheduled (guarded by a check that pg_cron is installed, since it may have been removed independently)
+- The partial index `idx_<table>_expires_at` is dropped
+- The `__expires_at__` and `__erase_on_expiry__` columns are dropped from the shadow table before the schema rename
+
+Unlike versioning, there is no keep/drop flag — retention columns are always removed on detach. Any records that had not yet expired are restored to the table without expiry metadata, and the operator is responsible for any cleanup.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for:
@@ -72,6 +103,11 @@ See [SECURITY.md](SECURITY.md) for:
 - pgaudit configuration and restoration
 - Known limitations
 
+## Reference
+
+See [REFERENCE.md](REFERENCE.md) for an overview of all available CLI commands.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
+
