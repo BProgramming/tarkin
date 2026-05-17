@@ -146,6 +146,7 @@ class YamlLoader:
             engine        = DatabaseEngine(d.get("engine", "postgres")),
             profile       = d.get("profile"),
             owner         = d.get("owner"),
+            retention_schedule = d.get("retention_schedule"),
         )
 
     @classmethod
@@ -188,6 +189,7 @@ class YamlLoader:
             rls_enabled          = d.get("rls_enabled", False),
             rls_force            = d.get("rls_force", False),
             rls_security_barrier = d.get("rls_security_barrier", False),
+            retention_days       = d.get("retention_days"),
             columns              = [cls._parse_column(c) for c in d.get("columns", [])],
             indexes              = [cls._parse_index(i) for i in d.get("indexes", [])],
             foreign_keys         = [cls._parse_fk(f) for f in d.get("foreign_keys", [])],

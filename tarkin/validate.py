@@ -54,6 +54,7 @@ class SemanticValidator:
             cls._validate_audit_config(project),
             cls._validate_erasure_config(project),
             cls._validate_rls_config(project),
+            cls._validate_retention_config(project),
             cls._validate_schemas(project),
             cls._validate_tables(project),
             cls._validate_columns(project),
@@ -219,6 +220,61 @@ class SemanticValidator:
                             errors.append(
                                 f"{policy_path}: role '{role}' is not defined in the project."
                             )
+
+        return "\n".join(errors) if errors else None
+
+    @classmethod
+    def _validate_retention_config(cls, project: GovernanceProject) -> str | None:
+        """Validate retention configuration is internally consistent."""
+        errors: list[str] = []
+        retained_tables = []
+
+        for schema in project.schemas:
+            for table in schema.tables:
+                if table.retention_days is None:
+                    continue
+
+                retained_tables.append(f"{schema.name}.{table.name}")
+
+                if table.retention_days <= 0:
+                    errors.append(
+                        f"Table '{schema.name}.{table.name}' has retention_days={table.retention_days}. "
+                        f"retention_days must be a positive integer."
+                    )
+
+                if table.erase_strategy is None:
+                    errors.append(
+                        f"Table '{schema.name}.{table.name}' has retention_days set but no erase_strategy. "
+                        f"Tarkin needs to know what to do when records expire. "
+                        f"Specify delete, nullify, or obfuscate."
+                    )
+
+                existing_col_names = {c.name for c in table.columns}
+                for reserved in ("__expires_at__", "__erase_on_expiry__"):
+                    if reserved in existing_col_names:
+                        errors.append(
+                            f"Table '{schema.name}.{table.name}' already has a column '{reserved}'. "
+                            f"Tarkin adds this column for retention management. "
+                            f"Rename or remove the existing column before enabling retention."
+                        )
+
+        if project.database.retention_schedule and not retained_tables:
+            warnings.warn(
+                "database.retention_schedule is set but no tables have retention_days configured. "
+                "The scheduled job will be created but will have nothing to process.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        if retained_tables and not project.database.retention_schedule:
+            warnings.warn(
+                f"Tables have retention_days set ({', '.join(retained_tables)}) but "
+                f"database.retention_schedule is not configured. Records will accumulate "
+                f"past their expiry until a schedule is set and a build is reapplied. "
+                f"Set retention_schedule to a cron expression (e.g. '0 2 * * *').",
+                UserWarning,
+                stacklevel=2,
+            )
 
         return "\n".join(errors) if errors else None
 

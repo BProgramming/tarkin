@@ -75,21 +75,23 @@ class Serializer:
     def _serialize_database(cls, db: DatabaseConfig) -> CommentedMap:
         """Serialize the database configuration block."""
         m = CommentedMap()
-        m["name"]             = db.name
+        m["name"]                   = db.name
         if db.description:
-            m["description"]  = db.description
-        m["engine"]           = db.engine
-        m["host"]             = db.host
-        m["port"]             = db.port
-        m["database"]         = db.database
-        m["version"]          = db.version
-        m["audit_enabled"]    = db.audit_enabled
+            m["description"]        = db.description
+        m["engine"]                 = db.engine
+        m["host"]                   = db.host
+        m["port"]                   = db.port
+        m["database"]               = db.database
+        m["version"]                = db.version
+        m["audit_enabled"]          = db.audit_enabled
         if db.audit_enabled:
-            m["audit_logged"] = db.audit_logged
+            m["audit_logged"]       = db.audit_logged
         if db.profile:
-            m["profile"]      = db.profile
+            m["profile"]            = db.profile
         if db.owner:
-            m["owner"]        = db.owner
+            m["owner"]              = db.owner
+        if db.retention_schedule:
+            m["retention_schedule"] = db.retention_schedule
         return m
 
     @classmethod
@@ -153,6 +155,8 @@ class Serializer:
             m["rls_force"]            = table.rls_force
         if table.rls_security_barrier:
             m["rls_security_barrier"] = table.rls_security_barrier
+        if table.retention_days is not None:
+            m["retention_days"]       = table.retention_days
         m["columns"]                  = CommentedSeq([cls._serialize_column(c) for c in table.columns])
         if table.indexes:
             m["indexes"]              = CommentedSeq([cls._serialize_index(i) for i in table.indexes])

@@ -206,6 +206,8 @@ class DatabaseConfig(TarkinBaseModel):
     profile:  Optional[str]  = None
     owner:    Optional[str]  = None
 
+    retention_schedule: Optional[str] = None  # cron expression, e.g. "0 2 * * *"
+
 
 class ColumnConfig(TarkinBaseModel):
     """Configuration for a single database column."""
@@ -288,6 +290,8 @@ class TableConfig(TarkinBaseModel):
     rls_enabled:          bool = False
     rls_force:            bool = False
     rls_security_barrier: bool = False
+
+    retention_days: Optional[int] = None
 
     columns:      list[ColumnConfig]     = Field(default_factory=list)
     indexes:      list[IndexConfig]      = Field(default_factory=list)

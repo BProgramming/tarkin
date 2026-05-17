@@ -77,6 +77,23 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
     )
 
 
+def check_pgcron_available(profile: ConnectionProfile) -> bool:
+    """Return True if pg_cron is installed and preloaded on the live database."""
+    engine = profile.engine()
+    try:
+        with engine.connect() as conn:
+            result = _scalar(conn, """
+                SELECT COUNT(*) > 0
+                FROM pg_extension e, pg_settings s
+                WHERE e.extname = 'pg_cron'
+                  AND s.name = 'shared_preload_libraries'
+                  AND s.setting LIKE '%pg_cron%'
+            """)
+            return bool(result)
+    finally:
+        engine.dispose()
+
+
 def _get_user_schemas(conn: Connection, include_tk: bool = False) -> list[str]:
     """Get all database schemas."""
     rows = conn.execute(text("""

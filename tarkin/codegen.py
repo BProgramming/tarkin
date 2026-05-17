@@ -72,8 +72,12 @@ def generate_sql(
         _generate_rls(project),
         _section("SUBJECT IDENTIFIER INDEXES"),
         _generate_subject_identifier_indexes(project),
+        _section("RETENTION COLUMNS"),
+        _generate_retention_columns(project, current),
         _section("ERASURE FUNCTIONS"),
         _generate_erase_functions(project),
+        _section("RETENTION"),
+        _generate_retention(project),
         _section("META POPULATION"),
         _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
         _section("TRANSACTION END"),
@@ -275,7 +279,7 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_subject_identifiers (
     erase_strategy   text      NOT NULL    -- 'delete', 'nullify', or 'obfuscate'
 );
 
--- Audit log of erasure operations.  Populated by tarkin_erase_apply().
+-- Audit log of erasure operations.  Populated by tarkin_erase_apply() and tarkin_erase_expired_records().
 CREATE TABLE IF NOT EXISTS __META__.tarkin_erasures (
     erasure_id    bigserial   PRIMARY KEY,
     erased_at     timestamptz NOT NULL DEFAULT now(),
@@ -285,7 +289,19 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_erasures (
     column_names  text[]      NOT NULL,   -- identifier columns matched
     column_values text[]      NOT NULL,   -- values provided by caller
     strategy      text        NOT NULL,
-    rows_affected bigint      NOT NULL
+    rows_affected bigint      NOT NULL,
+    was_scheduled bool        NOT NULL DEFAULT false  -- true when run by the retention cron job
+);
+
+-- Tracks tables enrolled in retention management.
+-- Queried at runtime by tarkin_erase_expired_records().
+CREATE TABLE IF NOT EXISTS __META__.tarkin_retention (
+    retention_id   bigserial   PRIMARY KEY,
+    build_id       bigint      NOT NULL REFERENCES __META__.tarkin_builds(build_id),
+    schema_name    text        NOT NULL,  -- public-facing schema name
+    table_name     text        NOT NULL,  -- public-facing table name
+    erase_strategy text        NOT NULL,  -- strategy to apply on expiry
+    retention_days int         NOT NULL
 );
 """.strip()
 
@@ -1917,6 +1933,20 @@ def _generate_meta_population (
             )
     lines.append("")
 
+    for schema in project.schemas:
+        for table in schema.tables:
+            if table.retention_days is None or table.erase_strategy is None:
+                continue
+            sn = _escape_sql_string(schema.name)
+            tn = _escape_sql_string(table.name)
+            es = _escape_sql_string(str(table.erase_strategy))
+            lines.append(
+                f"    INSERT INTO __META__.tarkin_retention "
+                f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
+                f"VALUES (v_build_id, '{sn}', '{tn}', '{es}', {table.retention_days});"
+            )
+    lines.append("")
+
     lines += ["END;", "$$;"]
     return "\n".join(lines)
 
@@ -2048,3 +2078,203 @@ def project_checksum(project: GovernanceProject) -> str:
 def _object_checksum(obj: dict) -> str:
     """Return a 16-character SHA-256 hex digest for a single governance object dict."""
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _generate_retention_columns(project: GovernanceProject, current: GovernanceProject) -> str:
+    """Add __expires_at__ and __erase_on_expiry__ columns to retained shadow tables."""
+    lines: list[str] = []
+
+    current_col_map = {
+        (s.name, t.name): {c.name for c in t.columns}
+        for s in current.schemas
+        for t in s.tables
+    }
+
+    for schema in project.schemas:
+        shadow = f"tk_{schema.name}"
+        for table in schema.tables:
+            if table.retention_days is None:
+                continue
+
+            existing = current_col_map.get((schema.name, table.name), set())
+            tbl_ref  = f"{_q(shadow)}.{_q(table.name)}"
+            days     = table.retention_days
+
+            if "__expires_at__" not in existing:
+                lines.append(
+                    f"ALTER TABLE {tbl_ref} "
+                    f"ADD COLUMN __expires_at__ timestamptz NOT NULL "
+                    f"DEFAULT (now() + interval '{days} days');"
+                )
+
+            if "__erase_on_expiry__" not in existing:
+                lines.append(
+                    f"ALTER TABLE {tbl_ref} "
+                    f"ADD COLUMN __erase_on_expiry__ bool NOT NULL DEFAULT true;"
+                )
+
+            # Index on __expires_at__ so the sweep function performs well
+            lines.append(
+                f"CREATE INDEX {_q('idx_' + table.name + '_expires_at')} "
+                f"ON {tbl_ref} (__expires_at__) "
+                f"WHERE __erase_on_expiry__ = true;"
+            )
+            lines.append("")
+
+    if not lines:
+        return "-- No tables configured for retention.\n"
+
+    return "\n".join(lines)
+
+
+def _generate_retention(project: GovernanceProject) -> str:
+    """Generate tarkin_erase_expired_records() and the pg_cron job.
+
+    tarkin_erase_expired_records() sweeps all tables registered in
+    tarkin_retention, finds rows where __expires_at__ <= now() AND
+    __erase_on_expiry__ = true, applies the configured strategy, and
+    logs each batch to tarkin_erasures with was_scheduled = true.
+
+    The pg_cron job is created with a stable name (tarkin_retention_<dbname>)
+    so detach can unschedule it by name without needing META.
+    """
+    retained = [
+        (schema, table)
+        for schema in project.schemas
+        for table in schema.tables
+        if table.retention_days is not None and table.erase_strategy is not None
+    ]
+
+    if not retained:
+        return "-- No retention configured.\n"
+
+    db_name  = _escape_sql_string(project.database.name)
+    schedule = project.database.retention_schedule
+
+    sweep_fn = """
+CREATE OR REPLACE FUNCTION __META__.tarkin_erase_expired_records()
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    rec          __META__.tarkin_retention%ROWTYPE;
+    shadow_schema text;
+    shadow_table  text;
+    where_clause  text;
+    set_clause    text;
+    col_name      text;
+    col_type      text;
+    non_id_cols   text[];
+    non_id_types  text[];
+    j             int;
+    row_count     bigint;
+BEGIN
+    FOR rec IN SELECT * FROM __META__.tarkin_retention LOOP
+        shadow_schema := 'tk_' || rec.schema_name;
+        shadow_table  := rec.table_name;
+        where_clause  := '__expires_at__ <= now() AND __erase_on_expiry__ = true';
+
+        IF rec.erase_strategy = 'delete' THEN
+            EXECUTE format(
+                'WITH d AS (DELETE FROM %I.%I WHERE %s RETURNING 1) SELECT count(*) FROM d',
+                shadow_schema, shadow_table, where_clause
+            ) INTO row_count;
+
+        ELSIF rec.erase_strategy IN ('nullify', 'obfuscate') THEN
+            SELECT array_agg(column_name ORDER BY ordinal_position),
+                   array_agg(udt_name    ORDER BY ordinal_position)
+            INTO non_id_cols, non_id_types
+            FROM information_schema.columns
+            WHERE table_schema = shadow_schema
+              AND table_name   = shadow_table
+              AND column_name NOT IN ('__expires_at__', '__erase_on_expiry__');
+
+            set_clause := '';
+            IF non_id_cols IS NOT NULL THEN
+                FOR j IN 1..array_length(non_id_cols, 1) LOOP
+                    col_name := non_id_cols[j];
+                    col_type := non_id_types[j];
+                    IF set_clause <> '' THEN set_clause := set_clause || ', '; END IF;
+
+                    IF rec.erase_strategy = 'nullify' THEN
+                        set_clause := set_clause || format(
+                            $$%I = CASE WHEN (SELECT is_nullable = 'YES' FROM information_schema.columns
+                                WHERE table_schema = %L AND table_name = %L AND column_name = %L)
+                                THEN NULL ELSE '[ERASED]'::%s END$$,
+                            col_name, shadow_schema, shadow_table, col_name, col_type);
+                    ELSE -- obfuscate
+                        set_clause := set_clause || format(
+                            $$%I = (SELECT CASE
+                                WHEN udt_name ILIKE 'text' OR udt_name ILIKE 'varchar' OR udt_name ILIKE 'bpchar'
+                                    THEN encode(digest(%I::text, 'sha256'), 'hex')
+                                WHEN udt_name ILIKE 'uuid'
+                                    THEN (left(encode(digest(%I::text,'sha256'),'hex'),8)||'-'||
+                                          substr(encode(digest(%I::text,'sha256'),'hex'),9,4)||'-'||
+                                          substr(encode(digest(%I::text,'sha256'),'hex'),13,4)||'-'||
+                                          substr(encode(digest(%I::text,'sha256'),'hex'),17,4)||'-'||
+                                          substr(encode(digest(%I::text,'sha256'),'hex'),21,12))
+                                WHEN udt_name ILIKE 'int4' OR udt_name ILIKE 'int8' OR udt_name ILIKE 'int2'
+                                  OR udt_name ILIKE 'numeric' OR udt_name ILIKE 'float4' OR udt_name ILIKE 'float8'
+                                    THEN (('x'||left(encode(digest(%I::text,'sha256'),'hex'),16))::bit(64)::bigint)::text
+                                WHEN udt_name ILIKE 'bool'
+                                    THEN (get_byte(digest(%I::text,'sha256'),0)%%2=0)::text
+                                ELSE '[ERASED]'
+                            END::%s FROM information_schema.columns
+                            WHERE table_schema=%L AND table_name=%L AND column_name=%L)$$,
+                            col_name,
+                            col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name,
+                            col_type, shadow_schema, shadow_table, col_name);
+                    END IF;
+                END LOOP;
+            END IF;
+
+            IF set_clause = '' THEN
+                EXECUTE format(
+                    'WITH d AS (DELETE FROM %I.%I WHERE %s RETURNING 1) SELECT count(*) FROM d',
+                    shadow_schema, shadow_table, where_clause
+                ) INTO row_count;
+            ELSE
+                EXECUTE format(
+                    'WITH u AS (UPDATE %I.%I SET %s WHERE %s RETURNING 1) SELECT count(*) FROM u',
+                    shadow_schema, shadow_table, set_clause, where_clause
+                ) INTO row_count;
+            END IF;
+        END IF;
+
+        row_count := COALESCE(row_count, 0);
+        IF row_count > 0 THEN
+            INSERT INTO __META__.tarkin_erasures
+                (schema_name, table_name, column_names, column_values,
+                 strategy, rows_affected, was_scheduled)
+            VALUES
+                (rec.schema_name, rec.table_name,
+                 ARRAY['__expires_at__'], ARRAY[now()::text],
+                 rec.erase_strategy, row_count, true);
+        END IF;
+    END LOOP;
+END;
+$$;
+""".strip()
+
+    lines = [sweep_fn, ""]
+
+    if schedule:
+        job_name = f"tarkin_retention_{db_name}"
+        lines += [
+            f"-- Register pg_cron job '{job_name}'",
+            f"SELECT cron.unschedule(jobname) FROM cron.job WHERE jobname = '{job_name}';",
+            f"SELECT cron.schedule(",
+            f"    '{job_name}',",
+            f"    '{_escape_sql_string(schedule)}',",
+            f"    'SELECT __META__.tarkin_erase_expired_records()'",
+            f");",
+            "",
+            f"-- Note: __expires_at__ and __erase_on_expiry__ can be set manually.",
+            f"-- Set __erase_on_expiry__ = false on any row to exempt it from scheduled deletion (legal hold).",
+        ]
+    else:
+        lines += [
+            "-- No retention_schedule configured; pg_cron job not created.",
+            "-- Call SELECT __META__.tarkin_erase_expired_records() manually to process expired records.",
+        ]
+
+    return "\n".join(lines) + "\n"

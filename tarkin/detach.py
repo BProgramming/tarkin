@@ -52,6 +52,7 @@ def detach(
             added_generated_cols,
             moved_objects,
             subject_identifier_indexes,
+            retention_tables,
         ) = _read_meta(profile)
     except Exception as exc:
         if not no_restore_grants:
@@ -70,6 +71,7 @@ def detach(
         added_generated_cols        = []
         moved_objects               = []
         subject_identifier_indexes  = []
+        retention_tables            = []
     print("Reading build metadata... Done.")
 
     if not has_versioning:
@@ -101,6 +103,7 @@ def detach(
         added_generated_cols,
         moved_objects,
         subject_identifier_indexes,
+        retention_tables,
     )
     print("Generating rollback SQL... Done.")
 
@@ -146,6 +149,7 @@ def _read_meta(
     list[tuple[str, str, str]],
     list[tuple[str, str, str, str]],
     list[tuple[str, str, list[str]]],
+    list[tuple[str, str]],
 ]:
     """
     Read __META__ tables to retrieve all state needed for a clean detach.
@@ -177,7 +181,7 @@ def _read_meta(
                 "ORDER BY built_at DESC LIMIT 1"
             )).fetchone()
             if not row:
-                return [], [], profile.database, False, {}, [], [], [], []
+                return [], [], profile.database, False, {}, [], [], [], [], []
 
             build_id                    = row[0]
             db_name                     = row[1]
@@ -237,10 +241,18 @@ def _read_meta(
                 (r[0], r[1], list(r[2])) for r in subj_rows
             ]
 
+            # Retention tables (need __expires_at__ and __erase_on_expiry__ dropped)
+            ret_rows = conn.execute(text(
+                "SELECT schema_name, table_name "
+                "FROM __META__.tarkin_retention "
+                "WHERE build_id = :bid"
+            ), {"bid": build_id}).fetchall()
+            retention_tables = [(r[0], r[1]) for r in ret_rows]
+
             return (
                 tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin,
                 pgaudit_snapshot, added_fks, added_generated_cols, moved_objects,
-                subject_identifier_indexes,
+                subject_identifier_indexes, retention_tables,
             )
     finally:
         engine.dispose()
@@ -271,6 +283,7 @@ def _generate_detach_sql(
     added_generated_cols:       list[tuple[str, str, str]],
     moved_objects:              list[tuple[str, str, str, str]],
     subject_identifier_indexes: list[tuple[str, str, list[str]]],
+    retention_tables:           list[tuple[str, str]],
 ) -> str:
     """
     Generate the full rollback SQL for a detach operation.
@@ -371,6 +384,29 @@ def _generate_detach_sql(
             for col_name in col_names:
                 idx_name = _q(f"tarkin_subject_{table_name}_{col_name}")
                 lines.append(f'DROP INDEX IF EXISTS {_q(shadow_schema)}.{idx_name};')
+        lines.append("")
+
+    if retention_tables:
+        lines.append("-- Unschedule pg_cron retention job (if pg_cron is installed)")
+        lines += [
+            "DO $$",
+            "BEGIN",
+            f"    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN",
+            f"        PERFORM cron.unschedule(jobname)",
+            f"        FROM cron.job",
+            f"        WHERE jobname LIKE 'tarkin_retention_%';",
+            "    END IF;",
+            "END;",
+            "$$ LANGUAGE plpgsql;",
+            "",
+        ]
+        lines.append("-- Drop retention columns added by Tarkin")
+        for (schema_name, table_name) in retention_tables:
+            shadow = f"tk_{schema_name}"
+            tbl_ref = f'{_q(shadow)}.{_q(table_name)}'
+            lines.append(f'DROP INDEX IF EXISTS {_q(shadow)}.{_q("idx_" + table_name + "_expires_at")};')
+            lines.append(f'ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS __expires_at__;')
+            lines.append(f'ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS __erase_on_expiry__;')
         lines.append("")
 
     if moved_objects:

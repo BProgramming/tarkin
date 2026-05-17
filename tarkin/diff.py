@@ -137,6 +137,7 @@ def _diff_database(
         "port",
         "database",
         "owner",
+        "retention_schedule",
     ]
     for f in db_fields:
         b_val = getattr(before.database, f)
@@ -242,7 +243,8 @@ def _diff_table(
     path = f"{schema}.{before.name}"
 
     for f in ("clearance", "audit_enabled", "erase_strategy",
-              "rls_enabled", "rls_force", "rls_security_barrier"):
+              "rls_enabled", "rls_force", "rls_security_barrier",
+              "retention_days"):
         b_val = getattr(before, f)
         a_val = getattr(after, f)
         if b_val != a_val:

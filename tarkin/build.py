@@ -7,7 +7,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from .credentials import ConnectionProfile
-from .inspect import inspect_database
+from .inspect import inspect_database, check_pgcron_available
 from .model import GovernanceProject
 from .codegen import generate_sql, project_checksum
 
@@ -34,6 +34,7 @@ def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path 
     print("Checking requirements...", end="\r")
     _check_no_existing_build(current)
     _check_pgaudit_requirements(project, current)
+    _check_pgcron_requirements(project, profile)
     print("Checking requirements... Done.")
 
     print("Generating SQL...", end="\r")
@@ -96,6 +97,26 @@ def _write_artifact(zip_path: Path, sql: str, metadata: dict) -> None:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("tarkin_build.json", json.dumps(metadata, indent=2))
         zf.writestr("tarkin_build.sql",  sql)
+
+
+def _check_pgcron_requirements(project: GovernanceProject, profile: ConnectionProfile) -> None:
+    """Fail if the YAML requires pg_cron but it is not installed on the live database."""
+    needs_cron = project.database.retention_schedule is not None or any(
+        table.retention_days is not None
+        for schema in project.schemas
+        for table in schema.tables
+    )
+    if not needs_cron:
+        return
+
+    if not check_pgcron_available(profile):
+        raise BuildError(
+            "Retention is configured but pg_cron is not installed or not preloaded "
+            "on this database.\n"
+            "Install pg_cron, add 'pg_cron' to shared_preload_libraries in "
+            "postgresql.conf, and restart PostgreSQL before building.\n"
+            "See https://github.com/citusdata/pg_cron for installation instructions."
+        )
 
 
 class BuildError(Exception):
