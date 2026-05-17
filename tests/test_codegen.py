@@ -555,7 +555,8 @@ class TestGenerateTriggers:
 
 class TestGenerateRoles:
 
-    def _make_current(self, role_names: list[str]) -> GovernanceProject:
+    @staticmethod
+    def _make_current(role_names: list[str]) -> GovernanceProject:
         roles = [
             RoleConfig(name=n, can_login=True, on=[SchemaPermissionConfig(name="public")])
             for n in role_names

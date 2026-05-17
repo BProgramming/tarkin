@@ -22,6 +22,7 @@ from .yaml import YamlLoader
 from .validate import SemanticValidator, ValidationError
 from .serialize import Serializer
 from .build import build, BuildError
+from .migrate import migrate, MigrateError
 from .diff import diff_projects, render_diff
 
 app = typer.Typer(no_args_is_help=True, help="Tarkin: governance compiler for PostgreSQL.")
@@ -370,6 +371,55 @@ def diff_yaml(
         print(f"No changes detected. Report written to {output}.")
 
 
+@app.command(name="migrate")
+def migrate_data_model(
+    config:      Path           = typer.Argument(..., help="Path to the target governance YAML."),
+    profile:     Optional[str]  = typer.Option(
+        None, "--profile", "-p",
+        help="Override the credentials profile specified in the YAML.",
+    ),
+    credentials: Optional[Path] = _credentials_option,
+    output:      Optional[Path] = _output_option,
+) -> None:
+    """
+    Generate a migration artifact from the current live build to a new governance YAML.
+
+    Reads the current build's stored YAML from __META__, diffs it against the
+    target YAML, generates the SQL needed to apply the differences, and writes
+    a tarkin_migrate_<timestamp>.zip artifact to 'out/' (or --output).
+    """
+    proj = _load_and_validate(config)
+    if not proj:
+        return
+
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    profile_name = profile or proj.database.profile
+    if not profile_name:
+        _die("No credentials profile specified. Use --profile or set 'profile' in the YAML.")
+        return
+
+    prof = _resolve_profile(creds, profile_name)
+    if not prof:
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
+
+    try:
+        zip_path = migrate(proj, prof, out_dir=output)
+        print(f"Migration artifact: {zip_path}")
+        print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
+    except MigrateError as exc:
+        _die(str(exc))
+
+
 @app.command(name="erase")
 def erase_subject(
     profile:     str            = _profile_option,
@@ -493,11 +543,12 @@ def purge_output(
 
 
 def _find_latest_artifact_path() -> Path | None:
-    """Return the path to the most recently created build artifact, or None."""
+    """Return the path to the most recently created build/migrate artifact, or None."""
     if not OUT_DIR.exists():
         return None
     artifacts: list[Path] = sorted(
-        (p for p in OUT_DIR.glob("tarkin_build_*.zip")),
+        list(OUT_DIR.glob("tarkin_build_*.zip")) +
+        list(OUT_DIR.glob("tarkin_migrate_*.zip")),
         key=lambda p: p.name,
     )
     return artifacts[-1] if artifacts else None

@@ -75,6 +75,7 @@ def _check_pgaudit_requirements(project: GovernanceProject, current: GovernanceP
 def _build_metadata(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> dict:
     """Build a metadata dict for a GovernanceProject."""
     return {
+        "artifact_type":  "build",
         "tarkin_version": pkg_version("tarkin"),
         "built_at":       datetime.now(UTC).isoformat(),
         "profile":        profile.profile,
