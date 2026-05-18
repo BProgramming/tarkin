@@ -1,98 +1,97 @@
 """Generate the code for Tarkin model builds."""
 from __future__ import annotations
-
+import hashlib
 import json
+import warnings
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
-import hashlib
-import warnings
 
 from .credentials import ConnectionProfile
 from .model import (
-    GovernanceProject,
-    TableConfig,
     ColumnConfig,
-    MaskingStrategy,
-    MaskConfig,
+    CreditCardMaskConfig,
+    EmailMaskConfig,
+    ErasureStrategy,
     FullMaskConfig,
-    PartialMaskConfig,
+    GeneratedColumnStorage,
+    GovernanceProject,
     HashAlgorithm,
     HashMaskConfig,
-    EmailMaskConfig,
-    PhoneMaskConfig,
-    CreditCardMaskConfig,
     IpAddressMaskConfig,
+    MaskingStrategy,
+    MaskConfig,
     NameMaskConfig,
+    PartialMaskConfig,
     PartialMaskVisibleSide,
-    GeneratedColumnStorage,
-    ErasureStrategy,
+    PhoneMaskConfig,
+    SchemaConfig,
+    TableConfig,
 )
 from .serialize import Serializer
+from .utils import (
+    project_checksum,
+    sql_comment_block_section,
+    sql_safe_dollar_quote,
+    sql_safe_double_quote,
+    sql_safe_escape_string,
+)
 
 
-def generate_sql(
-    project: GovernanceProject,
-    current: GovernanceProject,
-    profile: ConnectionProfile,
-) -> str:
+def generate_sql(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> str:
     """Generate the full SQL build artifact for a governance project."""
     sections = [
-        _section("TARKIN BUILD", f"Generated at {datetime.now(UTC).isoformat()}"),
-        _section("TRANSACTION START"),
+        sql_comment_block_section("TARKIN BUILD", f"Generated at {datetime.now(UTC).isoformat()}"),
+        sql_comment_block_section("TRANSACTION START"),
         "BEGIN;\n",
-        _section("HMAC KEY"),
+        sql_comment_block_section("HMAC KEY"),
         _generate_hmac_key(project, profile),
-        _section("EXTENSIONS"),
+        sql_comment_block_section("EXTENSIONS"),
         _generate_extensions(project),
-        _section("META SCHEMA"),
+        sql_comment_block_section("META SCHEMA"),
         _generate_meta_schema(),
-        _section("SHADOW SCHEMAS"),
+        sql_comment_block_section("SHADOW SCHEMAS"),
         _generate_shadow_schemas(project),
-        _section("SCHEMA OBJECTS"),
+        sql_comment_block_section("SCHEMA OBJECTS"),
         _generate_schema_objects(project, current),
-        _section("VERSIONING COLUMNS"),
+        sql_comment_block_section("VERSIONING COLUMNS"),
         _generate_versioning_columns(project, current),
-        _section("GENERATED COLUMNS"),
+        sql_comment_block_section("GENERATED COLUMNS"),
         _generate_new_generated_columns(project, current),
-        _section("FOREIGN KEY CONSTRAINTS"),
+        sql_comment_block_section("FOREIGN KEY CONSTRAINTS"),
         _generate_new_foreign_keys(project, current),
-        _section("VIEWS"),
+        sql_comment_block_section("VIEWS"),
         _generate_views(project),
-        _section("TRIGGERS"),
+        sql_comment_block_section("TRIGGERS"),
         _generate_triggers(project),
-        _section("ROLES"),
+        sql_comment_block_section("ROLES"),
         _generate_roles(project, current),
-        _section("GRANTS"),
+        sql_comment_block_section("GRANTS"),
         _generate_grants(project),
-        _section("AUDIT"),
+        sql_comment_block_section("AUDIT"),
         _generate_audit(project),
-        _section("AUDIT GRANTS"),
+        sql_comment_block_section("AUDIT GRANTS"),
         _generate_audit_grants(project),
-        _section("ROW LEVEL SECURITY"),
+        sql_comment_block_section("ROW LEVEL SECURITY"),
         _generate_rls(project),
-        _section("SUBJECT IDENTIFIER INDEXES"),
+        sql_comment_block_section("SUBJECT IDENTIFIER INDEXES"),
         _generate_subject_identifier_indexes(project),
-        _section("RETENTION COLUMNS"),
+        sql_comment_block_section("RETENTION COLUMNS"),
         _generate_retention_columns(project, current),
-        _section("ERASURE FUNCTIONS"),
+        sql_comment_block_section("ERASURE FUNCTIONS"),
         _generate_erase_functions(project),
-        _section("RETENTION"),
+        sql_comment_block_section("RETENTION"),
         _generate_retention(project),
-        _section("META POPULATION"),
+        sql_comment_block_section("META POPULATION"),
         _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
-        _section("TRANSACTION END"),
+        sql_comment_block_section("TRANSACTION END"),
         "COMMIT;\n",
     ]
     return "\n".join(sections)
 
 
-def _tarkin_view_names_for_schema(schema) -> set:
+def _tarkin_view_names_for_schema(schema: SchemaConfig) -> set[str]:
     """Return the set of view names that Tarkin manages for a schema."""
-    return {t.name for t in schema.tables} | {
-        f"{t.name}_current"
-        for t in schema.tables
-        if any(c.versioned for c in t.columns)
-    }
+    return {t.name for t in schema.tables} | {f"{t.name}_current" for t in schema.tables if any(c.versioned for c in t.columns)}
 
 
 def _generate_meta_schema() -> str:
@@ -321,8 +320,8 @@ def _generate_shadow_schemas(project: GovernanceProject) -> str:
     for schema in project.schemas:
         shadow = f"tk_{schema.name}"
         lines.append(f"-- Rename {schema.name} -> {shadow}")
-        lines.append(f"ALTER SCHEMA {_q(schema.name)} RENAME TO {_q(shadow)};")
-        lines.append(f"CREATE SCHEMA {_q(schema.name)};")
+        lines.append(f"ALTER SCHEMA {sql_safe_double_quote(schema.name)} RENAME TO {sql_safe_double_quote(shadow)};")
+        lines.append(f"CREATE SCHEMA {sql_safe_double_quote(schema.name)};")
         lines.append("")
     return "\n".join(lines)
 
@@ -343,42 +342,42 @@ def _generate_schema_objects(project: GovernanceProject, current: GovernanceProj
 
         for seq_entry in current_schema.sequences:
             seq_name = seq_entry.split()[0]
-            lines.append(f"ALTER SEQUENCE {_q(shadow)}.{_q(seq_name)} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER SEQUENCE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(seq_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for fn_sig in current_schema.functions:
-            lines.append(f"ALTER FUNCTION {_q(shadow)}.{fn_sig} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER FUNCTION {sql_safe_double_quote(shadow)}.{fn_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for fn_sig in current_schema.trigger_functions:
-            lines.append(f"ALTER FUNCTION {_q(shadow)}.{fn_sig} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER FUNCTION {sql_safe_double_quote(shadow)}.{fn_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for proc_sig in current_schema.procedures:
-            lines.append(f"ALTER PROCEDURE {_q(shadow)}.{proc_sig} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER PROCEDURE {sql_safe_double_quote(shadow)}.{proc_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for type_entry in current_schema.types:
             parts     = type_entry.split()
             type_name = parts[1] if len(parts) >= 2 else parts[0]
-            lines.append(f"ALTER TYPE {_q(shadow)}.{_q(type_name)} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER TYPE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(type_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for domain_entry in current_schema.domains:
             domain_name = domain_entry.split()[0]
-            lines.append(f"ALTER DOMAIN {_q(shadow)}.{_q(domain_name)} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER DOMAIN {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(domain_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for coll_name in current_schema.collations:
-            lines.append(f"ALTER COLLATION {_q(shadow)}.{_q(coll_name)} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER COLLATION {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(coll_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for view_name in current_schema.views:
             if view_name not in tarkin_view_names:
-                lines.append(f"ALTER VIEW {_q(shadow)}.{_q(view_name)} SET SCHEMA {_q(schema.name)};")
+                lines.append(f"ALTER VIEW {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(view_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for mv_name in current_schema.materialized_views:
             if mv_name not in tarkin_view_names:
-                lines.append(f"ALTER MATERIALIZED VIEW {_q(shadow)}.{_q(mv_name)} SET SCHEMA {_q(schema.name)};")
+                lines.append(f"ALTER MATERIALIZED VIEW {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(mv_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for op_sig in current_schema.operators:
-            lines.append(f"ALTER OPERATOR {_q(shadow)}.{op_sig} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER OPERATOR {sql_safe_double_quote(shadow)}.{op_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         for ft_name in current_schema.foreign_tables:
-            lines.append(f"ALTER FOREIGN TABLE {_q(shadow)}.{_q(ft_name)} SET SCHEMA {_q(schema.name)};")
+            lines.append(f"ALTER FOREIGN TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(ft_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         if lines:
             lines.append("")
@@ -389,11 +388,7 @@ def _generate_schema_objects(project: GovernanceProject, current: GovernanceProj
 def _generate_versioning_columns(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate ALTER TABLE statements to add versioning columns to shadow tables."""
     lines = []
-    current_col_map = {
-        (s.name, t.name): {c.name for c in t.columns}
-        for s in current.schemas
-        for t in s.tables
-    }
+    current_col_map = {(s.name, t.name): {c.name for c in t.columns} for s in current.schemas for t in s.tables}
 
     for schema in project.schemas:
         shadow = f"tk_{schema.name}"
@@ -413,17 +408,17 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
                 )
             if not has_from:
                 lines.append(
-                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
+                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
                     f"ADD COLUMN __valid_from__ timestamptz NOT NULL DEFAULT now();"
                 )
             if not has_to:
                 lines.append(
-                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
+                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
                     f"ADD COLUMN __valid_to__ timestamptz NOT NULL DEFAULT 'infinity'::timestamptz;"
                 )
             lines.append(
-                f"CREATE INDEX {_q('idx_' + table.name + '_current')} "
-                f"ON {_q(shadow)}.{_q(table.name)} (__valid_to__) "
+                f"CREATE INDEX {sql_safe_double_quote('idx_' + table.name + '_current')} "
+                f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} (__valid_to__) "
                 f"WHERE __valid_to__ = 'infinity'::timestamptz;"
             )
             lines.append("")
@@ -471,10 +466,10 @@ def _generate_new_generated_columns(project: GovernanceProject, current: Governa
                     )
                     continue
 
-                expr = _escape_sql_string(col.generated_expression or "")
+                expr = sql_safe_escape_string(col.generated_expression or "")
                 lines.append(
-                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
-                    f"ADD COLUMN {_q(col.name)} {col.type} "
+                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
+                    f"ADD COLUMN {sql_safe_double_quote(col.name)} {col.type} "
                     f"GENERATED ALWAYS AS ({expr}) STORED;"
                 )
 
@@ -502,10 +497,10 @@ def _generate_new_foreign_keys(project: GovernanceProject, current: GovernancePr
                     continue
                 ref_shadow = f"tk_{fk.referenced_schema}"
                 lines.append(
-                    f"ALTER TABLE {_q(shadow)}.{_q(table.name)} "
-                    f"ADD CONSTRAINT {_q(fk.name)} "
-                    f"FOREIGN KEY ({_q(fk.column)}) "
-                    f"REFERENCES {_q(ref_shadow)}.{_q(fk.referenced_table)} ({_q(fk.referenced_column)});"
+                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
+                    f"ADD CONSTRAINT {sql_safe_double_quote(fk.name)} "
+                    f"FOREIGN KEY ({sql_safe_double_quote(fk.column)}) "
+                    f"REFERENCES {sql_safe_double_quote(ref_shadow)}.{sql_safe_double_quote(fk.referenced_table)} ({sql_safe_double_quote(fk.referenced_column)});"
                 )
 
     if lines:
@@ -552,16 +547,16 @@ def _generate_views(project: GovernanceProject) -> str:
             with_clause = f" WITH ({', '.join(with_opts)})" if with_opts else ""
 
             lines.append(
-                f"CREATE VIEW {_q(schema.name)}.{_q(table.name)}{with_clause} AS\n"
+                f"CREATE VIEW {sql_safe_double_quote(schema.name)}.{sql_safe_double_quote(table.name)}{with_clause} AS\n"
                 f"    SELECT\n    {col_list}\n"
-                f"    FROM {_q(shadow)}.{_q(table.name)};"
+                f"    FROM {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)};"
             )
 
             if is_versioned:
                 lines.append(
-                    f"CREATE VIEW {_q(schema.name)}.{_q(table.name + '_current')}{with_clause} AS\n"
+                    f"CREATE VIEW {sql_safe_double_quote(schema.name)}.{sql_safe_double_quote(table.name + '_current')}{with_clause} AS\n"
                     f"    SELECT\n    {col_list}\n"
-                    f"    FROM {_q(shadow)}.{_q(table.name)}\n"
+                    f"    FROM {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}\n"
                     f"    WHERE __valid_to__ = 'infinity'::timestamptz;"
                 )
 
@@ -589,8 +584,8 @@ def _generate_hmac_key(project: GovernanceProject, profile: ConnectionProfile) -
             f"the [{profile.profile}] section of your credentials.toml."
         )
 
-    key     = _escape_sql_string(profile.hmac_key.get_secret_value())
-    db_name = _q(project.database.name)
+    key     = sql_safe_escape_string(profile.hmac_key.get_secret_value())
+    db_name = sql_safe_double_quote(project.database.name)
     return (
         f"-- Set HMAC key for HMAC256 masking.\n"
         f"-- This value is stored as a database-level GUC and is visible to superusers.\n"
@@ -605,202 +600,188 @@ def _mask_expression(col: ColumnConfig, shadow: str, table_name: str) -> str:
     _default_mask_char = "X"
 
     strategy = MaskingStrategy(col.masking_strategy)
-    ref      = f"{_q(shadow)}.{_q(table_name)}.{_q(col.name)}"
+    ref      = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)}.{sql_safe_double_quote(col.name)}"
     cfg      = col.mask_config
+    expr     = None
 
     if strategy == MaskingStrategy.NONE:
-        return _q(col.name)
+        return sql_safe_double_quote(col.name)
 
     def _wrap_null(exp: str, hn: bool) -> str:
         if hn:
-            return f"COALESCE({exp}, {_mask_null_literal(strategy, cfg)}) AS {_q(col.name)}"
-        return f"CASE WHEN {ref} IS NULL THEN NULL ELSE {exp} END AS {_q(col.name)}"
+            return f"COALESCE({exp}, {_mask_null_literal(strategy, cfg)}) AS {sql_safe_double_quote(col.name)}"
+        return f"CASE WHEN {ref} IS NULL THEN NULL ELSE {exp} END AS {sql_safe_double_quote(col.name)}"
 
-    if strategy == MaskingStrategy.FULL:
-        if not isinstance(cfg, FullMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'full' requires FullMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        expr = f"regexp_replace({ref}::text, '.', '{mask_char}', 'g')"
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.PARTIAL:
-        if not isinstance(cfg, PartialMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'partial' requires PartialMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        length    = cfg.visible_length
-        side      = cfg.visible_side
-        if side == PartialMaskVisibleSide.RIGHT:
+    match strategy:
+        case MaskingStrategy.FULL:
+            if not isinstance(cfg, FullMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'full' requires FullMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+            expr      = f"regexp_replace({ref}::text, '.', '{mask_char}', 'g')"
+        case MaskingStrategy.PARTIAL:
+            if not isinstance(cfg, PartialMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'partial' requires PartialMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+            length    = cfg.visible_length
+            side      = cfg.visible_side
+            if side == PartialMaskVisibleSide.RIGHT:
+                expr = (
+                    f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length})) || "
+                    f"right({ref}::text, {length})"
+                )
+            else:
+                expr = (
+                    f"left({ref}::text, {length}) || "
+                    f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length}))"
+                )
+        case MaskingStrategy.HASH:
+            if not isinstance(cfg, HashMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'hash' requires HashMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            algorithm = cfg.algorithm
+            match algorithm:
+                case HashAlgorithm.XXHASH:
+                    warnings.warn(
+                        f"Column '{col.name}': hash algorithm 'xxhash' is non-cryptographic. "
+                        f"Hash values are trivially reversible given knowledge of the source "
+                        f"data distribution. Use sha256, sha512, or hmac256 for sensitive data.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    expr = f"hashtextextended({ref}::text, 0)::text"
+                case HashAlgorithm.SHA256:
+                    warnings.warn(
+                        f"Column '{col.name}': hash algorithm 'sha256' is cryptographic but "
+                        f"may be vulnerable to dictionary attacks on low-entropy data "
+                        f"(e.g. SSNs, postcodes). Consider hmac256 for stronger protection.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    expr = f"encode(digest({ref}::text, 'sha256'), 'hex')"
+                case HashAlgorithm.SHA512:
+                    warnings.warn(
+                        f"Column '{col.name}': hash algorithm 'sha512' is cryptographic but "
+                        f"may be vulnerable to dictionary attacks on low-entropy data "
+                        f"(e.g. SSNs, postcodes). Consider hmac256 for stronger protection.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    expr = f"encode(digest({ref}::text, 'sha512'), 'hex')"
+                case HashAlgorithm.HMAC256:
+                    expr = f"encode(hmac({ref}::text, {_escape_hmac_key()}, 'sha256'), 'hex')"
+                case _:
+                    raise ValueError(
+                        f"Column '{col.name}': unhandled hash algorithm '{algorithm}'. "
+                        f"This is a Tarkin bug. Please file a bug report."
+                    )
+        case MaskingStrategy.EMAIL:
+            if not isinstance(cfg, EmailMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'email' requires EmailMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
             expr = (
-                f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length})) || "
-                f"right({ref}::text, {length})"
+                f"left({ref}::text, 1) || "
+                f"repeat('{mask_char}', greatest(0, position('@' IN {ref}::text) - 2)) || "
+                f"substring({ref}::text FROM position('@' IN {ref}::text))"
             )
-        else:
+        case MaskingStrategy.PHONE:
+            if not isinstance(cfg, PhoneMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'phone' requires PhoneMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            visible   = cfg.visible_digits
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
             expr = (
-                f"left({ref}::text, {length}) || "
-                f"repeat('{mask_char}', greatest(0, length({ref}::text) - {length}))"
+                f"repeat('{mask_char}', greatest(0, length(regexp_replace({ref}::text, "
+                f"'[^0-9]', '', 'g')) - {visible})) || "
+                f"right(regexp_replace({ref}::text, '[^0-9]', '', 'g'), {visible})"
             )
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.HASH:
-        if not isinstance(cfg, HashMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'hash' requires HashMaskConfig, "
-                f"got {type(cfg).__name__}"
+        case MaskingStrategy.CREDIT_CARD:
+            if not isinstance(cfg, CreditCardMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'credit_card' requires CreditCardMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+            expr = (
+                f"repeat('{mask_char}', 4) || '-' || repeat('{mask_char}', 4) || '-' || "
+                f"repeat('{mask_char}', 4) || '-' || "
+                f"right(regexp_replace({ref}::text, '[^0-9]', '', 'g'), 4)"
             )
-        algorithm = cfg.algorithm
-
-        if algorithm == HashAlgorithm.XXHASH:
-            warnings.warn(
-                f"Column '{col.name}': hash algorithm 'xxhash' is non-cryptographic. "
-                f"Hash values are trivially reversible given knowledge of the source "
-                f"data distribution. Use sha256, sha512, or hmac256 for sensitive data.",
-                UserWarning,
-                stacklevel=2,
+        case MaskingStrategy.IP_ADDRESS:
+            if not isinstance(cfg, IpAddressMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'ip_address' requires IpAddressMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            visible   = cfg.visible_octets
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+            match visible:
+                case 1:
+                    expr = (
+                        f"'{mask_char}.' || '{mask_char}.' || '{mask_char}.' || "
+                        f"split_part({ref}::text, '.', 4)"
+                    )
+                case 2:
+                    expr = (
+                        f"'{mask_char}.' || '{mask_char}.' || "
+                        f"split_part({ref}::text, '.', 3) || '.' || "
+                        f"split_part({ref}::text, '.', 4)"
+                    )
+                case 3:
+                    expr = (
+                        f"'{mask_char}.' || "
+                        f"split_part({ref}::text, '.', 2) || '.' || "
+                        f"split_part({ref}::text, '.', 3) || '.' || "
+                        f"split_part({ref}::text, '.', 4)"
+                    )
+                case _:
+                    expr = f"{ref}::text"
+        case MaskingStrategy.NAME:
+            if not isinstance(cfg, NameMaskConfig):
+                raise ValueError(
+                    f"Column '{col.name}': strategy 'name' requires NameMaskConfig, "
+                    f"got {type(cfg).__name__}"
+                )
+            mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
+            expr = (
+                f"array_to_string(ARRAY("
+                f"SELECT left(word, 1) || repeat('{mask_char}', 3) "
+                f"FROM regexp_split_to_table({ref}::text, '\\s+') AS word"
+                f"), ' ')"
             )
-            expr = f"hashtextextended({ref}::text, 0)::text"
 
-        elif algorithm == HashAlgorithm.SHA256:
-            warnings.warn(
-                f"Column '{col.name}': hash algorithm 'sha256' is cryptographic but "
-                f"may be vulnerable to dictionary attacks on low-entropy data "
-                f"(e.g. SSNs, postcodes). Consider hmac256 for stronger protection.",
-                UserWarning,
-                stacklevel=2,
-            )
-            expr = f"encode(digest({ref}::text, 'sha256'), 'hex')"
-
-        elif algorithm == HashAlgorithm.SHA512:
-            warnings.warn(
-                f"Column '{col.name}': hash algorithm 'sha512' is cryptographic but "
-                f"may be vulnerable to dictionary attacks on low-entropy data "
-                f"(e.g. SSNs, postcodes). Consider hmac256 for stronger protection.",
-                UserWarning,
-                stacklevel=2,
-            )
-            expr = f"encode(digest({ref}::text, 'sha512'), 'hex')"
-
-        elif algorithm == HashAlgorithm.HMAC256:
-            expr = f"encode(hmac({ref}::text, {_escape_hmac_key()}, 'sha256'), 'hex')"
-
-        else:
-            raise ValueError(
-                f"Column '{col.name}': unhandled hash algorithm '{algorithm}'. "
-                f"This is a Tarkin bug. Please file a bug report."
-            )
-
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.EMAIL:
-        if not isinstance(cfg, EmailMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'email' requires EmailMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        expr = (
-            f"left({ref}::text, 1) || "
-            f"repeat('{mask_char}', greatest(0, position('@' IN {ref}::text) - 2)) || "
-            f"substring({ref}::text FROM position('@' IN {ref}::text))"
+    if not expr or cfg is None:
+        raise ValueError(
+            f"Column '{col.name}': unhandled masking strategy '{strategy}'. "
+            f"This is a Tarkin bug. Please file a bug report."
         )
-        return _wrap_null(expr, cfg.hide_null)
 
-    elif strategy == MaskingStrategy.PHONE:
-        if not isinstance(cfg, PhoneMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'phone' requires PhoneMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        visible   = cfg.visible_digits
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        expr = (
-            f"repeat('{mask_char}', greatest(0, length(regexp_replace({ref}::text, "
-            f"'[^0-9]', '', 'g')) - {visible})) || "
-            f"right(regexp_replace({ref}::text, '[^0-9]', '', 'g'), {visible})"
-        )
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.CREDIT_CARD:
-        if not isinstance(cfg, CreditCardMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'credit_card' requires CreditCardMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        expr = (
-            f"repeat('{mask_char}', 4) || '-' || repeat('{mask_char}', 4) || '-' || "
-            f"repeat('{mask_char}', 4) || '-' || "
-            f"right(regexp_replace({ref}::text, '[^0-9]', '', 'g'), 4)"
-        )
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.IP_ADDRESS:
-        if not isinstance(cfg, IpAddressMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'ip_address' requires IpAddressMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        visible   = cfg.visible_octets
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        if visible == 1:
-            expr = (
-                f"'{mask_char}.' || '{mask_char}.' || '{mask_char}.' || "
-                f"split_part({ref}::text, '.', 4)"
-            )
-        elif visible == 2:
-            expr = (
-                f"'{mask_char}.' || '{mask_char}.' || "
-                f"split_part({ref}::text, '.', 3) || '.' || "
-                f"split_part({ref}::text, '.', 4)"
-            )
-        elif visible == 3:
-            expr = (
-                f"'{mask_char}.' || "
-                f"split_part({ref}::text, '.', 2) || '.' || "
-                f"split_part({ref}::text, '.', 3) || '.' || "
-                f"split_part({ref}::text, '.', 4)"
-            )
-        else:
-            expr = f"{ref}::text"
-        return _wrap_null(expr, cfg.hide_null)
-
-    elif strategy == MaskingStrategy.NAME:
-        if not isinstance(cfg, NameMaskConfig):
-            raise ValueError(
-                f"Column '{col.name}': strategy 'name' requires NameMaskConfig, "
-                f"got {type(cfg).__name__}"
-            )
-        mask_char = cfg.mask_char if cfg.mask_char else _default_mask_char
-        expr = (
-            f"array_to_string(ARRAY("
-            f"SELECT left(word, 1) || repeat('{mask_char}', 3) "
-            f"FROM regexp_split_to_table({ref}::text, '\\s+') AS word"
-            f"), ' ')"
-        )
-        return _wrap_null(expr, cfg.hide_null)
-
-    raise ValueError(
-        f"Column '{col.name}': unhandled masking strategy '{strategy}'. "
-        f"This is a Tarkin bug. Please file a bug report."
-    )
+    return _wrap_null(expr, cfg.hide_null)
 
 
 def _mask_null_literal(strategy: MaskingStrategy, cfg: MaskConfig | None) -> str:
     """Return a SQL literal to use when hide_null=True and the value is NULL."""
     if strategy == MaskingStrategy.HASH:
         if isinstance(cfg, HashMaskConfig):
-            if cfg.algorithm == HashAlgorithm.XXHASH:
-                return "hashtextextended('', 0)::text"
-            elif cfg.algorithm == HashAlgorithm.HMAC256:
-                return "encode(hmac('', current_setting('tarkin.hmac_key'), 'sha256'), 'hex')"
-            else:
-                algo = cfg.algorithm.value
-                return f"encode(digest('', '{algo}'), 'hex')"
+            match cfg.algorithm:
+                case HashAlgorithm.XXHASH:
+                    return "hashtextextended('', 0)::text"
+                case HashAlgorithm.HMAC256:
+                    return "encode(hmac('', current_setting('tarkin.hmac_key'), 'sha256'), 'hex')"
+                case _:
+                    return f"encode(digest('', '{cfg.algorithm.value}'), 'hex')"
         return "hashtextextended('', 0)::text"
 
     if cfg and hasattr(cfg, "mask_char") and cfg.mask_char:
@@ -826,8 +807,8 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
     """Generate the PL/pgSQL trigger function body for a table."""
     writable_cols = [c.name for c in table.columns if not c.is_generated]
 
-    insert_cols = ", ".join(_q(c) for c in writable_cols)
-    insert_vals = ", ".join(f"NEW.{_q(c)}" for c in writable_cols)
+    insert_cols = ", ".join(sql_safe_double_quote(c) for c in writable_cols)
+    insert_vals = ", ".join(f"NEW.{sql_safe_double_quote(c)}" for c in writable_cols)
 
     immutable_checks = _generate_immutable_checks(table) if any(c.immutable for c in table.columns) else ""
     sensitive_stubs  = _generate_sensitive_stubs(table) if any(
@@ -835,8 +816,8 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
         for c in table.columns
     ) else ""
 
-    fn_name     = _q("tr_" + table.name)
-    tbl_ref     = f"{_q(shadow)}.{_q(table.name)}"
+    fn_name     = sql_safe_double_quote("tr_" + table.name)
+    tbl_ref     = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
     pk_filt     = _pk_filter(table, row="NEW")
     pk_filt_old = _pk_filter(table, row="OLD")
 
@@ -845,7 +826,7 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
         v_insert_vals = insert_vals + ", now(), 'infinity'::timestamptz"
 
         return f"""
-CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
+CREATE OR REPLACE FUNCTION {sql_safe_double_quote(shadow)}.{fn_name}()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -875,10 +856,10 @@ $$;
 """.strip()
 
     else:
-        update_set = ", ".join(f"{_q(c)} = NEW.{_q(c)}" for c in writable_cols)
+        update_set = ", ".join(f"{sql_safe_double_quote(c)} = NEW.{sql_safe_double_quote(c)}" for c in writable_cols)
 
         return f"""
-CREATE OR REPLACE FUNCTION {_q(shadow)}.{fn_name}()
+CREATE OR REPLACE FUNCTION {sql_safe_double_quote(shadow)}.{fn_name}()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
@@ -910,7 +891,7 @@ def _generate_immutable_checks(table: TableConfig) -> str:
     for col in table.columns:
         if col.immutable:
             lines.append(
-                f"        IF OLD.{_q(col.name)} IS DISTINCT FROM NEW.{_q(col.name)} THEN\n"
+                f"        IF OLD.{sql_safe_double_quote(col.name)} IS DISTINCT FROM NEW.{sql_safe_double_quote(col.name)} THEN\n"
                 f"            RAISE EXCEPTION 'Column {col.name} is immutable and cannot be updated.';\n"
                 f"        END IF;"
             )
@@ -938,10 +919,10 @@ def _attach_trigger(schema_name: str, table_name: str) -> str:
     """Generate the CREATE TRIGGER statement attaching a trigger to a view."""
     shadow = f"tk_{schema_name}"
     return (
-        f"CREATE TRIGGER {_q('tr_' + table_name)}\n"
+        f"CREATE TRIGGER {sql_safe_double_quote('tr_' + table_name)}\n"
         f"INSTEAD OF INSERT OR UPDATE OR DELETE\n"
-        f"ON {_q(schema_name)}.{_q(table_name)}\n"
-        f"FOR EACH ROW EXECUTE FUNCTION {_q(shadow)}.{_q('tr_' + table_name)}();"
+        f"ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)}\n"
+        f"FOR EACH ROW EXECUTE FUNCTION {sql_safe_double_quote(shadow)}.{sql_safe_double_quote('tr_' + table_name)}();"
     )
 
 
@@ -954,24 +935,20 @@ def _pk_filter(table: TableConfig, row: str = "NEW") -> str:
             f"Tarkin requires a primary key to generate safe trigger functions. "
             f"This should have been caught by validation. Please file a bug report."
         )
-    return " AND ".join(f"{_q(col)} = {row}.{_q(col)}" for col in pk_cols)
+    return " AND ".join(f"{sql_safe_double_quote(col)} = {row}.{sql_safe_double_quote(col)}" for col in pk_cols)
 
 
 def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate CREATE/ALTER ROLE statements and membership grants."""
     lines = []
+
     existing_role_names = {r.name for r in current.roles}
-    if project.database.audit_enabled and 'tarkin_audit' in existing_role_names:
-        raise ValueError(
-            "Tarkin uses the 'tarkin_audit' role to handle pgaudit operations, but a role with that name already exists. "
-            "Please rename the existing role and try again."
-        )
 
     for role in project.roles:
         if role.name in existing_role_names:
-            parts = [f"ALTER ROLE {_q(role.name)}"]
+            parts = [f"ALTER ROLE {sql_safe_double_quote(role.name)}"]
         else:
-            parts = [f"CREATE ROLE {_q(role.name)}"]
+            parts = [f"CREATE ROLE {sql_safe_double_quote(role.name)}"]
 
         parts.append("LOGIN"     if role.can_login  else "NOLOGIN")
         parts.append("SUPERUSER" if role.can_admin  else "NOSUPERUSER")
@@ -980,12 +957,12 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
         lines.append(" ".join(parts) + ";")
 
         for parent in role.member_of:
-            lines.append(f"GRANT {_q(parent)} TO {_q(role.name)};")
+            lines.append(f"GRANT {sql_safe_double_quote(parent)} TO {sql_safe_double_quote(role.name)};")
 
         lines.append("")
 
     if project.database.audit_enabled:
-        db_name = _q(project.database.name)
+        db_name = sql_safe_double_quote(project.database.name)
         lines.append("CREATE ROLE tarkin_audit NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;")
         lines.append(f"ALTER DATABASE {db_name} SET pgaudit.role = 'tarkin_audit';")
         lines.append("")
@@ -1033,12 +1010,8 @@ def _generate_grants(project: GovernanceProject) -> str:
         if role.name == project.database.owner:
             continue
         for shadow in shadow_schemas:
-            lines.append(
-                f"REVOKE ALL ON SCHEMA {_q(shadow)} FROM {_q(role.name)};"
-            )
-            lines.append(
-                f"REVOKE ALL ON ALL TABLES IN SCHEMA {_q(shadow)} FROM {_q(role.name)};"
-            )
+            lines.append(f"REVOKE ALL ON SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
+            lines.append(f"REVOKE ALL ON ALL TABLES IN SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
 
     if lines:
         lines.append("")
@@ -1053,9 +1026,7 @@ def _generate_grants(project: GovernanceProject) -> str:
             if sp.usage:  schema_privs.append("USAGE")
             if sp.create: schema_privs.append("CREATE")
             if schema_privs:
-                lines.append(
-                    f"GRANT {', '.join(schema_privs)} ON SCHEMA {_q(sp.name)} TO {_q(role.name)};"
-                )
+                lines.append(f"GRANT {', '.join(schema_privs)} ON SCHEMA {sql_safe_double_quote(sp.name)} TO {sql_safe_double_quote(role.name)};")
 
             for tp in sp.tables:
                 table = table_map.get((sp.name, tp.name))
@@ -1063,10 +1034,7 @@ def _generate_grants(project: GovernanceProject) -> str:
                     continue
 
                 if role.clearance < table.clearance:
-                    lines.append(
-                        f"-- SKIPPED: {role.name} clearance {role.clearance} < "
-                        f"table {sp.name}.{tp.name} clearance {table.clearance}"
-                    )
+                    lines.append(f"-- SKIPPED: {role.name} clearance {role.clearance} < table {sp.name}.{tp.name} clearance {table.clearance}")
                     continue
 
                 accessible_cols = [
@@ -1081,10 +1049,7 @@ def _generate_grants(project: GovernanceProject) -> str:
                 restricted = len(restricted_cols) > 0
 
                 if not accessible_cols:
-                    lines.append(
-                        f"-- SKIPPED: {role.name} has no accessible columns on "
-                        f"{sp.name}.{tp.name} (clearance or sensitive restrictions)"
-                    )
+                    lines.append(f"-- SKIPPED: {role.name} has no accessible columns on {sp.name}.{tp.name} (clearance or sensitive restrictions)")
                     lines.append("")
                     continue
 
@@ -1106,10 +1071,7 @@ def _generate_grants(project: GovernanceProject) -> str:
                         warnings.warn("Grant privilege MAINTAIN is only supported on PostgreSQL 16 and above.")
                     else:
                         if role.can_maintain:
-                            maintain_grants.append((
-                                f"{_q(sp.name)}.{_q(tp.name)}",
-                                role.name,
-                            ))
+                            maintain_grants.append((f"{sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)}", role.name))
                         else:
                             warnings.warn(
                                 f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
@@ -1119,13 +1081,10 @@ def _generate_grants(project: GovernanceProject) -> str:
                             )
 
                 if table_privs:
-                    lines.append(
-                        f"GRANT {', '.join(table_privs)} ON "
-                        f"{_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
-                    )
+                    lines.append(f"GRANT {', '.join(table_privs)} ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} TO {sql_safe_double_quote(role.name)};")
 
                 if restricted:
-                    col_list    = ", ".join(_q(c.name) for c in accessible_cols)
+                    col_list    = ", ".join(sql_safe_double_quote(c.name) for c in accessible_cols)
                     is_db_owner = role.name == project.database.owner
 
                     if is_db_owner:
@@ -1138,40 +1097,19 @@ def _generate_grants(project: GovernanceProject) -> str:
                         )
                     else:
                         if tp.select:
-                            lines.append(
-                                f"-- Column-level SELECT restricted by clearance/sensitivity "
-                                f"for {role.name} on {sp.name}.{tp.name}"
-                            )
-                            lines.append(
-                                f"REVOKE SELECT ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
-                            )
-                            lines.append(
-                                f"GRANT SELECT ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
-                            )
+                            lines.append(f"-- Column-level SELECT restricted by clearance/sensitivity for {role.name} on {sp.name}.{tp.name}")
+                            lines.append(f"REVOKE SELECT ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} FROM {sql_safe_double_quote(role.name)};")
+                            lines.append(f"GRANT SELECT ({col_list}) ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} TO {sql_safe_double_quote(role.name)};")
 
                         if tp.update:
-                            lines.append(
-                                f"-- Column-level UPDATE restricted by clearance/sensitivity "
-                                f"for {role.name} on {sp.name}.{tp.name}"
-                            )
-                            lines.append(
-                                f"REVOKE UPDATE ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
-                            )
-                            lines.append(
-                                f"GRANT UPDATE ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
-                            )
+                            lines.append(f"-- Column-level UPDATE restricted by clearance/sensitivity for {role.name} on {sp.name}.{tp.name}")
+                            lines.append(f"REVOKE UPDATE ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} FROM {sql_safe_double_quote(role.name)};")
+                            lines.append(f"GRANT UPDATE ({col_list}) ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} TO {sql_safe_double_quote(role.name)};")
 
                         if tp.references:
-                            lines.append(
-                                f"-- Column-level REFERENCES restricted by clearance/sensitivity "
-                                f"for {role.name} on {sp.name}.{tp.name}"
-                            )
-                            lines.append(
-                                f"REVOKE REFERENCES ON {_q(sp.name)}.{_q(tp.name)} FROM {_q(role.name)};"
-                            )
-                            lines.append(
-                                f"GRANT REFERENCES ({col_list}) ON {_q(sp.name)}.{_q(tp.name)} TO {_q(role.name)};"
-                            )
+                            lines.append(f"-- Column-level REFERENCES restricted by clearance/sensitivity for {role.name} on {sp.name}.{tp.name}")
+                            lines.append(f"REVOKE REFERENCES ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} FROM {sql_safe_double_quote(role.name)};")
+                            lines.append(f"GRANT REFERENCES ({col_list}) ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} TO {sql_safe_double_quote(role.name)};")
 
                         if tp.insert:
                             warnings.warn(
@@ -1189,7 +1127,7 @@ def _generate_grants(project: GovernanceProject) -> str:
     # MAINTAIN is a PG16+ privilege; on earlier versions this block is a no-op.
     if maintain_grants:
         grant_stmts = "\n        ".join(
-            f"EXECUTE 'GRANT MAINTAIN ON {table_ref} TO {_q(role_name)}';"
+            f"EXECUTE 'GRANT MAINTAIN ON {table_ref} TO {sql_safe_double_quote(role_name)}';"
             for table_ref, role_name in maintain_grants
         )
         lines += [
@@ -1216,7 +1154,7 @@ def _generate_audit(project: GovernanceProject) -> str:
         return "-- Audit logging not enabled for this database.\n"
 
     levels  = ", ".join(str(level) for level in project.database.audit_logged)
-    db_name = _q(project.database.name)
+    db_name = sql_safe_double_quote(project.database.name)
 
     lines = [
         f"-- Configure pgaudit for database {project.database.name}",
@@ -1296,10 +1234,7 @@ def _generate_audit_grants(project: GovernanceProject) -> str:
         shadow = f"tk_{schema.name}"
         for table in schema.tables:
             if table.audit_enabled:
-                lines.append(
-                    f"GRANT SELECT, INSERT, UPDATE, DELETE "
-                    f"ON {_q(shadow)}.{_q(table.name)} TO tarkin_audit;"
-                )
+                lines.append(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} TO tarkin_audit;")
 
     if not lines:
         return "-- No tables have audit_enabled=true.\n"
@@ -1317,11 +1252,8 @@ def _generate_subject_identifier_indexes(project: GovernanceProject) -> str:
             if not id_cols:
                 continue
             for col in id_cols:
-                idx_name = _q(f"tarkin_subject_{table.name}_{col.name}")
-                lines.append(
-                    f"CREATE INDEX {idx_name} "
-                    f"ON {_q(shadow)}.{_q(table.name)} ({_q(col.name)});"
-                )
+                idx_name = sql_safe_double_quote(f"tarkin_subject_{table.name}_{col.name}")
+                lines.append(f"CREATE INDEX {idx_name} ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} ({sql_safe_double_quote(col.name)});")
     if not lines:
         return "-- No subject identifier columns defined.\n"
     lines.append("")
@@ -1329,20 +1261,7 @@ def _generate_subject_identifier_indexes(project: GovernanceProject) -> str:
 
 
 def _generate_erase_functions(project: GovernanceProject) -> str:
-    """
-    Generate tarkin_erase_check() and tarkin_erase_apply() in __META__.
-
-    Both functions take:
-        p_columns text[]  -- identifier column names to match on
-        p_values  text[]  -- corresponding values (as text; cast internally)
-
-    tarkin_erase_check returns a result set describing what would be affected.
-    tarkin_erase_apply executes the erasure and logs to tarkin_erasures.
-
-    The functions iterate over tarkin_subject_identifiers at runtime, so they
-    work correctly without being regenerated when the data changes.  Only
-    the index and tarkin_subject_identifiers rows need updating on re-attach.
-    """
+    """Generate tarkin_erase_check() and tarkin_erase_apply() in __META__."""
     subject_tables = [
         (schema, table)
         for schema in project.schemas
@@ -1583,17 +1502,6 @@ $$;
     return check_fn + "\n\n" + apply_fn + "\n"
 
 
-def _safe_dollar_quote(yaml_str: str) -> tuple[str, str]:
-    """Return a dollar-quote tag that does not appear anywhere in yaml_str."""
-    base = "tarkin_yaml"
-    tag  = base
-    n    = 0
-    while f"${tag}$" in yaml_str:
-        n  += 1
-        tag = f"{base}_{n}"
-    return f"${tag}$", f"${tag}$"
-
-
 def _generate_meta_population(
     project:        GovernanceProject,
     current:        GovernanceProject,
@@ -1601,12 +1509,12 @@ def _generate_meta_population(
 ) -> str:
     """Generate the DO block that populates all __META__ tables."""
     tarkin_version = pkg_version("tarkin")
-    yaml_str       = _project_to_yaml_string(project)
-    profile        = _escape_sql_string(project.database.profile or "")
-    database_name  = _escape_sql_string(project.database.name)
+    yaml_str       = Serializer.to_yaml_string(project)
+    profile        = sql_safe_escape_string(project.database.profile or "")
+    database_name  = sql_safe_escape_string(project.database.name)
     checksum       = project_checksum(project)
 
-    dq_open, dq_close = _safe_dollar_quote(yaml_str)
+    dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
 
     existing_role_names = {r.name for r in current.roles}
 
@@ -1621,12 +1529,9 @@ def _generate_meta_population(
                     if sp.create:
                         revoked_grants.append((current_role.name, schema.name, None, "CREATE"))
                     for tp in sp.tables:
-                        for priv in ["select", "insert", "update", "delete",
-                                     "truncate", "references", "trigger", "maintain"]:
+                        for priv in ["select", "insert", "update", "delete", "truncate", "references", "trigger", "maintain"]:
                             if getattr(tp, priv):
-                                revoked_grants.append(
-                                    (current_role.name, schema.name, tp.name, priv.upper())
-                                )
+                                revoked_grants.append((current_role.name, schema.name, tp.name, priv.upper()))
 
     current_fk_map: dict[tuple[str, str], set[str]] = {}
     for s in current.schemas:
@@ -1716,7 +1621,7 @@ def _generate_meta_population(
     ]
 
     for schema in project.schemas:
-        sn = _escape_sql_string(schema.name)
+        sn = sql_safe_escape_string(schema.name)
         lines.append(
             f"    INSERT INTO __META__.tarkin_schemas (build_id, name, shadow_name, clearance, audit_enabled) "
             f"VALUES (v_build_id, '{sn}', 'tk_{sn}', {schema.clearance}, {str(schema.audit_enabled).lower()});"
@@ -1731,8 +1636,8 @@ def _generate_meta_population(
 
     for schema in project.schemas:
         for table in schema.tables:
-            sn = _escape_sql_string(schema.name)
-            tn = _escape_sql_string(table.name)
+            sn = sql_safe_escape_string(schema.name)
+            tn = sql_safe_escape_string(table.name)
             lines.append(
                 f"    INSERT INTO __META__.tarkin_tables (build_id, schema_name, name, clearance, audit_enabled) "
                 f"VALUES (v_build_id, '{sn}', '{tn}', {table.clearance}, {str(table.audit_enabled).lower()});"
@@ -1748,14 +1653,14 @@ def _generate_meta_population(
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
-                sn  = _escape_sql_string(schema.name)
-                tn  = _escape_sql_string(table.name)
-                cn  = _escape_sql_string(col.name)
-                ct  = _escape_sql_string(col.type)
-                dv  = f"'{_escape_sql_string(col.default)}'" if col.default else "NULL"
-                ge  = f"'{_escape_sql_string(col.generated_expression)}'" if col.generated_expression else "NULL"
-                ms  = _escape_sql_string(col.masking_strategy)
-                gs  = _escape_sql_string(col.generated_storage)
+                sn  = sql_safe_escape_string(schema.name)
+                tn  = sql_safe_escape_string(table.name)
+                cn  = sql_safe_escape_string(col.name)
+                ct  = sql_safe_escape_string(col.type)
+                dv  = f"'{sql_safe_escape_string(col.default)}'" if col.default else "NULL"
+                ge  = f"'{sql_safe_escape_string(col.generated_expression)}'" if col.generated_expression else "NULL"
+                ms  = sql_safe_escape_string(col.masking_strategy)
+                gs  = sql_safe_escape_string(col.generated_storage)
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_columns "
                     f"(build_id, schema_name, table_name, name, type, clearance, nullable, \"unique\", "
@@ -1781,11 +1686,11 @@ def _generate_meta_population(
     for schema in project.schemas:
         for table in schema.tables:
             for idx in table.indexes:
-                sn  = _escape_sql_string(schema.name)
-                tn  = _escape_sql_string(table.name)
-                idn = _escape_sql_string(idx.name)
+                sn  = sql_safe_escape_string(schema.name)
+                tn  = sql_safe_escape_string(table.name)
+                idn = sql_safe_escape_string(idx.name)
                 ca  = "ARRAY[" + ", ".join(f"'{c}'" for c in idx.columns) + "]"
-                pf  = f"'{_escape_sql_string(idx.partial_filter)}'" if idx.partial_filter else "NULL"
+                pf  = f"'{sql_safe_escape_string(idx.partial_filter)}'" if idx.partial_filter else "NULL"
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_indexes "
                     f"(build_id, schema_name, table_name, name, columns, index_type, \"unique\", primary_key, partial_filter) "
@@ -1797,25 +1702,25 @@ def _generate_meta_population(
     for schema in project.schemas:
         for table in schema.tables:
             for fk in table.foreign_keys:
-                sn  = _escape_sql_string(schema.name)
-                tn  = _escape_sql_string(table.name)
-                fn_ = _escape_sql_string(fk.name)
+                sn  = sql_safe_escape_string(schema.name)
+                tn  = sql_safe_escape_string(table.name)
+                fn_ = sql_safe_escape_string(fk.name)
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_foreign_keys "
                     f"(build_id, schema_name, table_name, name, column_name, "
                     f"referenced_schema, referenced_table, referenced_column) "
                     f"VALUES (v_build_id, '{sn}', '{tn}', '{fn_}', "
-                    f"'{_escape_sql_string(fk.column)}', "
-                    f"'{_escape_sql_string(fk.referenced_schema)}', "
-                    f"'{_escape_sql_string(fk.referenced_table)}', "
-                    f"'{_escape_sql_string(fk.referenced_column)}');"
+                    f"'{sql_safe_escape_string(fk.column)}', "
+                    f"'{sql_safe_escape_string(fk.referenced_schema)}', "
+                    f"'{sql_safe_escape_string(fk.referenced_table)}', "
+                    f"'{sql_safe_escape_string(fk.referenced_column)}');"
                 )
     lines.append("")
 
     for (shadow, table_name, constraint_name) in added_fks:
-        sh = _escape_sql_string(shadow)
-        tn = _escape_sql_string(table_name)
-        cn = _escape_sql_string(constraint_name)
+        sh = sql_safe_escape_string(shadow)
+        tn = sql_safe_escape_string(table_name)
+        cn = sql_safe_escape_string(constraint_name)
         lines.append(
             f"    INSERT INTO __META__.tarkin_added_fks "
             f"(build_id, shadow_schema, table_name, constraint_name) "
@@ -1825,9 +1730,9 @@ def _generate_meta_population(
         lines.append("")
 
     for (shadow, table_name, col_name) in added_generated_cols:
-        sh = _escape_sql_string(shadow)
-        tn = _escape_sql_string(table_name)
-        cn = _escape_sql_string(col_name)
+        sh = sql_safe_escape_string(shadow)
+        tn = sql_safe_escape_string(table_name)
+        cn = sql_safe_escape_string(col_name)
         lines.append(
             f"    INSERT INTO __META__.tarkin_added_generated_cols "
             f"(build_id, shadow_schema, table_name, column_name) "
@@ -1837,10 +1742,10 @@ def _generate_meta_population(
         lines.append("")
 
     for (schema_name, shadow, kind, obj_name) in moved_objects:
-        sn = _escape_sql_string(schema_name)
-        sh = _escape_sql_string(shadow)
-        kn = _escape_sql_string(kind)
-        on = _escape_sql_string(obj_name)
+        sn = sql_safe_escape_string(schema_name)
+        sh = sql_safe_escape_string(shadow)
+        kn = sql_safe_escape_string(kind)
+        on = sql_safe_escape_string(obj_name)
         lines.append(
             f"    INSERT INTO __META__.tarkin_moved_objects "
             f"(build_id, schema_name, shadow_name, object_kind, object_name) "
@@ -1850,8 +1755,8 @@ def _generate_meta_population(
         lines.append("")
 
     for role in project.roles:
-        rn  = _escape_sql_string(role.name)
-        moa = ("ARRAY[" + ", ".join(f"'{_escape_sql_string(m)}'" for m in role.member_of) + "]"
+        rn  = sql_safe_escape_string(role.name)
+        moa = ("ARRAY[" + ", ".join(f"'{sql_safe_escape_string(m)}'" for m in role.member_of) + "]"
                if role.member_of else "ARRAY[]::text[]")
         added = str(role.name not in existing_role_names).lower()
         lines.append(
@@ -1877,8 +1782,8 @@ def _generate_meta_population(
 
     for role in project.roles:
         for sp in role.on:
-            rn = _escape_sql_string(role.name)
-            sn = _escape_sql_string(sp.name)
+            rn = sql_safe_escape_string(role.name)
+            sn = sql_safe_escape_string(sp.name)
             lines.append(
                 f"    INSERT INTO __META__.tarkin_role_schemas "
                 f"(build_id, role_name, schema_name, \"usage\", \"create\") "
@@ -1890,9 +1795,9 @@ def _generate_meta_population(
     for role in project.roles:
         for sp in role.on:
             for tp in sp.tables:
-                rn = _escape_sql_string(role.name)
-                sn = _escape_sql_string(sp.name)
-                tn = _escape_sql_string(tp.name)
+                rn = sql_safe_escape_string(role.name)
+                sn = sql_safe_escape_string(sp.name)
+                tn = sql_safe_escape_string(tp.name)
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_role_tables "
                     f"(build_id, role_name, schema_name, table_name, \"select\", "
@@ -1914,10 +1819,10 @@ def _generate_meta_population(
         )
 
     for (role_name, schema_name, table_name, grant_type) in revoked_grants:
-        rn = _escape_sql_string(role_name)
-        sn = _escape_sql_string(schema_name)
-        tn = f"'{_escape_sql_string(table_name)}'" if table_name else "NULL"
-        gt = _escape_sql_string(grant_type)
+        rn = sql_safe_escape_string(role_name)
+        sn = sql_safe_escape_string(schema_name)
+        tn = f"'{sql_safe_escape_string(table_name)}'" if table_name else "NULL"
+        gt = sql_safe_escape_string(grant_type)
         lines.append(
             f"    INSERT INTO __META__.tarkin_revoked_grants "
             f"(build_id, role_name, schema_name, table_name, grant_type) "
@@ -1932,12 +1837,12 @@ def _generate_meta_population(
             id_cols = [c for c in table.columns if c.is_subject_identifier]
             if not id_cols or table.erase_strategy is None:
                 continue
-            sn        = _escape_sql_string(schema.name)
-            tn        = _escape_sql_string(table.name)
-            sh        = _escape_sql_string(shadow)
-            es        = _escape_sql_string(str(table.erase_strategy))
-            col_names = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.name)}'" for c in id_cols) + "]"
-            col_types = "ARRAY[" + ", ".join(f"'{_escape_sql_string(c.type)}'" for c in id_cols) + "]"
+            sn        = sql_safe_escape_string(schema.name)
+            tn        = sql_safe_escape_string(table.name)
+            sh        = sql_safe_escape_string(shadow)
+            es        = sql_safe_escape_string(str(table.erase_strategy))
+            col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.name)}'" for c in id_cols) + "]"
+            col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.type)}'" for c in id_cols) + "]"
             lines.append(
                 f"    INSERT INTO __META__.tarkin_subject_identifiers "
                 f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
@@ -1951,9 +1856,9 @@ def _generate_meta_population(
         for table in schema.tables:
             if table.retention_days is None or table.erase_strategy is None:
                 continue
-            sn = _escape_sql_string(schema.name)
-            tn = _escape_sql_string(table.name)
-            es = _escape_sql_string(str(table.erase_strategy))
+            sn = sql_safe_escape_string(schema.name)
+            tn = sql_safe_escape_string(table.name)
+            es = sql_safe_escape_string(str(table.erase_strategy))
             lines.append(
                 f"    INSERT INTO __META__.tarkin_retention "
                 f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
@@ -2001,15 +1906,15 @@ def _generate_rls(project: GovernanceProject) -> str:
             if not table.rls_enabled:
                 continue
 
-            tbl_ref = f"{_q(shadow)}.{_q(table.name)}"
+            tbl_ref = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
             lines.append(f"ALTER TABLE {tbl_ref} ENABLE ROW LEVEL SECURITY;")
             if table.rls_force:
                 lines.append(f"ALTER TABLE {tbl_ref} FORCE ROW LEVEL SECURITY;")
 
             for i, policy in enumerate(table.rls_policies):
-                policy_name  = _q(f"tarkin_rls_{table.name}_{i}")
+                policy_name  = sql_safe_double_quote(f"tarkin_rls_{table.name}_{i}")
                 roles_clause = ", ".join(
-                    r if r == "PUBLIC" else _q(r)
+                    r if r == "PUBLIC" else sql_safe_double_quote(r)
                     for r in policy.roles
                 )
                 check_clause = (
@@ -2032,7 +1937,6 @@ def _generate_rls(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-
 def _needs_pgcrypto(project: GovernanceProject) -> bool:
     """Return True if any column requires pgcrypto for hashing or erasure obfuscation."""
     has_hash = any(
@@ -2052,48 +1956,6 @@ def _needs_pgcrypto(project: GovernanceProject) -> bool:
     return has_hash or has_obfuscate
 
 
-def _escape_hmac_key() -> str:
-    """Return the SQL expression for the HMAC key GUC."""
-    return "current_setting('tarkin.hmac_key')"
-
-
-def _q(name: str) -> str:
-    """Double-quote a PostgreSQL identifier."""
-    return f'"{name}"'
-
-
-def _section(title: str, subtitle: str = "") -> str:
-    """Return a SQL comment block marking a named section."""
-    line  = "-" * 60
-    parts = [f"-- {line}", f"-- {title}"]
-    if subtitle:
-        parts.append(f"-- {subtitle}")
-    parts.append(f"-- {line}")
-    return "\n".join(parts)
-
-
-def _escape_sql_string(s: str) -> str:
-    """Escape a string value for safe inclusion in a SQL single-quoted literal."""
-    if not s:
-        return ""
-    return s.replace("\\", "\\\\").replace("'", "''")
-
-
-def _project_to_yaml_string(project: GovernanceProject) -> str:
-    """Serialize a GovernanceProject to a YAML string."""
-    return Serializer.to_yaml_string(project)
-
-
-def project_checksum(project: GovernanceProject) -> str:
-    """Return a SHA-256 hex digest of the project's serialized YAML."""
-    return hashlib.sha256(_project_to_yaml_string(project).encode()).hexdigest()
-
-
-def _object_checksum(obj: dict) -> str:
-    """Return a 16-character SHA-256 hex digest for a single governance object dict."""
-    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
-
-
 def _generate_retention_columns(project: GovernanceProject, current: GovernanceProject) -> str:
     """Add __expires_at__ and __erase_on_expiry__ columns to retained shadow tables."""
     lines: list[str] = []
@@ -2111,7 +1973,7 @@ def _generate_retention_columns(project: GovernanceProject, current: GovernanceP
                 continue
 
             existing = current_col_map.get((schema.name, table.name), set())
-            tbl_ref  = f"{_q(shadow)}.{_q(table.name)}"
+            tbl_ref  = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
             days     = table.retention_days
 
             if "__expires_at__" not in existing:
@@ -2128,7 +1990,7 @@ def _generate_retention_columns(project: GovernanceProject, current: GovernanceP
                 )
 
             lines.append(
-                f"CREATE INDEX {_q('idx_' + table.name + '_expires_at')} "
+                f"CREATE INDEX {sql_safe_double_quote('idx_' + table.name + '_expires_at')} "
                 f"ON {tbl_ref} (__expires_at__) "
                 f"WHERE __erase_on_expiry__ = true;"
             )
@@ -2152,7 +2014,7 @@ def _generate_retention(project: GovernanceProject) -> str:
     if not retained:
         return "-- No retention configured.\n"
 
-    db_name  = _escape_sql_string(project.database.name)
+    db_name  = project.database.name
     schedule = project.database.retention_schedule
 
     sweep_fn = """
@@ -2268,7 +2130,7 @@ $$;
             f"SELECT cron.unschedule(jobname) FROM cron.job WHERE jobname = '{job_name}';",
             f"SELECT cron.schedule(",
             f"    '{job_name}',",
-            f"    '{_escape_sql_string(schedule)}',",
+            f"    '{sql_safe_escape_string(schedule)}',",
             f"    'SELECT __META__.tarkin_erase_expired_records()'",
             f");",
             "",
@@ -2282,3 +2144,13 @@ $$;
         ]
 
     return "\n".join(lines) + "\n"
+
+
+def _escape_hmac_key() -> str:
+    """Return the SQL expression for the HMAC key GUC."""
+    return "current_setting('tarkin.hmac_key')"
+
+
+def _object_checksum(obj: dict) -> str:
+    """Return a 16-character SHA-256 hex digest for a single governance object dict."""
+    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]

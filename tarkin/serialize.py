@@ -1,32 +1,32 @@
 """Serializes a GovernanceProject to YAML."""
 from __future__ import annotations
 from enum import Enum
+from io import StringIO
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from io import StringIO
 
 from .model import (
-    GovernanceProject,
-    DatabaseConfig,
-    SchemaConfig,
-    TableConfig,
     ColumnConfig,
-    IndexConfig,
-    ForeignKeyConfig,
-    TablePermissionConfig,
-    SchemaPermissionConfig,
-    RoleConfig,
-    MaskConfig,
-    FullMaskConfig,
-    PartialMaskConfig,
-    HashMaskConfig,
-    EmailMaskConfig,
-    PhoneMaskConfig,
     CreditCardMaskConfig,
+    DatabaseConfig,
+    EmailMaskConfig,
+    ForeignKeyConfig,
+    FullMaskConfig,
+    GovernanceProject,
+    HashMaskConfig,
+    IndexConfig,
     IpAddressMaskConfig,
-    NameMaskConfig,
+    MaskConfig,
     MaskingStrategy,
+    NameMaskConfig,
+    PartialMaskConfig,
+    PhoneMaskConfig,
     RLSPolicyConfig,
+    RoleConfig,
+    SchemaConfig,
+    SchemaPermissionConfig,
+    TableConfig,
+    TablePermissionConfig,
 )
 
 

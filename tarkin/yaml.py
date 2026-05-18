@@ -4,34 +4,34 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 from .model import (
-    GovernanceProject,
-    DatabaseConfig,
-    SchemaConfig,
-    TableConfig,
-    ColumnConfig,
-    IndexConfig,
-    ForeignKeyConfig,
-    TablePermissionConfig,
-    SchemaPermissionConfig,
-    RoleConfig,
-    DatabaseEngine,
-    MaskingStrategy,
-    GeneratedColumnStorage,
-    IndexType,
-    AuditLogLevel,
-    ErasureStrategy,
-    FullMaskConfig,
-    PartialMaskConfig,
-    HashMaskConfig,
-    EmailMaskConfig,
-    PhoneMaskConfig,
-    CreditCardMaskConfig,
-    IpAddressMaskConfig,
-    NameMaskConfig,
-    PartialMaskVisibleSide,
     AnyMaskConfig,
+    AuditLogLevel,
+    ColumnConfig,
+    CreditCardMaskConfig,
+    DatabaseConfig,
+    DatabaseEngine,
+    EmailMaskConfig,
+    ErasureStrategy,
+    ForeignKeyConfig,
+    FullMaskConfig,
+    GeneratedColumnStorage,
+    GovernanceProject,
     HashAlgorithm,
+    HashMaskConfig,
+    IndexConfig,
+    IndexType,
+    IpAddressMaskConfig,
+    MaskingStrategy,
+    NameMaskConfig,
+    PartialMaskConfig,
+    PartialMaskVisibleSide,
+    PhoneMaskConfig,
     RLSPolicyConfig,
+    RoleConfig,
+    SchemaConfig,
+    SchemaPermissionConfig,
+    TableConfig,
+    TablePermissionConfig,
 )
 
 
@@ -51,52 +51,53 @@ def _parse_mask_config(d: dict) -> AnyMaskConfig | None:
     hide_null = d.get("hide_null", False)
     mask_char = d.get("mask_char", "X")
 
-    if cfg_type == MaskingStrategy.FULL:
-        return FullMaskConfig(
-            hide_null = hide_null,
-            mask_char = mask_char,
-        )
-    elif cfg_type == MaskingStrategy.PARTIAL:
-        return PartialMaskConfig(
-            hide_null      = hide_null,
-            mask_char      = mask_char,
-            visible_length = d.get("visible_length", 4),
-            visible_side   = PartialMaskVisibleSide(d.get("visible_side", "right")),
-        )
-    elif cfg_type == MaskingStrategy.HASH:
-        return HashMaskConfig(
-            hide_null = hide_null,
-            algorithm = HashAlgorithm(d.get("algorithm", "xxhash")),
-        )
-    elif cfg_type == MaskingStrategy.EMAIL:
-        return EmailMaskConfig(
-            hide_null = hide_null,
-            mask_char = mask_char,
-        )
-    elif cfg_type == MaskingStrategy.PHONE:
-        return PhoneMaskConfig(
-            hide_null      = hide_null,
-            mask_char      = mask_char,
-            visible_digits = d.get("visible_digits", 4),
-        )
-    elif cfg_type == MaskingStrategy.CREDIT_CARD:
-        return CreditCardMaskConfig(
-            hide_null = hide_null,
-            mask_char = mask_char,
-        )
-    elif cfg_type == MaskingStrategy.IP_ADDRESS:
-        return IpAddressMaskConfig(
-            hide_null      = hide_null,
-            mask_char      = mask_char,
-            visible_octets = d.get("visible_octets", 2),
-        )
-    elif cfg_type == MaskingStrategy.NAME:
-        return NameMaskConfig(
-            hide_null = hide_null,
-            mask_char = d.get("mask_char", "*"),
-        )
-    else:
-        return None
+    match cfg_type:
+        case MaskingStrategy.FULL:
+            return FullMaskConfig(
+                hide_null = hide_null,
+                mask_char = mask_char,
+            )
+        case MaskingStrategy.PARTIAL:
+            return PartialMaskConfig(
+                hide_null      = hide_null,
+                mask_char      = mask_char,
+                visible_length = d.get("visible_length", 4),
+                visible_side   = PartialMaskVisibleSide(d.get("visible_side", "right")),
+            )
+        case MaskingStrategy.HASH:
+            return HashMaskConfig(
+                hide_null = hide_null,
+                algorithm = HashAlgorithm(d.get("algorithm", "xxhash")),
+            )
+        case MaskingStrategy.EMAIL:
+            return EmailMaskConfig(
+                hide_null = hide_null,
+                mask_char = mask_char,
+            )
+        case MaskingStrategy.PHONE:
+            return PhoneMaskConfig(
+                hide_null      = hide_null,
+                mask_char      = mask_char,
+                visible_digits = d.get("visible_digits", 4),
+            )
+        case MaskingStrategy.CREDIT_CARD:
+            return CreditCardMaskConfig(
+                hide_null = hide_null,
+                mask_char = mask_char,
+            )
+        case MaskingStrategy.IP_ADDRESS:
+            return IpAddressMaskConfig(
+                hide_null      = hide_null,
+                mask_char      = mask_char,
+                visible_octets = d.get("visible_octets", 2),
+            )
+        case MaskingStrategy.NAME:
+            return NameMaskConfig(
+                hide_null = hide_null,
+                mask_char = d.get("mask_char", "*"),
+            )
+        case _:
+            return None
 
 
 class YamlLoader:
@@ -135,17 +136,17 @@ class YamlLoader:
         """Parse the database configuration block."""
         raw_logged = d.get("audit_logged", ["ddl", "write"])
         return DatabaseConfig(
-            name          = d.get("name", "default_database"),
-            description   = d.get("description"),
-            audit_enabled = d.get("audit_enabled", False),
-            audit_logged  = [AuditLogLevel(v) for v in raw_logged],
-            host          = d.get("host", "localhost"),
-            port          = d.get("port", 5432),
-            database      = d.get("database", "postgres"),
-            version       = d.get("version", ""),
-            engine        = DatabaseEngine(d.get("engine", "postgres")),
-            profile       = d.get("profile"),
-            owner         = d.get("owner"),
+            name               = d.get("name", "default_database"),
+            description        = d.get("description"),
+            audit_enabled      = d.get("audit_enabled", False),
+            audit_logged       = [AuditLogLevel(v) for v in raw_logged],
+            host               = d.get("host", "localhost"),
+            port               = d.get("port", 5432),
+            database           = d.get("database", "postgres"),
+            version            = d.get("version", ""),
+            engine             = DatabaseEngine(d.get("engine", "postgres")),
+            profile            = d.get("profile"),
+            owner              = d.get("owner"),
             retention_schedule = d.get("retention_schedule"),
         )
 

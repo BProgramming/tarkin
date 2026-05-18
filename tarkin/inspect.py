@@ -1,49 +1,34 @@
 """Inspects a database to produce a GovernanceProject."""
 from __future__ import annotations
-import re
 from sqlalchemy import inspect as sa_inspect, text, Inspector, Connection
+from sqlalchemy.dialects import postgresql as pg_dialect
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.interfaces import ReflectedColumn
-from sqlalchemy.dialects import postgresql as pg_dialect
 
 from .credentials import ConnectionProfile
 from .model import (
-    GovernanceProject,
-    DatabaseConfig,
-    SchemaConfig,
-    TableConfig,
     ColumnConfig,
-    IndexConfig,
-    ForeignKeyConfig,
-    TablePermissionConfig,
-    SchemaPermissionConfig,
-    RoleConfig,
+    DatabaseConfig,
     DatabaseEngine,
+    ForeignKeyConfig,
+    GovernanceProject,
+    IndexConfig,
     IndexType,
     RLSPolicyConfig,
+    RoleConfig,
+    SchemaConfig,
+    SchemaPermissionConfig,
+    TableConfig,
+    TablePermissionConfig,
+)
+from .utils import (
+    pg_version,
+    sql_select_single_scalar,
 )
 
 
-_SYSTEM_SCHEMAS = {
-    "information_schema",
-    "__META__",
-}
-
 def _is_excluded_schema(name: str) -> bool:
-    return name.startswith("pg_") or name in _SYSTEM_SCHEMAS
-
-
-def _parse_pg_version_number(version_str: str) -> str:
-    """Extract a short numeric version (e.g. "16.2") from PostgreSQL's version() string."""
-    # version() returns e.g. "PostgreSQL 16.2 on x86_64-pc-linux-gnu, ..."
-    m = re.search(r'PostgreSQL\s+(\d+\.\d+)', version_str)
-    if m:
-        return m.group(1)
-    # Fall back to first whitespace-delimited token after "PostgreSQL"
-    parts = version_str.split()
-    if len(parts) >= 2:
-        return parts[1]
-    return version_str
+    return name.startswith("pg_") or name == "__META__"
 
 
 def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
@@ -58,14 +43,14 @@ def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> Go
 def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
     """Build a GovernanceProject from a live PostgreSQL database."""
     with engine.connect() as conn:
-        db_name    = _scalar(conn, "SELECT current_database()")
-        db_version = _scalar(conn, "SELECT version()")
+        db_name    = sql_select_single_scalar(conn, "SELECT current_database()")
+        db_version = sql_select_single_scalar(conn, "SELECT version()")
 
         schema_names = _get_user_schemas(conn, include_tk=include_tk)
         schemas      = [_build_schema(conn, engine, name) for name in schema_names]
         roles        = _build_roles(conn, include_tk=include_tk)
 
-        audit_enabled = _scalar(conn, """
+        audit_enabled = sql_select_single_scalar(conn, """
             SELECT COUNT(*) > 0
             FROM pg_extension e, pg_settings s
             WHERE e.extname = 'pgaudit'
@@ -81,7 +66,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
             host          = profile.host,
             port          = profile.port,
             database      = profile.database,
-            version       = _parse_pg_version_number(db_version),
+            version       = pg_version(db_version),
             audit_enabled = bool(audit_enabled),
             profile       = profile.profile,
             owner         = profile.username,
@@ -89,23 +74,6 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
         schemas  = schemas,
         roles    = roles,
     )
-
-
-def check_pgcron_available(profile: ConnectionProfile) -> bool:
-    """Return True if pg_cron is installed and preloaded on the live database."""
-    engine = profile.engine()
-    try:
-        with engine.connect() as conn:
-            result = _scalar(conn, """
-                SELECT COUNT(*) > 0
-                FROM pg_extension e, pg_settings s
-                WHERE e.extname = 'pg_cron'
-                  AND s.name = 'shared_preload_libraries'
-                  AND s.setting LIKE '%pg_cron%'
-            """)
-            return bool(result)
-    finally:
-        engine.dispose()
 
 
 def _get_user_schemas(conn: Connection, include_tk: bool = False) -> list[str]:
@@ -152,10 +120,6 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
         foreign_tables     = foreign_tables,
     )
 
-
-# =========================================================
-# TABLES
-# =========================================================
 
 def _build_tables(conn: Connection, inspector: Inspector, schema_name: str) -> list[TableConfig]:
     """Build tables from a live PostgreSQL database."""
@@ -741,8 +705,3 @@ def _get_all_table_grants(conn: Connection, include_tk: bool = False) -> dict[st
             "privilege": privilege,
         })
     return result
-
-
-def _scalar(conn: Connection, query: str) -> str:
-    row = conn.execute(text(query)).fetchone()
-    return row[0] if row else ""

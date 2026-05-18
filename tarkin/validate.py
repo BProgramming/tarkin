@@ -3,12 +3,20 @@ from __future__ import annotations
 import warnings
 
 from .model import (
-    GovernanceProject, SchemaConfig, TableConfig, ColumnConfig,
-    MaskingStrategy,
-    FullMaskConfig, PartialMaskConfig, HashMaskConfig,
-    EmailMaskConfig, PhoneMaskConfig, CreditCardMaskConfig,
-    IpAddressMaskConfig, NameMaskConfig,
+    ColumnConfig,
+    CreditCardMaskConfig,
+    EmailMaskConfig,
     ErasureStrategy,
+    FullMaskConfig,
+    HashMaskConfig,
+    GovernanceProject,
+    IpAddressMaskConfig,
+    MaskingStrategy,
+    NameMaskConfig,
+    PartialMaskConfig,
+    PhoneMaskConfig,
+    SchemaConfig,
+    TableConfig,
 )
 
 _STRATEGY_CONFIG_MAP = {
@@ -34,21 +42,7 @@ class SemanticValidator:
 
     @classmethod
     def validate(cls, project: GovernanceProject) -> bool:
-        """
-        Validate a GovernanceProject and raise on any errors.
-
-        All validation rules are checked and errors are collected before
-        raising, so the caller sees the full list of issues at once.
-
-        Args:
-            project: The project to validate.
-
-        Returns:
-            True if validation passes.
-
-        Raises:
-            ValidationError: If any semantic rule is violated.
-        """
+        """Validate a GovernanceProject and raise on any errors. All errors are collected before output."""
         errors = [
             cls._validate_project_structure(project),
             cls._validate_audit_config(project),
@@ -66,10 +60,6 @@ class SemanticValidator:
         if errors:
             raise ValidationError("\n".join(errors))
         return True
-
-    # =====================================================
-    # PROJECT LEVEL
-    # =====================================================
 
     @classmethod
     def _validate_project_structure(cls, project: GovernanceProject) -> str | None:
@@ -128,7 +118,6 @@ class SemanticValidator:
 
                 if has_identifier and has_strategy:
                     identifier_tables.add((schema.name, table.name))
-
                     if table.erase_strategy == ErasureStrategy.OBFUSCATE:
                         for col in table.columns:
                             if col.is_subject_identifier:
@@ -152,8 +141,7 @@ class SemanticValidator:
                             f"Table '{schema.name}.{table.name}' has a foreign key "
                             f"'{fk.name}' referencing '{fk.referenced_schema}.{fk.referenced_table}' "
                             f"which is a subject-identified table with DELETE strategy. "
-                            f"Assign an erase_strategy to '{schema.name}.{table.name}' or ensure "
-                            f"the FK has ON DELETE CASCADE / ON DELETE SET NULL defined."
+                            f"Assign an erase_strategy to '{schema.name}.{table.name}'."
                         )
 
         return "\n".join(errors) if errors else None

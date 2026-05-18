@@ -4,7 +4,12 @@ from sqlalchemy import text
 
 from .credentials import ConnectionProfile
 from .inspect import inspect_database
-from .model import GovernanceProject
+from .model import (
+    GovernanceProject,
+    SchemaConfig,
+    TableConfig,
+)
+from .utils import sql_safe_double_quote
 
 
 def detach(
@@ -258,7 +263,7 @@ def _read_meta(
         engine.dispose()
 
 
-def _confirm_drop_versioning(versioned_tables: list) -> None:  # type: ignore[type-arg]
+def _confirm_drop_versioning(versioned_tables: list[tuple[SchemaConfig, TableConfig]]) -> None:
     """Prompt the user to confirm dropping versioning columns and history."""
     table_list = "\n".join(f"  {s.name}.{t.name}" for s, t in versioned_tables)
     print(
@@ -317,11 +322,11 @@ def _generate_detach_sql(
 
         for table in schema.tables:
             lines.append(
-                f'DROP TRIGGER IF EXISTS {_q("tr_" + table.name)} '
-                f'ON {_q(original_name)}.{_q(table.name)};'
+                f'DROP TRIGGER IF EXISTS {sql_safe_double_quote("tr_" + table.name)} '
+                f'ON {sql_safe_double_quote(original_name)}.{sql_safe_double_quote(table.name)};'
             )
             lines.append(
-                f'DROP FUNCTION IF EXISTS {_q(shadow)}.{_q("tr_" + table.name)}();'
+                f'DROP FUNCTION IF EXISTS {sql_safe_double_quote(shadow)}.{sql_safe_double_quote("tr_" + table.name)}();'
             )
 
         for table in schema.tables:
@@ -329,10 +334,10 @@ def _generate_detach_sql(
                 "__valid_from__" in {c.name for c in table.columns}
                 and "__valid_to__" in {c.name for c in table.columns}
             )
-            lines.append(f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name)} CASCADE;')
+            lines.append(f'DROP VIEW IF EXISTS {sql_safe_double_quote(original_name)}.{sql_safe_double_quote(table.name)} CASCADE;')
             if versioned:
                 lines.append(
-                    f'DROP VIEW IF EXISTS {_q(original_name)}.{_q(table.name + "_current")} CASCADE;'
+                    f'DROP VIEW IF EXISTS {sql_safe_double_quote(original_name)}.{sql_safe_double_quote(table.name + "_current")} CASCADE;'
                 )
 
         if drop_versioning:
@@ -343,18 +348,18 @@ def _generate_detach_sql(
                 )
                 if versioned:
                     lines.append(
-                        f'DELETE FROM {_q(shadow)}.{_q(table.name)} '
+                        f'DELETE FROM {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} '
                         f"WHERE __valid_to__ != 'infinity'::timestamptz;"
                     )
                     lines.append(
-                        f'DROP INDEX IF EXISTS {_q("idx_" + table.name + "_current")};'
+                        f'DROP INDEX IF EXISTS {sql_safe_double_quote("idx_" + table.name + "_current")};'
                     )
                     lines.append(
-                        f'ALTER TABLE {_q(shadow)}.{_q(table.name)} '
+                        f'ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} '
                         f"DROP COLUMN __valid_from__;"
                     )
                     lines.append(
-                        f'ALTER TABLE {_q(shadow)}.{_q(table.name)} '
+                        f'ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} '
                         f"DROP COLUMN __valid_to__;"
                     )
 
@@ -364,8 +369,8 @@ def _generate_detach_sql(
         lines.append("-- Drop FK constraints added by Tarkin")
         for (shadow_schema, table_name, constraint_name) in added_fks:
             lines.append(
-                f'ALTER TABLE {_q(shadow_schema)}.{_q(table_name)} '
-                f'DROP CONSTRAINT IF EXISTS {_q(constraint_name)};'
+                f'ALTER TABLE {sql_safe_double_quote(shadow_schema)}.{sql_safe_double_quote(table_name)} '
+                f'DROP CONSTRAINT IF EXISTS {sql_safe_double_quote(constraint_name)};'
             )
         lines.append("")
 
@@ -373,8 +378,8 @@ def _generate_detach_sql(
         lines.append("-- Drop generated columns added by Tarkin")
         for (shadow_schema, table_name, column_name) in added_generated_cols:
             lines.append(
-                f'ALTER TABLE {_q(shadow_schema)}.{_q(table_name)} '
-                f'DROP COLUMN IF EXISTS {_q(column_name)};'
+                f'ALTER TABLE {sql_safe_double_quote(shadow_schema)}.{sql_safe_double_quote(table_name)} '
+                f'DROP COLUMN IF EXISTS {sql_safe_double_quote(column_name)};'
             )
         lines.append("")
 
@@ -382,8 +387,8 @@ def _generate_detach_sql(
         lines.append("-- Drop subject identifier indexes added by Tarkin")
         for (shadow_schema, table_name, col_names) in subject_identifier_indexes:
             for col_name in col_names:
-                idx_name = _q(f"tarkin_subject_{table_name}_{col_name}")
-                lines.append(f'DROP INDEX IF EXISTS {_q(shadow_schema)}.{idx_name};')
+                idx_name = sql_safe_double_quote(f"tarkin_subject_{table_name}_{col_name}")
+                lines.append(f'DROP INDEX IF EXISTS {sql_safe_double_quote(shadow_schema)}.{idx_name};')
         lines.append("")
 
     if retention_tables:
@@ -403,8 +408,8 @@ def _generate_detach_sql(
         lines.append("-- Drop retention columns added by Tarkin")
         for (schema_name, table_name) in retention_tables:
             shadow = f"tk_{schema_name}"
-            tbl_ref = f'{_q(shadow)}.{_q(table_name)}'
-            lines.append(f'DROP INDEX IF EXISTS {_q(shadow)}.{_q("idx_" + table_name + "_expires_at")};')
+            tbl_ref = f'{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)}'
+            lines.append(f'DROP INDEX IF EXISTS {sql_safe_double_quote(shadow)}.{sql_safe_double_quote("idx_" + table_name + "_expires_at")};')
             lines.append(f'ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS __expires_at__;')
             lines.append(f'ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS __erase_on_expiry__;')
         lines.append("")
@@ -425,10 +430,10 @@ def _generate_detach_sql(
         }
         for (schema_name, shadow_name, object_kind, object_name) in moved_objects:
             if object_kind == "operator":
-                lines.append(f'ALTER OPERATOR {_q(schema_name)}.{object_name} SET SCHEMA {_q(shadow_name)};')
+                lines.append(f'ALTER OPERATOR {sql_safe_double_quote(schema_name)}.{object_name} SET SCHEMA {sql_safe_double_quote(shadow_name)};')
             else:
                 alter_cmd = _alter_map.get(object_kind, "ALTER")
-                lines.append(f'{alter_cmd} {_q(schema_name)}.{_q(object_name)} SET SCHEMA {_q(shadow_name)};')
+                lines.append(f'{alter_cmd} {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(object_name)} SET SCHEMA {sql_safe_double_quote(shadow_name)};')
         lines.append("")
 
     if tarkin_created_roles:
@@ -436,17 +441,17 @@ def _generate_detach_sql(
         for role_name in tarkin_created_roles:
             for schema in tk_schemas:
                 for table in schema.tables:
-                    lines.append(f'REVOKE ALL ON {_q(schema.name)}.{_q(table.name)} FROM {_q(role_name)};')
-            lines.append(f'REASSIGN OWNED BY {_q(role_name)} TO CURRENT_USER;')
-            lines.append(f'DROP OWNED BY {_q(role_name)};')
-            lines.append(f'DROP ROLE IF EXISTS {_q(role_name)};')
+                    lines.append(f'REVOKE ALL ON {sql_safe_double_quote(schema.name)}.{sql_safe_double_quote(table.name)} FROM {sql_safe_double_quote(role_name)};')
+            lines.append(f'REASSIGN OWNED BY {sql_safe_double_quote(role_name)} TO CURRENT_USER;')
+            lines.append(f'DROP OWNED BY {sql_safe_double_quote(role_name)};')
+            lines.append(f'DROP ROLE IF EXISTS {sql_safe_double_quote(role_name)};')
         lines.append("")
 
     for schema in tk_schemas:
         original_name = schema.name[3:]
         shadow        = schema.name
-        lines.append(f'DROP SCHEMA {_q(original_name)} CASCADE;')
-        lines.append(f'ALTER SCHEMA {_q(shadow)} RENAME TO {_q(original_name)};')
+        lines.append(f'DROP SCHEMA {sql_safe_double_quote(original_name)} CASCADE;')
+        lines.append(f'ALTER SCHEMA {sql_safe_double_quote(shadow)} RENAME TO {sql_safe_double_quote(original_name)};')
         lines.append("")
 
     original_schema_names = [s.name[3:] for s in tk_schemas]
@@ -482,10 +487,10 @@ def _generate_detach_sql(
         lines.append("-- Restore grants revoked by Tarkin")
 
         for (role_name, schema_name, grant_type) in schema_grants:
-            lines.append(f'GRANT {grant_type} ON SCHEMA {_q(schema_name)} TO {_q(role_name)};')
+            lines.append(f'GRANT {grant_type} ON SCHEMA {sql_safe_double_quote(schema_name)} TO {sql_safe_double_quote(role_name)};')
 
         for (role_name, schema_name, table_name, grant_type) in table_grants:
-            lines.append(f'GRANT {grant_type} ON {_q(schema_name)}.{_q(table_name)} TO {_q(role_name)};')
+            lines.append(f'GRANT {grant_type} ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)} TO {sql_safe_double_quote(role_name)};')
 
         lines.append("")
 
@@ -502,43 +507,38 @@ def _generate_detach_sql(
     lines.append("-- Restore pgaudit settings to pre-attach values")
     if pgaudit_log is not None:
         lines.append(
-            f'ALTER DATABASE {_q(db_name)} SET pgaudit.log = \'{pgaudit_log}\';'
+            f'ALTER DATABASE {sql_safe_double_quote(db_name)} SET pgaudit.log = \'{pgaudit_log}\';'
             if pgaudit_log
-            else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.log;'
+            else f'ALTER DATABASE {sql_safe_double_quote(db_name)} RESET pgaudit.log;'
         )
     if pgaudit_log_catalog is not None:
         lines.append(
-            f'ALTER DATABASE {_q(db_name)} SET pgaudit.log_catalog = \'{pgaudit_log_catalog}\';'
+            f'ALTER DATABASE {sql_safe_double_quote(db_name)} SET pgaudit.log_catalog = \'{pgaudit_log_catalog}\';'
             if pgaudit_log_catalog
-            else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.log_catalog;'
+            else f'ALTER DATABASE {sql_safe_double_quote(db_name)} RESET pgaudit.log_catalog;'
         )
     if pgaudit_log_relation is not None:
         lines.append(
-            f'ALTER DATABASE {_q(db_name)} SET pgaudit.log_relation = \'{pgaudit_log_relation}\';'
+            f'ALTER DATABASE {sql_safe_double_quote(db_name)} SET pgaudit.log_relation = \'{pgaudit_log_relation}\';'
             if pgaudit_log_relation
-            else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.log_relation;'
+            else f'ALTER DATABASE {sql_safe_double_quote(db_name)} RESET pgaudit.log_relation;'
         )
     if pgaudit_role is not None:
         lines.append(
-            f'ALTER DATABASE {_q(db_name)} SET pgaudit.role = \'{pgaudit_role}\';'
+            f'ALTER DATABASE {sql_safe_double_quote(db_name)} SET pgaudit.role = \'{pgaudit_role}\';'
             if pgaudit_role
-            else f'ALTER DATABASE {_q(db_name)} RESET pgaudit.role;'
+            else f'ALTER DATABASE {sql_safe_double_quote(db_name)} RESET pgaudit.role;'
         )
     lines.append("")
 
     lines += [
         "-- Reset tarkin.hmac_key GUC",
-        f'ALTER DATABASE {_q(db_name)} RESET tarkin.hmac_key;',
+        f'ALTER DATABASE {sql_safe_double_quote(db_name)} RESET tarkin.hmac_key;',
         "",
         "COMMIT;",
     ]
 
     return "\n".join(lines)
-
-
-def _q(name: str) -> str:
-    """Double-quote a PostgreSQL identifier."""
-    return f'"{name}"'
 
 
 class DetachError(Exception):

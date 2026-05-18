@@ -1,14 +1,16 @@
 """Load and validate database credentials."""
 from __future__ import annotations
+import sqlalchemy
 import tomllib
 from pathlib import Path
-from typing import Optional
-import sqlalchemy
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from typing import Optional
 
-
-DEFAULT_CREDENTIALS_PATH = Path.home() / ".tarkin" / "credentials.toml"
+from .utils import (
+    DEFAULT_CREDENTIALS_PATH,
+    pg_version,
+)
 
 
 class ConnectionProfile(BaseModel):
@@ -86,10 +88,7 @@ class CredentialsFile(BaseModel):
     def get(self, profile_name: str) -> ConnectionProfile:
         if profile_name not in self.profiles:
             available = "\n\t".join(repr(k) for k in self.profiles)
-            raise KeyError(
-                f"Profile {profile_name!r} not found in {self.path}.\n"
-                f"Available profiles:{available}"
-            )
+            raise KeyError(f"Profile {profile_name!r} not found in {self.path}.\nAvailable profiles:{available}")
         return self.profiles[profile_name]
 
     def profile_names(self) -> list[str]:
@@ -108,9 +107,7 @@ class ConnectionResult(BaseModel):
 
     def __str__(self) -> str:
         if self.success:
-            return (
-                f"PASS: {self.profile!r} connected to PostgreSQL {self.server_version} instance as {self.db_user!r}."
-            )
+            return f"PASS: {self.profile!r} connected to PostgreSQL {self.server_version} instance as {self.db_user!r}."
         return f"FAIL: {self.profile!r}, {self.error}"
 
 
@@ -124,7 +121,7 @@ def check_connection(profile: ConnectionProfile) -> ConnectionResult:
             )).fetchone()
             if row:
                 db_user        = row[0]
-                server_version = _parse_pg_version(row[1])
+                server_version = pg_version(row[1])
             else:
                 db_user = None
                 server_version = None
@@ -152,15 +149,6 @@ def check_connection(profile: ConnectionProfile) -> ConnectionResult:
 def test_all_connections(creds: CredentialsFile) -> list[ConnectionResult]:
     """Test all connections."""
     return [check_connection(p) for p in creds.profiles.values()]
-
-
-def _parse_pg_version(version_str: str) -> str:
-    """Extract the short version number from PostgreSQL's version() string."""
-    # e.g. "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by gcc ..."
-    parts = version_str.split()
-    if len(parts) >= 2:
-        return parts[1]
-    return version_str
 
 
 def _clean_error(msg: str) -> str:

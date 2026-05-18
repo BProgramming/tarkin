@@ -1,8 +1,8 @@
 """The base logic for GovernanceProjects."""
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, Union
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Optional, Union
 
 
 # =========================================================
@@ -230,7 +230,7 @@ class ColumnConfig(TarkinBaseModel):
     masking_strategy: MaskingStrategy         = MaskingStrategy.NONE
     mask_config:      Optional[AnyMaskConfig] = None
 
-    generated_expression: Optional[str]         = None
+    generated_expression: Optional[str]          = None
     generated_storage:    GeneratedColumnStorage = GeneratedColumnStorage.STORED
 
     @property

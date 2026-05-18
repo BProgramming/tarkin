@@ -30,7 +30,7 @@ from tarkin.migrate import (
 )
 from tarkin.diff import diff_projects, Change, ChangeKind, ObjectType
 from tarkin.build import _build_metadata
-from tarkin.codegen import project_checksum
+from tarkin.utils import project_checksum
 from .fixtures import make_database, make_role
 
 
@@ -414,7 +414,7 @@ class TestGenerateMigrationSql:
         with patch("tarkin.migrate._read_current_build") as mock_read:
             mock_read.return_value = (proj, checksum, "testdb")
             with pytest.raises(MigrateError, match="No differences"):
-                migrate(proj, prof, out_dir=Path("/tmp"))
+                migrate(proj, prof, output=Path("/tmp"))
 
 
 class TestMigrateFunction:
@@ -443,7 +443,7 @@ class TestMigrateFunction:
         with patch("tarkin.migrate._read_current_build") as mock_read:
             mock_read.return_value = (proj, checksum, "testdb")
             with pytest.raises(MigrateError, match="No differences"):
-                migrate(proj, prof, out_dir=tmp_path)
+                migrate(proj, prof, output=tmp_path)
 
     def test_migrate_produces_artifact(self, tmp_path: Path) -> None:
         before   = _simple_project()
@@ -454,7 +454,7 @@ class TestMigrateFunction:
 
         with patch("tarkin.migrate._read_current_build") as mock_read:
             mock_read.return_value = (before, checksum, "testdb")
-            zip_path = migrate(after, prof, out_dir=tmp_path)
+            zip_path = migrate(after, prof, output=tmp_path)
 
         assert zip_path.exists()
         assert zip_path.name.startswith("tarkin_migrate_")
@@ -469,7 +469,7 @@ class TestMigrateFunction:
 
         with patch("tarkin.migrate._read_current_build") as mock_read:
             mock_read.return_value = (before, checksum, "testdb")
-            zip_path = migrate(after, prof, out_dir=tmp_path)
+            zip_path = migrate(after, prof, output=tmp_path)
 
         with zipfile.ZipFile(zip_path) as zf:
             metadata = json.loads(zf.read("tarkin_build.json"))
@@ -488,7 +488,7 @@ class TestMigrateFunction:
 
         with patch("tarkin.migrate._read_current_build") as mock_read:
             mock_read.return_value = (before, checksum, "testdb")
-            zip_path = migrate(after, prof, out_dir=tmp_path)
+            zip_path = migrate(after, prof, output=tmp_path)
 
         with zipfile.ZipFile(zip_path) as zf:
             sql = zf.read("tarkin_build.sql").decode()

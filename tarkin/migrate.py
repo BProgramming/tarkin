@@ -1,46 +1,54 @@
 """Generate a migration artifact from the current build to a new governance YAML."""
 from __future__ import annotations
-import json
-import zipfile
+import copy
+from collections import defaultdict
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from sqlalchemy import text
 from typing import cast
 
-from sqlalchemy import text
-
 from .codegen import (
-    project_checksum,
-    _q,
-    _section,
+    _generate_rls,
     _generate_triggers,
     _generate_views,
-    _safe_dollar_quote,
 )
 from .credentials import ConnectionProfile
-from .diff import diff_projects, Change, ChangeKind, ObjectType
+from .diff import (
+    diff_projects,
+    Change,
+    ChangeKind,
+    ObjectType,
+)
 from .model import (
+    DatabaseConfig,
     GovernanceProject,
     RoleConfig,
+    SchemaConfig,
     SchemaPermissionConfig,
     TableConfig,
-    SchemaConfig,
 )
 from .serialize import Serializer
 from .yaml import YamlLoader
-
-
-OUT_DIR = Path("out")
+from .utils import (
+    OUT_DIR,
+    build_output_directory,
+    project_checksum,
+    sql_comment_block_section,
+    sql_safe_dollar_quote,
+    sql_safe_double_quote,
+    write_artifact,
+)
 
 
 def migrate(
     after:    GovernanceProject,
     profile:  ConnectionProfile,
-    out_dir:  Path | None = None,
+    output: Path | None = None,
 ) -> Path:
     """Generate a migration artifact from the current live build to *after*."""
-    out = (out_dir or OUT_DIR)
-    out.mkdir(parents=True, exist_ok=True)
+    output = (output or OUT_DIR)
+    build_output_directory(output)
 
     print("Reading current build from __META__...", end="\r")
     before, build_checksum, db_name = _read_current_build(profile)
@@ -61,11 +69,9 @@ def migrate(
     print("Generating migration SQL... Done.")
 
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
-    zip_path  = out / f"tarkin_migrate_{timestamp}.zip"
-    metadata  = _migration_metadata(
-        after, profile, build_checksum, db_name, changes
-    )
-    _write_artifact(zip_path, sql, metadata)
+    zip_path  = output / f"tarkin_migrate_{timestamp}.zip"
+    metadata  = _migration_metadata(after, profile, build_checksum, db_name, changes)
+    write_artifact(zip_path, sql, metadata)
     print(f"Migration artifact written to {zip_path}.")
 
     return zip_path
@@ -134,8 +140,8 @@ def _generate_migration_sql(
     the operator to handle them manually.
     """
     sections = [
-        _section("TARKIN MIGRATION", f"Generated at {datetime.now(UTC).isoformat()}"),
-        _section("TRANSACTION START"),
+        sql_comment_block_section("TARKIN MIGRATION", f"Generated at {datetime.now(UTC).isoformat()}"),
+        sql_comment_block_section("TRANSACTION START"),
         "BEGIN;\n",
     ]
 
@@ -161,7 +167,7 @@ def _generate_migration_sql(
     add_triggers = _emit_add_triggers(changes, after)
     add_indexes  = _emit_add_indexes(changes, after_table_map)
     add_fks      = _emit_add_fks(changes, after_table_map)
-    add_rls      = _emit_add_rls(changes, after_table_map)
+    add_rls      = _emit_add_rls(changes, after_table_map, after)
     role_ops     = _emit_role_changes(changes, before, after)
     meta_update  = _emit_meta_update(after)
 
@@ -182,10 +188,10 @@ def _generate_migration_sql(
         ("UPDATE META",               meta_update),
     ]:
         if sql_block.strip():
-            sections.append(_section(title))
+            sections.append(sql_comment_block_section(title))
             sections.append(sql_block)
 
-    sections += [_section("TRANSACTION END"), "COMMIT;\n"]
+    sections += [sql_comment_block_section("TRANSACTION END"), "COMMIT;\n"]
     return "\n".join(sections)
 
 
@@ -198,8 +204,8 @@ def _emit_drop_fks(changes: list[Change]) -> str:
                 schema_name, table_name, fk_name = parts
                 shadow = f"tk_{schema_name}"
                 lines.append(
-                    f"ALTER TABLE {_q(shadow)}.{_q(table_name)} "
-                    f"DROP CONSTRAINT IF EXISTS {_q(fk_name)};"
+                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} "
+                    f"DROP CONSTRAINT IF EXISTS {sql_safe_double_quote(fk_name)};"
                 )
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -226,11 +232,11 @@ def _emit_drop_rls(changes: list[Change]) -> str:
             f"        WHERE schemaname = '{schema_name}' AND tablename = '{table_name}'",
             f"          AND policyname LIKE 'tarkin_rls_%'",
             f"    LOOP",
-            f"        EXECUTE format('DROP POLICY IF EXISTS %I ON {_q(schema_name)}.{_q(table_name)}', r.policyname);",
+            f"        EXECUTE format('DROP POLICY IF EXISTS %I ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)}', r.policyname);",
             f"    END LOOP;",
             f"END; $$ LANGUAGE plpgsql;",
-            f"ALTER TABLE {_q(shadow)}.{_q(table_name)} DISABLE ROW LEVEL SECURITY;",
-            f"ALTER TABLE {_q(shadow)}.{_q(table_name)} NO FORCE ROW LEVEL SECURITY;",
+            f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} DISABLE ROW LEVEL SECURITY;",
+            f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} NO FORCE ROW LEVEL SECURITY;",
         ]
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -254,7 +260,7 @@ def _emit_drop_indexes(changes: list[Change], before_table_map: dict) -> str:
                         )
                         continue
                 shadow = f"tk_{schema_name}"
-                lines.append(f"DROP INDEX IF EXISTS {_q(shadow)}.{_q(idx_name)};")
+                lines.append(f"DROP INDEX IF EXISTS {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(idx_name)};")
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -270,7 +276,6 @@ def _affected_tables_for_changes(changes: list[Change]) -> dict[str, set[str]]:
             schema_name, table_name = parts
             affected.setdefault(schema_name, set()).add(table_name)
         elif c.object_type == ObjectType.SCHEMA and len(parts) == 1:
-            # whole-schema change — we'll handle at schema level
             affected.setdefault(parts[0], set())
     return affected
 
@@ -293,17 +298,17 @@ def _emit_drop_views(changes: list[Change], before_schema_map: dict) -> str:
 
         for table in tables_to_drop:
             lines.append(
-                f"DROP TRIGGER IF EXISTS {_q('tr_' + table.name)} "
-                f"ON {_q(schema_name)}.{_q(table.name)};"
+                f"DROP TRIGGER IF EXISTS {sql_safe_double_quote('tr_' + table.name)} "
+                f"ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table.name)};"
             )
             lines.append(
-                f"DROP FUNCTION IF EXISTS {_q('tk_' + schema_name)}.{_q('tr_' + table.name)}();"
+                f"DROP FUNCTION IF EXISTS {sql_safe_double_quote('tk_' + schema_name)}.{sql_safe_double_quote('tr_' + table.name)}();"
             )
-            lines.append(f"DROP VIEW IF EXISTS {_q(schema_name)}.{_q(table.name)} CASCADE;")
-            versioned = any(col.name in ("__valid_from__", "__valid_to__") for col in table.columns)
+            lines.append(f"DROP VIEW IF EXISTS {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table.name)} CASCADE;")
+            versioned = any(c.versioned for c in table.columns)
             if versioned:
                 lines.append(
-                    f"DROP VIEW IF EXISTS {_q(schema_name)}.{_q(table.name + '_current')} CASCADE;"
+                    f"DROP VIEW IF EXISTS {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table.name + '_current')} CASCADE;"
                 )
 
     return "\n".join(lines) + "\n" if lines else ""
@@ -317,15 +322,15 @@ def _emit_schema_changes(changes: list[Change]) -> str:
         if c.kind == ChangeKind.ADDED:
             shadow = f"tk_{c.path}"
             lines += [
-                f"CREATE SCHEMA {_q(c.path)};",
-                f"CREATE SCHEMA {_q(shadow)};",
+                f"CREATE SCHEMA {sql_safe_double_quote(c.path)};",
+                f"CREATE SCHEMA {sql_safe_double_quote(shadow)};",
             ]
         elif c.kind == ChangeKind.REMOVED:
             lines.append(
                 f"-- WARNING: Schema '{c.path}' removed from YAML. "
                 f"Shadow schema 'tk_{c.path}' and all its data will be lost.\n"
-                f"DROP SCHEMA IF EXISTS {_q('tk_' + c.path)} CASCADE;\n"
-                f"DROP SCHEMA IF EXISTS {_q(c.path)} CASCADE;"
+                f"DROP SCHEMA IF EXISTS {sql_safe_double_quote('tk_' + c.path)} CASCADE;\n"
+                f"DROP SCHEMA IF EXISTS {sql_safe_double_quote(c.path)} CASCADE;"
             )
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -348,23 +353,23 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
                 continue
             shadow = f"tk_{schema_name}"
             col_defs = ", ".join(
-                f"{_q(col.name)} {col.type}"
+                f"{sql_safe_double_quote(col.name)} {col.type}"
                 + (" NOT NULL" if not col.nullable else "")
                 for col in table.columns
                 if not col.is_generated
             )
-            lines.append(f"CREATE TABLE {_q(shadow)}.{_q(table_name)} ({col_defs});")
+            lines.append(f"CREATE TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ({col_defs});")
             for idx in table.indexes:
                 unique = "UNIQUE " if idx.unique else ""
-                cols   = ", ".join(_q(c) for c in idx.columns)
+                cols   = ", ".join(sql_safe_double_quote(c) for c in idx.columns)
                 if idx.primary_key:
                     lines.append(
-                        f"ALTER TABLE {_q(shadow)}.{_q(table_name)} ADD PRIMARY KEY ({cols});"
+                        f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ADD PRIMARY KEY ({cols});"
                     )
                 else:
                     lines.append(
-                        f"CREATE {unique}INDEX {_q(idx.name)} "
-                        f"ON {_q(shadow)}.{_q(table_name)} ({cols});"
+                        f"CREATE {unique}INDEX {sql_safe_double_quote(idx.name)} "
+                        f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ({cols});"
                     )
 
         elif c.kind == ChangeKind.REMOVED:
@@ -375,7 +380,7 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
             shadow = f"tk_{schema_name}"
             lines.append(
                 f"-- WARNING: Table '{c.path}' removed. All data will be lost.\n"
-                f"DROP TABLE IF EXISTS {_q(shadow)}.{_q(table_name)} CASCADE;"
+                f"DROP TABLE IF EXISTS {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} CASCADE;"
             )
 
         elif c.kind == ChangeKind.MODIFIED and c.field in (
@@ -399,7 +404,7 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
             continue
         schema_name, table_name, col_name = parts
         shadow  = f"tk_{schema_name}"
-        tbl_ref = f"{_q(shadow)}.{_q(table_name)}"
+        tbl_ref = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)}"
 
         if c.kind == ChangeKind.ADDED:
             tbl = cast(TableConfig, after_table_map.get((schema_name, table_name)))
@@ -408,13 +413,13 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
                 null_clause = "" if col.nullable else " NOT NULL"
                 default     = f" DEFAULT {col.default}" if col.default else ""
                 lines.append(
-                    f"ALTER TABLE {tbl_ref} ADD COLUMN {_q(col_name)} {col.type}{null_clause}{default};"
+                    f"ALTER TABLE {tbl_ref} ADD COLUMN {sql_safe_double_quote(col_name)} {col.type}{null_clause}{default};"
                 )
 
         elif c.kind == ChangeKind.REMOVED:
             lines.append(
                 f"-- WARNING: Column '{c.path}' removed. Data in this column will be lost.\n"
-                f"ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS {_q(col_name)};"
+                f"ALTER TABLE {tbl_ref} DROP COLUMN IF EXISTS {sql_safe_double_quote(col_name)};"
             )
 
         elif c.kind == ChangeKind.MODIFIED:
@@ -422,28 +427,28 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
                 lines.append(
                     f"-- WARNING: Type change on '{c.path}': {c.before} → {c.after}.\n"
                     f"-- Verify the USING cast is correct before applying.\n"
-                    f"ALTER TABLE {tbl_ref} ALTER COLUMN {_q(col_name)} "
-                    f"TYPE {c.after} USING {_q(col_name)}::{c.after};"
+                    f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} "
+                    f"TYPE {c.after} USING {sql_safe_double_quote(col_name)}::{c.after};"
                 )
             elif c.field == "nullable":
                 if c.after:
                     lines.append(
-                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {_q(col_name)} DROP NOT NULL;"
+                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} DROP NOT NULL;"
                     )
                 else:
                     lines.append(
                         f"-- WARNING: Adding NOT NULL to '{c.path}'. "
                         f"Ensure no NULL values exist before applying.\n"
-                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {_q(col_name)} SET NOT NULL;"
+                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} SET NOT NULL;"
                     )
             elif c.field == "default":
                 if c.after is None:
                     lines.append(
-                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {_q(col_name)} DROP DEFAULT;"
+                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} DROP DEFAULT;"
                     )
                 else:
                     lines.append(
-                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {_q(col_name)} SET DEFAULT {c.after};"
+                        f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} SET DEFAULT {c.after};"
                     )
             elif c.field in ("masking_strategy", "mask_config", "sensitive",
                              "clearance", "is_subject_identifier", "versioned"):
@@ -460,17 +465,14 @@ def _emit_add_views(changes: list[Change], after: GovernanceProject) -> str:
     if not affected:
         return ""
 
-    # Build a filtered project containing only the changed tables per schema
     filtered_schemas = []
     for schema in after.schemas:
         changed_tables = affected.get(schema.name)
         if changed_tables is None:
             continue
         if not changed_tables:
-            # whole-schema change
             filtered_schemas.append(schema)
         else:
-            import copy
             s = copy.copy(schema)
             s = s.model_copy(update={"tables": [t for t in schema.tables if t.name in changed_tables]})
             if s.tables:
@@ -530,11 +532,11 @@ def _emit_add_indexes(changes: list[Change], after_table_map: dict) -> str:
                 continue
             shadow  = f"tk_{schema_name}"
             unique  = "UNIQUE " if idx.unique else ""
-            cols    = ", ".join(_q(col) for col in idx.columns)
+            cols    = ", ".join(sql_safe_double_quote(col) for col in idx.columns)
             partial = f" WHERE {idx.partial_filter}" if idx.partial_filter else ""
             lines.append(
-                f"CREATE {unique}INDEX {_q(idx_name)} "
-                f"ON {_q(shadow)}.{_q(table_name)} ({cols}){partial};"
+                f"CREATE {unique}INDEX {sql_safe_double_quote(idx_name)} "
+                f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ({cols}){partial};"
             )
     return "\n".join(lines) + "\n" if lines else ""
 
@@ -556,16 +558,15 @@ def _emit_add_fks(changes: list[Change], after_table_map: dict) -> str:
             shadow     = f"tk_{schema_name}"
             ref_shadow = f"tk_{fk.referenced_schema}"
             lines.append(
-                f"ALTER TABLE {_q(shadow)}.{_q(table_name)} "
-                f"ADD CONSTRAINT {_q(fk_name)} "
-                f"FOREIGN KEY ({_q(fk.column)}) "
-                f"REFERENCES {_q(ref_shadow)}.{_q(fk.referenced_table)} ({_q(fk.referenced_column)});"
+                f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} "
+                f"ADD CONSTRAINT {sql_safe_double_quote(fk_name)} "
+                f"FOREIGN KEY ({sql_safe_double_quote(fk.column)}) "
+                f"REFERENCES {sql_safe_double_quote(ref_shadow)}.{sql_safe_double_quote(fk.referenced_table)} ({sql_safe_double_quote(fk.referenced_column)});"
             )
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def _emit_add_rls(changes: list[Change], after_table_map: dict) -> str:
-    from .codegen import _generate_rls
+def _emit_add_rls(changes: list[Change], after_table_map: dict, after: GovernanceProject) -> str:
     affected: set[tuple[str, str]] = set()
     for c in changes:
         if c.object_type == ObjectType.TABLE and c.field and c.field.startswith("rls"):
@@ -576,8 +577,6 @@ def _emit_add_rls(changes: list[Change], after_table_map: dict) -> str:
     if not affected:
         return ""
 
-    from .model import GovernanceProject, DatabaseConfig, SchemaConfig
-    from collections import defaultdict
     schema_tables: dict[str, list] = defaultdict(list)
     for schema_name, table_name in affected:
         tbl = after_table_map.get((schema_name, table_name))
@@ -589,14 +588,14 @@ def _emit_add_rls(changes: list[Change], after_table_map: dict) -> str:
         for sn, tbls in schema_tables.items()
     ]
     dummy_role = RoleConfig(
-        name="__dummy__",
-        can_login=True,
-        on=[SchemaPermissionConfig(name=sn) for sn in schema_tables],
+        name      = "__dummy__",
+        can_login = True,
+        on        = [SchemaPermissionConfig(name=sn) for sn in schema_tables],
     )
     proj = GovernanceProject(
-        database=DatabaseConfig(name="__dummy__"),
-        schemas=schemas,
-        roles=[dummy_role],
+        database = DatabaseConfig(name="__dummy__", version=after.database.version),
+        schemas  = schemas,
+        roles    = [dummy_role],
     )
     return _generate_rls(proj)
 
@@ -623,18 +622,17 @@ def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: 
                     for priv in ("SELECT", "INSERT", "UPDATE", "DELETE",
                                  "TRUNCATE", "REFERENCES", "TRIGGER"):
                         lines.append(
-                            f"REVOKE {priv} ON {_q(sp.name)}.{_q(tp.name)} "
-                            f"FROM {_q(role_name)};"
+                            f"REVOKE {priv} ON {sql_safe_double_quote(sp.name)}.{sql_safe_double_quote(tp.name)} "
+                            f"FROM {sql_safe_double_quote(role_name)};"
                         )
-                lines.append(f"REVOKE USAGE ON SCHEMA {_q(sp.name)} FROM {_q(role_name)};")
+                lines.append(f"REVOKE USAGE ON SCHEMA {sql_safe_double_quote(sp.name)} FROM {sql_safe_double_quote(role_name)};")
 
     synthetic_current_roles = list(before.roles)
     if before.database.audit_enabled:
-        # Mark tarkin_audit as already existing so _generate_roles won't try to CREATE it
         synthetic_current_roles.append(RoleConfig(
-            name="tarkin_audit",
-            can_login=False,
-            on=[SchemaPermissionConfig(name=before.schemas[0].name)] if before.schemas else [],
+            name      = "tarkin_audit",
+            can_login = False,
+            on        = [SchemaPermissionConfig(name=before.schemas[0].name)] if before.schemas else [],
         ))
     synthetic_current = before.model_copy(update={"roles": synthetic_current_roles})
 
@@ -649,7 +647,7 @@ def _emit_meta_update(after: GovernanceProject) -> str:
     yaml_str  = Serializer.to_yaml_string(after)
     checksum  = project_checksum(after)
     version   = pkg_version("tarkin")
-    dq_open, dq_close = _safe_dollar_quote(yaml_str)
+    dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
     return (
         f"INSERT INTO __META__.tarkin_builds "
         f"(tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin) "
@@ -694,12 +692,6 @@ def _migration_metadata(
             for c in changes
         ],
     }
-
-
-def _write_artifact(zip_path: Path, sql: str, metadata: dict) -> None:
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("tarkin_build.json", json.dumps(metadata, indent=2))
-        zf.writestr("tarkin_build.sql",  sql)
 
 
 class MigrateError(Exception):

@@ -1,5 +1,6 @@
 """Tarkin command-line interface."""
 from __future__ import annotations
+import shutil
 import subprocess
 import sys
 import typer
@@ -9,21 +10,51 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
-from .attach import attach, AttachError, OUT_DIR
-from .detach import detach, DetachError
-from .erase import erase_check, erase_apply, EraseError
+from .attach import (
+    attach,
+    AttachError,
+)
+from .build import (
+    build,
+    BuildError,
+)
 from .credentials import (
-    CredentialsFile, DEFAULT_CREDENTIALS_PATH,
-    check_connection, test_all_connections, ConnectionProfile,
+    ConnectionProfile,
+    CredentialsFile,
+    check_connection,
+    test_all_connections,
+)
+from .detach import (
+    detach,
+    DetachError,
+)
+from .diff import (
+    diff_projects,
+    render_diff,
+)
+from .erase import (
+    erase_apply,
+    erase_check,
+    EraseError,
 )
 from .inspect import inspect_database
+from .migrate import (
+    migrate,
+    MigrateError,
+)
 from .model import GovernanceProject
-from .yaml import YamlLoader
-from .validate import SemanticValidator, ValidationError
 from .serialize import Serializer
-from .build import build, BuildError
-from .migrate import migrate, MigrateError
-from .diff import diff_projects, render_diff
+from .utils import (
+    DEFAULT_CREDENTIALS_PATH,
+    OUT_DIR,
+    build_output_directory,
+)
+from .validate import (
+    SemanticValidator,
+    ValidationError,
+)
+from .yaml import YamlLoader
+
 
 app = typer.Typer(no_args_is_help=True, help="Tarkin: governance compiler for PostgreSQL.")
 
@@ -152,8 +183,8 @@ def inspect_database_build_yaml(
         yaml_str = Serializer.to_yaml_string(proj)
 
         if output is None:
-            output = Path("out") / f"{prof.database}_model.yaml"
-        output.parent.mkdir(parents=True, exist_ok=True)
+            output = OUT_DIR / f"{prof.database}_model.yaml"
+        build_output_directory(output)
         output.write_text(yaml_str, encoding="utf-8")
         print(f"Written to {output}.")
 
@@ -242,9 +273,9 @@ def attach_to_database(
         return
 
     if not profile:
-        zip_path = build_path or _find_latest_artifact_path()
-        if zip_path:
-            with zipfile.ZipFile(zip_path) as zf:
+        build_path = build_path or _find_latest_artifact_path()
+        if build_path:
+            with zipfile.ZipFile(build_path) as zf:
                 metadata = json.loads(zf.read("tarkin_build.json").decode())
                 profile  = metadata.get("profile")
 
@@ -254,6 +285,7 @@ def attach_to_database(
 
     prof = _resolve_profile(creds, profile)
     if not prof:
+        _die("Invalid credentials.")
         return
 
     print(f"Connecting to {prof.safe_repr()}...", end="\r")
@@ -361,7 +393,7 @@ def diff_yaml(
     if output is None:
         before_stem = before.stem
         after_stem  = after.stem
-        output = Path("out") / f"diff_{before_stem}_{after_stem}.md"
+        output = OUT_DIR / f"diff_{before_stem}_{after_stem}.md"
 
     render_diff(changes, output)
 
@@ -413,7 +445,7 @@ def migrate_data_model(
     print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
-        zip_path = migrate(proj, prof, out_dir=output)
+        zip_path = migrate(proj, prof, output=output)
         print(f"Migration artifact: {zip_path}")
         print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
     except MigrateError as exc:
@@ -475,7 +507,7 @@ def erase_subject(
     if not prof:
         return
 
-    out_dir = output or Path("out")
+    output = output or OUT_DIR
 
     print(f"Connecting to {prof.safe_repr()}...", end="\r")
     result = check_connection(prof)
@@ -486,7 +518,7 @@ def erase_subject(
 
     try:
         if check:
-            rows = erase_check(prof, list(column), list(value), out_dir=out_dir)
+            rows = erase_check(prof, list(column), list(value), output=output)
             print(f"\nErase check results ({len(rows)} table(s) matched):")
             for row in rows:
                 print(
@@ -497,7 +529,7 @@ def erase_subject(
             if not rows:
                 print("  No matching rows found.")
         else:
-            rows = erase_apply(prof, list(column), list(value), out_dir=out_dir)
+            rows = erase_apply(prof, list(column), list(value), output=output)
             print(f"\nErase apply results ({len(rows)} table(s) affected):")
             for row in rows:
                 print(
@@ -523,9 +555,9 @@ def purge_output(
 
     Use --no-warn to skip the confirmation prompt.
     """
-    out_dir = Path("out")
+    output = OUT_DIR
 
-    if not out_dir.exists() or not any(out_dir.iterdir()):
+    if not output.exists() or not any(output.iterdir()):
         print("Nothing to purge: directory out/ is empty or does not exist.")
         return
 
@@ -536,9 +568,8 @@ def purge_output(
             print("Purge cancelled.")
             return
 
-    import shutil
-    shutil.rmtree(out_dir)
-    out_dir.mkdir()
+    shutil.rmtree(output)
+    build_output_directory(output)
     print("Directory out/ purged.")
 
 

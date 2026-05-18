@@ -6,11 +6,11 @@ from pathlib import Path
 from sqlalchemy import text
 
 from .credentials import ConnectionProfile
-from .codegen import project_checksum
 from .inspect import inspect_database
-
-
-OUT_DIR = Path("out")
+from .utils import (
+    OUT_DIR,
+    project_checksum,
+)
 
 
 def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
@@ -48,26 +48,16 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
             raw.close()
         engine.dispose()
     except Exception as exc:
-        raise AttachError(
-            f"Failed to apply {verb}. Database has been rolled back.\n"
-            f"\tError: {exc}"
-        ) from exc
+        raise AttachError(f"Failed to apply {verb}. Database has been rolled back.\n\tError: {exc}") from exc
     print(f"Applying {verb} to database... Done.")
 
     print(f"Tarkin {verb} successfully applied.")
 
 
-def _validate_for_build(
-    metadata:   dict,
-    tk_schemas: list,
-    current,
-) -> None:
+def _validate_for_build(metadata: dict, tk_schemas: list, current) -> None:
     """Validate pre-conditions for a standard build artifact."""
     if tk_schemas:
-        raise AttachError(
-            "Database already has an active Tarkin build. "
-            "Run 'tarkin detach' before attaching again."
-        )
+        raise AttachError("Database already has an active Tarkin build. Run 'tarkin detach' before attaching again.")
 
     print("Verifying database state...", end="\r")
     current_checksum = project_checksum(current)
@@ -83,11 +73,7 @@ def _validate_for_build(
     print("Verifying database state... Done.")
 
 
-def _validate_for_migration(
-    profile:    ConnectionProfile,
-    metadata:   dict,
-    tk_schemas: list,
-) -> None:
+def _validate_for_migration(profile: ConnectionProfile, metadata: dict, tk_schemas: list) -> None:
     """Validate pre-conditions for a migration artifact."""
     if not tk_schemas:
         raise AttachError(
@@ -139,20 +125,11 @@ def _validate_for_migration(
 def _find_latest_artifact() -> Path:
     """Find the most recent build/migrate artifact in out/."""
     if not OUT_DIR.exists():
-        raise AttachError(
-            f"No artifacts found in {OUT_DIR}. "
-            f"Run 'tarkin build' first."
-        )
+        raise AttachError(f"No artifacts found in {OUT_DIR}. Run 'tarkin build' or 'tarkin migrate' to generate an artifact.")
 
-    artifacts = sorted(
-        list(OUT_DIR.glob("tarkin_build_*.zip")) +
-        list(OUT_DIR.glob("tarkin_migrate_*.zip"))
-    )
+    artifacts = sorted(list(OUT_DIR.glob("tarkin_build_*.zip")) + list(OUT_DIR.glob("tarkin_migrate_*.zip")))
     if not artifacts:
-        raise AttachError(
-            f"No artifacts found in {OUT_DIR}. "
-            f"Run 'tarkin build' first."
-        )
+        raise AttachError(f"No artifacts found in {OUT_DIR}. Run 'tarkin build' first.")
 
     return artifacts[-1]
 
@@ -160,16 +137,15 @@ def _find_latest_artifact() -> Path:
 def _read_artifact(zip_path: Path) -> tuple[dict, str]:
     """Extract metadata and SQL from a build/migrate artifact zip."""
     if not zip_path.exists():
-        raise AttachError(f"Artifact not found: {zip_path}")
+        raise AttachError(f"Artifact {zip_path} not found.")
 
     try:
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
+
             if "tarkin_build.json" not in names or "tarkin_build.sql" not in names:
-                raise AttachError(
-                    f"Artifact {zip_path} is missing required files. "
-                    f"Re-run 'tarkin build' or 'tarkin migrate' to generate a fresh artifact."
-                )
+                raise AttachError(f"Artifact {zip_path} is missing required files. Re-run 'tarkin build' or 'tarkin migrate' to generate a fresh artifact.")
+
             metadata = json.loads(zf.read("tarkin_build.json").decode())
             sql      = zf.read("tarkin_build.sql").decode()
     except zipfile.BadZipFile as exc:

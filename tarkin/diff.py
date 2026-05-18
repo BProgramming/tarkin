@@ -3,14 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .model import (
     GovernanceProject,
+    RoleConfig,
     SchemaConfig,
     TableConfig,
-    RoleConfig,
 )
+from .utils import build_output_directory
 
 
 class ChangeKind(str, Enum):
@@ -38,10 +39,10 @@ class Change:
     kind:        ChangeKind
     object_type: ObjectType
     path:        str
-    field:       str | None      = None
-    before:      Any             = None
-    after:       Any             = None
-    note:        str | None      = None
+    field:       Optional[str] = None
+    before:      Optional[Any] = None
+    after:       Optional[Any] = None
+    note:        Optional[str] = None
 
 
 def diff_projects(before: GovernanceProject,after:  GovernanceProject) -> list[Change]:
@@ -55,7 +56,7 @@ def diff_projects(before: GovernanceProject,after:  GovernanceProject) -> list[C
 
 def render_diff(changes: list[Change], output_path: Path) -> None:
     """Write a human-readable Markdown diff report to *output_path*."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    build_output_directory(output_path)
 
     lines: list[str] = ["# Tarkin Diff Report\n"]
 

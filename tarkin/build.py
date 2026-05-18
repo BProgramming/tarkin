@@ -1,28 +1,25 @@
 """Build a Tarkin model from a GovernanceProject."""
 from __future__ import annotations
-import json
-import zipfile
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+from .codegen import generate_sql
 from .credentials import ConnectionProfile
-from .inspect import inspect_database, check_pgcron_available
+from .inspect import inspect_database
 from .model import GovernanceProject
-from .codegen import generate_sql, project_checksum
-
-
-OUT_DIR = Path("out")
-
-
-def _ensure_out_dir(out_dir: Path) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir
+from .utils import (
+    OUT_DIR,
+    build_output_directory,
+    check_pgcron_available,
+    project_checksum,
+    write_artifact,
+)
 
 
 def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path | None = None) -> Path:
     """Run a full Tarkin build against a live database."""
-    out = _ensure_out_dir(out_dir or OUT_DIR)
+    out = build_output_directory(out_dir or OUT_DIR)
 
     print("Inspecting current database state...", end="\r")
     try:
@@ -45,7 +42,7 @@ def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path 
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     zip_path  = out / f"tarkin_build_{timestamp}.zip"
     metadata = _build_metadata(project, current, profile)
-    _write_artifact(zip_path, sql, metadata)
+    write_artifact(zip_path, sql, metadata)
     print(f"Building artifact... Written to {zip_path}.")
 
     return zip_path
@@ -58,7 +55,12 @@ def _check_no_existing_build(current: GovernanceProject) -> None:
         names = ", ".join(s.name for s in tk_schemas)
         raise BuildError(
             f"Existing Tarkin shadow schemas detected: {names}. "
-            f"Run 'tarkin detach' to remove the existing build before building again."
+            "Run 'tarkin detach' to remove the existing build before building again."
+        )
+    if current.database.audit_enabled and 'tarkin_audit' in {r.name for r in current.roles}:
+        raise BuildError(
+            "Tarkin uses the 'tarkin_audit' role to handle pgaudit operations, but a role with that name already exists. "
+            "Please rename the existing role and try again."
         )
 
 
@@ -71,6 +73,20 @@ def _check_pgaudit_requirements(project: GovernanceProject, current: GovernanceP
             "Install postgresql-pgaudit, add 'pgaudit' to shared_preload_libraries "
             "in postgresql.conf, and restart PostgreSQL before building."
         )
+
+
+def _check_pgcron_requirements(project: GovernanceProject, profile: ConnectionProfile) -> None:
+    """Fail if the YAML requires pg_cron but it is not installed on the live database."""
+    has_retention = any(table.retention_days is not None for schema in project.schemas for table in schema.tables)
+    if project.database.retention_schedule is not None or has_retention:
+        if not check_pgcron_available(profile):
+            raise BuildError(
+                "Retention is configured but pg_cron is not installed or not preloaded "
+                "on this database.\n"
+                "Install pg_cron, add 'pg_cron' to shared_preload_libraries in "
+                "postgresql.conf, and restart PostgreSQL before building.\n"
+                "See https://github.com/citusdata/pg_cron for installation instructions."
+            )
 
 
 def _build_metadata(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> dict:
@@ -90,33 +106,6 @@ def _build_metadata(project: GovernanceProject, current: GovernanceProject, prof
         "audit_enabled":  project.database.audit_enabled,
         "audit_logged":   [str(level) for level in project.database.audit_logged],
     }
-
-
-def _write_artifact(zip_path: Path, sql: str, metadata: dict) -> None:
-    """Write an artifact to a zip file."""
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("tarkin_build.json", json.dumps(metadata, indent=2))
-        zf.writestr("tarkin_build.sql",  sql)
-
-
-def _check_pgcron_requirements(project: GovernanceProject, profile: ConnectionProfile) -> None:
-    """Fail if the YAML requires pg_cron but it is not installed on the live database."""
-    needs_cron = project.database.retention_schedule is not None or any(
-        table.retention_days is not None
-        for schema in project.schemas
-        for table in schema.tables
-    )
-    if not needs_cron:
-        return
-
-    if not check_pgcron_available(profile):
-        raise BuildError(
-            "Retention is configured but pg_cron is not installed or not preloaded "
-            "on this database.\n"
-            "Install pg_cron, add 'pg_cron' to shared_preload_libraries in "
-            "postgresql.conf, and restart PostgreSQL before building.\n"
-            "See https://github.com/citusdata/pg_cron for installation instructions."
-        )
 
 
 class BuildError(Exception):

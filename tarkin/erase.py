@@ -6,20 +6,25 @@ from pathlib import Path
 from sqlalchemy import text
 
 from .credentials import ConnectionProfile
+from .utils import (
+    OUT_DIR,
+    build_output_directory,
+)
 
 
 def erase_check(
     profile: ConnectionProfile,
     columns: list[str],
     values:  list[str],
-    out_dir: Path | None = None,
+    output:  Path | None = None,
 ) -> list[dict]:
     """Call __META__.tarkin_erase_check() and return (and optionally write) the result."""
     if len(columns) != len(values):
         raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
     results = _call_function(profile, "tarkin_erase_check", columns, values)
-    if out_dir is not None:
-        _write_result(out_dir, "erase_check", columns, values, results)
+    output  = output or OUT_DIR
+    build_output_directory(output)
+    _write_result(output, "erase_check", columns, values, results)
     return results
 
 
@@ -27,14 +32,15 @@ def erase_apply(
     profile: ConnectionProfile,
     columns: list[str],
     values:  list[str],
-    out_dir: Path | None = None,
+    output:  Path | None = None,
 ) -> list[dict]:
     """Call __META__.tarkin_erase_apply() and return (and optionally write) the result."""
     if len(columns) != len(values):
         raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
     results = _call_function(profile, "tarkin_erase_apply", columns, values)
-    if out_dir is not None:
-        _write_result(out_dir, "erase_apply", columns, values, results)
+    output  = output or OUT_DIR
+    build_output_directory(output)
+    _write_result(output, "erase_apply", columns, values, results)
     return results
 
 
