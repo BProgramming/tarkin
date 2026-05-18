@@ -146,7 +146,7 @@ def _read_meta(
     profile: ConnectionProfile,
 ) -> tuple[
     list[str],
-    list[tuple[str, str, str | None, str]],
+    list[tuple[str, str, str | None, str | None, str]],
     str,
     bool,
     dict[str, str | None],
@@ -156,21 +156,7 @@ def _read_meta(
     list[tuple[str, str, list[str]]],
     list[tuple[str, str]],
 ]:
-    """
-    Read __META__ tables to retrieve all state needed for a clean detach.
-
-    Returns a 7-tuple of:
-    * List of role names added by Tarkin (to be dropped on detach).
-    * List of ``(role_name, schema_name, table_name_or_None, grant_type)``
-      tuples representing grants to restore.
-    * The database name recorded in the build.
-    * Boolean: whether Tarkin enabled pgcrypto.
-    * Dict with pre-attach pgaudit settings to restore (log, log_catalog, log_relation, role).
-    * List of ``(shadow_schema, table_name, constraint_name)`` tuples for FK
-      constraints added by Tarkin (to be dropped on detach).
-    * List of ``(schema_name, shadow_name, object_kind, object_name)`` tuples
-      for schema objects moved by Tarkin (to be moved back on detach).
-    """
+    """Read __META__ tables to retrieve all state needed for a clean detach."""
     engine = profile.engine()
     try:
         with engine.connect() as conn:
@@ -205,12 +191,12 @@ def _read_meta(
             tarkin_roles = [r[0] for r in role_rows]
 
             grant_rows = conn.execute(text(
-                "SELECT role_name, schema_name, table_name, grant_type "
+                "SELECT role_name, schema_name, table_name, column_name, grant_type "
                 "FROM __META__.tarkin_revoked_grants "
                 "WHERE build_id = :bid "
                 "ORDER BY schema_name, table_name NULLS FIRST, role_name, grant_type"
             ), {"bid": build_id}).fetchall()
-            grants = [(r[0], r[1], r[2], r[3]) for r in grant_rows]
+            grants = [(r[0], r[1], r[2], r[3], r[4]) for r in grant_rows]
 
             # Added FK constraints
             fk_rows = conn.execute(text(
@@ -281,7 +267,7 @@ def _generate_detach_sql(
     current:                    GovernanceProject,
     drop_versioning:            bool,
     tarkin_created_roles:       list[str],
-    revoked_grants:             list[tuple[str, str, str | None, str]],
+    revoked_grants:             list[tuple[str, str, str | None, str | None, str]],
     db_name:                    str,
     pgaudit_snapshot:           dict[str, str | None],
     added_fks:                  list[tuple[str, str, str]],
@@ -480,17 +466,28 @@ def _generate_detach_sql(
         "",
     ]
 
-    schema_grants = [(r, s, gt) for (r, s, t, gt) in revoked_grants if t is None]
-    table_grants  = [(r, s, t, gt) for (r, s, t, gt) in revoked_grants if t is not None]
+    schema_grants = [(r, s, gt) for (r, s, t, c, gt) in revoked_grants if t is None]
+    table_grants = [(r, s, t, gt) for (r, s, t, c, gt) in revoked_grants if t is not None and c is None]
+    column_grants = [(r, s, t, c, gt) for (r, s, t, c, gt) in revoked_grants if t is not None and c is not None]
 
-    if schema_grants or table_grants:
+    if schema_grants or table_grants or column_grants:
         lines.append("-- Restore grants revoked by Tarkin")
 
         for (role_name, schema_name, grant_type) in schema_grants:
-            lines.append(f'GRANT {grant_type} ON SCHEMA {sql_safe_double_quote(schema_name)} TO {sql_safe_double_quote(role_name)};')
+            if schema_name:
+                lines.append(f'GRANT {grant_type} ON SCHEMA {sql_safe_double_quote(schema_name)} TO {sql_safe_double_quote(role_name)};')
 
         for (role_name, schema_name, table_name, grant_type) in table_grants:
-            lines.append(f'GRANT {grant_type} ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)} TO {sql_safe_double_quote(role_name)};')
+            if schema_name and table_name:
+                lines.append(f'GRANT {grant_type} ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)} TO {sql_safe_double_quote(role_name)};')
+
+        for (role_name, schema_name, table_name, column_name, grant_type) in column_grants:
+            if schema_name and table_name and column_name:
+                lines.append(
+                    f'GRANT {grant_type} ({sql_safe_double_quote(column_name)}) '
+                    f'ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)} '
+                    f'TO {sql_safe_double_quote(role_name)};'
+                )
 
         lines.append("")
 

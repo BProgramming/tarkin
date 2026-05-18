@@ -39,6 +39,7 @@ from .utils import (
 
 def generate_sql(project: GovernanceProject, current: GovernanceProject, profile: ConnectionProfile) -> str:
     """Generate the full SQL build artifact for a governance project."""
+    needs_pgcrypto = _needs_pgcrypto(project)
     sections = [
         sql_comment_block_section("TARKIN BUILD", f"Generated at {datetime.now(UTC).isoformat()}"),
         sql_comment_block_section("TRANSACTION START"),
@@ -49,6 +50,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         _generate_extensions(project),
         sql_comment_block_section("META SCHEMA"),
         _generate_meta_schema(),
+        sql_comment_block_section("BUILD RECORD"),
+        _generate_build_record(project, needs_pgcrypto),
         sql_comment_block_section("SHADOW SCHEMAS"),
         _generate_shadow_schemas(project),
         sql_comment_block_section("SCHEMA OBJECTS"),
@@ -82,11 +85,52 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         sql_comment_block_section("RETENTION"),
         _generate_retention(project),
         sql_comment_block_section("META POPULATION"),
-        _generate_meta_population(project, current, needs_pgcrypto=_needs_pgcrypto(project)),
+        _generate_meta_population(project, current),
         sql_comment_block_section("TRANSACTION END"),
         "COMMIT;\n",
     ]
     return "\n".join(sections)
+
+
+def _generate_build_record(project: GovernanceProject, needs_pgcrypto: bool) -> str:
+    """Insert the build row into __META__.tarkin_builds."""
+    tarkin_version    = pkg_version("tarkin")
+    yaml_str          = Serializer.to_yaml_string(project)
+    profile           = sql_safe_escape_string(project.database.profile or "")
+    database_name     = sql_safe_escape_string(project.database.name)
+    checksum          = project_checksum(project)
+    dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
+
+    columns = [
+        "tarkin_version", "profile", "database_name",
+        "checksum", "yaml", "pgcrypto_enabled_by_tarkin",
+    ]
+    values = [
+        f"'{tarkin_version}'",
+        f"'{profile}'",
+        f"'{database_name}'",
+        f"'{checksum}'",
+        f"{dq_open}{yaml_str}{dq_close}",
+        str(needs_pgcrypto).lower(),
+    ]
+
+    if project.database.audit_enabled:
+        columns += [
+            "pgaudit_log_before", "pgaudit_log_catalog_before",
+            "pgaudit_log_relation_before", "pgaudit_role_before",
+        ]
+        values += [
+            "current_setting('pgaudit.log', true)",
+            "current_setting('pgaudit.log_catalog', true)",
+            "current_setting('pgaudit.log_relation', true)",
+            "current_setting('pgaudit.role', true)",
+        ]
+
+    sep = ",\n    "
+    return (
+        f"INSERT INTO __META__.tarkin_builds ({', '.join(columns)})\n"
+        f"VALUES (\n    {sep.join(values)}\n);\n"
+    )
 
 
 def _tarkin_view_names_for_schema(schema: SchemaConfig) -> set[str]:
@@ -270,6 +314,7 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_revoked_grants (
     role_name   text NOT NULL,
     schema_name text NOT NULL,
     table_name  text,          -- NULL means schema-level grant
+    column_name text,          -- NULL means table-level (not column-level) grant
     grant_type  text NOT NULL  -- e.g. 'SELECT', 'INSERT', 'USAGE', 'CREATE'
 );
 
@@ -1167,14 +1212,6 @@ def _generate_audit(project: GovernanceProject) -> str:
         f"    _new       text := '{levels}';",
         f"    _merged    text;",
         f"BEGIN",
-        f"    -- Snapshot pre-existing pgaudit settings into the current build record",
-        f"    UPDATE __META__.tarkin_builds",
-        f"    SET pgaudit_log_before          = current_setting('pgaudit.log', true),",
-        f"        pgaudit_log_catalog_before  = current_setting('pgaudit.log_catalog', true),",
-        f"        pgaudit_log_relation_before = current_setting('pgaudit.log_relation', true),",
-        f"        pgaudit_role_before         = current_setting('pgaudit.role', true)",
-        f"    WHERE build_id = (SELECT max(build_id) FROM __META__.tarkin_builds);",
-        f"",
         f"    -- Merge log levels",
         f"    SELECT string_agg(DISTINCT trim(val), ', ')",
         f"    INTO _merged",
@@ -1501,38 +1538,27 @@ $$;
 
     return check_fn + "\n\n" + apply_fn + "\n"
 
-
-def _generate_meta_population(
-    project:        GovernanceProject,
-    current:        GovernanceProject,
-    needs_pgcrypto: bool = False,
-) -> str:
+def _generate_meta_population(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate the DO block that populates all __META__ tables."""
-    tarkin_version = pkg_version("tarkin")
-    yaml_str       = Serializer.to_yaml_string(project)
-    profile        = sql_safe_escape_string(project.database.profile or "")
-    database_name  = sql_safe_escape_string(project.database.name)
-    checksum       = project_checksum(project)
-
-    dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
-
     existing_role_names = {r.name for r in current.roles}
-
-    revoked_grants: list[tuple[str, str, str | None, str]] = []
+    revoked_grants: list[tuple[str, str, str | None, str | None, str]] = []
 
     for schema in project.schemas:
         for current_role in current.roles:
             for sp in current_role.on:
                 if sp.name == schema.name:
                     if sp.usage:
-                        revoked_grants.append((current_role.name, schema.name, None, "USAGE"))
+                        revoked_grants.append((current_role.name, schema.name, None, None, "USAGE"))
                     if sp.create:
-                        revoked_grants.append((current_role.name, schema.name, None, "CREATE"))
+                        revoked_grants.append((current_role.name, schema.name, None, None, "CREATE"))
                     for tp in sp.tables:
-                        for priv in ["select", "insert", "update", "delete", "truncate", "references", "trigger", "maintain"]:
+                        for priv in ["select", "insert", "update", "delete",
+                                     "truncate", "references", "trigger", "maintain"]:
                             if getattr(tp, priv):
-                                revoked_grants.append((current_role.name, schema.name, tp.name, priv.upper()))
-
+                                revoked_grants.append((current_role.name, schema.name, tp.name, None, priv.upper()))
+                        for priv_name, columns in tp.column_grants.items():
+                            for col_name in columns:
+                                revoked_grants.append((current_role.name, schema.name, tp.name, col_name, priv_name.upper()))
     current_fk_map: dict[tuple[str, str], set[str]] = {}
     for s in current.schemas:
         for t in s.tables:
@@ -1607,16 +1633,9 @@ def _generate_meta_population(
     lines = ["DO $$", "DECLARE", "    v_build_id bigint;", "BEGIN"]
 
     lines += [
-        f"    INSERT INTO __META__.tarkin_builds (tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin)",
-        f"    VALUES (",
-        f"        '{tarkin_version}',",
-        f"        '{profile}',",
-        f"        '{database_name}',",
-        f"        '{checksum}',",
-        f"        {dq_open}{yaml_str}{dq_close},",
-        f"        {str(needs_pgcrypto).lower()}",
-        f"    )",
-        f"    RETURNING build_id INTO v_build_id;",
+        "    -- The tarkin_builds row was inserted by the BUILD RECORD section.",
+        "    SELECT currval(pg_get_serial_sequence('__META__.tarkin_builds', 'build_id'))",
+        "    INTO v_build_id;",
         "",
     ]
 
@@ -1818,15 +1837,16 @@ def _generate_meta_population(
             f"VALUES (v_build_id, 'tarkin_audit', 0, false, false, false, false, false, true, ARRAY[]::text[]);"
         )
 
-    for (role_name, schema_name, table_name, grant_type) in revoked_grants:
+    for (role_name, schema_name, table_name, column_name, grant_type) in revoked_grants:
         rn = sql_safe_escape_string(role_name)
         sn = sql_safe_escape_string(schema_name)
         tn = f"'{sql_safe_escape_string(table_name)}'" if table_name else "NULL"
+        cn = f"'{sql_safe_escape_string(column_name)}'" if column_name else "NULL"
         gt = sql_safe_escape_string(grant_type)
         lines.append(
             f"    INSERT INTO __META__.tarkin_revoked_grants "
-            f"(build_id, role_name, schema_name, table_name, grant_type) "
-            f"VALUES (v_build_id, '{rn}', '{sn}', {tn}, '{gt}');"
+            f"(build_id, role_name, schema_name, table_name, column_name, grant_type) "
+            f"VALUES (v_build_id, '{rn}', '{sn}', {tn}, {cn}, '{gt}');"
         )
     if revoked_grants:
         lines.append("")

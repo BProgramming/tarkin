@@ -366,6 +366,8 @@ class TablePermissionConfig(TarkinBaseModel):
     references: bool = False
     trigger:    bool = False
     maintain:   bool = False
+    # These are existing grants on specific columns. Tarkin applies column-level grants separately.
+    column_grants: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class SchemaPermissionConfig(TarkinBaseModel):

@@ -205,35 +205,38 @@ class Serializer:
     def _serialize_mask_config(cls, cfg: MaskConfig) -> CommentedMap:
         """Serialize a masking configuration block."""
         m = CommentedMap()
-        m["hide_null"]          = cfg.hide_null
-        if isinstance(cfg, PartialMaskConfig):
-            m["type"]           = MaskingStrategy.PARTIAL
-            m["visible_length"] = cfg.visible_length
-            m["visible_side"]   = cfg.visible_side
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, FullMaskConfig):
-            m["type"]           = MaskingStrategy.FULL
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, HashMaskConfig):
-            m["type"]           = MaskingStrategy.HASH
-            m["algorithm"]      = cfg.algorithm
-        elif isinstance(cfg, EmailMaskConfig):
-            m["type"]           = MaskingStrategy.EMAIL
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, PhoneMaskConfig):
-            m["type"]           = MaskingStrategy.PHONE
-            m["visible_digits"] = cfg.visible_digits
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, CreditCardMaskConfig):
-            m["type"]           = MaskingStrategy.CREDIT_CARD
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, IpAddressMaskConfig):
-            m["type"]           = MaskingStrategy.IP_ADDRESS
-            m["visible_octets"] = cfg.visible_octets
-            m["mask_char"]      = cfg.mask_char
-        elif isinstance(cfg, NameMaskConfig):
-            m["type"]           = MaskingStrategy.NAME
-            m["mask_char"]      = cfg.mask_char
+        m["hide_null"] = cfg.hide_null
+        match cfg:
+            case PartialMaskConfig():
+                m["type"]           = MaskingStrategy.PARTIAL
+                m["visible_length"] = cfg.visible_length
+                m["visible_side"]   = cfg.visible_side
+                m["mask_char"]      = cfg.mask_char
+            case FullMaskConfig():
+                m["type"]           = MaskingStrategy.FULL
+                m["mask_char"]      = cfg.mask_char
+            case HashMaskConfig():
+                m["type"]           = MaskingStrategy.HASH
+                m["algorithm"]      = cfg.algorithm
+            case EmailMaskConfig():
+                m["type"]           = MaskingStrategy.EMAIL
+                m["mask_char"]      = cfg.mask_char
+            case PhoneMaskConfig():
+                m["type"]           = MaskingStrategy.PHONE
+                m["visible_digits"] = cfg.visible_digits
+                m["mask_char"]      = cfg.mask_char
+            case CreditCardMaskConfig():
+                m["type"]           = MaskingStrategy.CREDIT_CARD
+                m["mask_char"]      = cfg.mask_char
+            case IpAddressMaskConfig():
+                m["type"]           = MaskingStrategy.IP_ADDRESS
+                m["visible_octets"] = cfg.visible_octets
+                m["mask_char"]      = cfg.mask_char
+            case NameMaskConfig():
+                m["type"]           = MaskingStrategy.NAME
+                m["mask_char"]      = cfg.mask_char
+            case _:
+                m["type"]           = MaskingStrategy.NONE
         return m
 
     @classmethod

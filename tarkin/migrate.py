@@ -648,15 +648,21 @@ def _emit_meta_update(after: GovernanceProject) -> str:
     checksum  = project_checksum(after)
     version   = pkg_version("tarkin")
     dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
+    latest = "(SELECT {col} FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1)"
     return (
         f"INSERT INTO __META__.tarkin_builds "
-        f"(tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin) "
+        f"(tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin, "
+        f"pgaudit_log_before, pgaudit_log_catalog_before, pgaudit_log_relation_before, pgaudit_role_before) "
         f"VALUES ('{version}', "
-        f"(SELECT profile FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
-        f"(SELECT database_name FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
+        f"{latest.format(col='profile')}, "
+        f"{latest.format(col='database_name')}, "
         f"'{checksum}', "
         f"{dq_open}{yaml_str}{dq_close}, "
-        f"(SELECT pgcrypto_enabled_by_tarkin FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1)"
+        f"{latest.format(col='pgcrypto_enabled_by_tarkin')}, "
+        f"{latest.format(col='pgaudit_log_before')}, "
+        f"{latest.format(col='pgaudit_log_catalog_before')}, "
+        f"{latest.format(col='pgaudit_log_relation_before')}, "
+        f"{latest.format(col='pgaudit_role_before')}"
         f");\n"
     )
 

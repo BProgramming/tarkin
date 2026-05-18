@@ -596,6 +596,7 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
 
     schema_grants = _get_all_schema_grants(conn, include_tk=include_tk)
     table_grants  = _get_all_table_grants(conn, include_tk=include_tk)
+    column_grants = _get_all_column_grants(conn, include_tk=include_tk)
 
     roles = []
     for r in role_rows:
@@ -630,7 +631,7 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
                 None,
             )
             if table_perm is None:
-                table_perm = TablePermissionConfig(name=table)
+                table_perm = TablePermissionConfig(name=table, select=False)
                 schema_perms[schema].tables.append(table_perm)
 
             privilege = grant["privilege"]
@@ -642,6 +643,36 @@ def _build_roles(conn: Connection, include_tk: bool = False) -> list[RoleConfig]
             if privilege == "REFERENCES": table_perm.references = True
             if privilege == "TRIGGER":    table_perm.trigger    = True
             if privilege == "MAINTAIN":   table_perm.maintain   = True
+
+        for grant in column_grants.get(role_name, []):
+            schema    = str(grant["schema"])
+            table     = str(grant["table"])
+            column    = str(grant["column"])
+            privilege = str(grant["privilege"])
+
+            if schema not in schema_perms:
+                schema_perms[schema] = SchemaPermissionConfig(name=schema, usage=False, create=False)
+            table_perm = next(
+                (tp for tp in schema_perms[schema].tables if tp.name == table), None,
+            )
+            if table_perm is None:
+                table_perm = TablePermissionConfig(name=table, select=False)
+                schema_perms[schema].tables.append(table_perm)
+
+            # Skip column rows implied by a table-level grant of the same
+            # privilege, as those are already captured as table-level grants.
+            table_level = {
+                "SELECT":     table_perm.select,
+                "INSERT":     table_perm.insert,
+                "UPDATE":     table_perm.update,
+                "REFERENCES": table_perm.references,
+            }
+            if table_level.get(privilege):
+                continue
+
+            table_perm.column_grants.setdefault(privilege, [])
+            if column not in table_perm.column_grants[privilege]:
+                table_perm.column_grants[privilege].append(column)
 
         roles.append(RoleConfig(
             name         = role_name,
@@ -703,5 +734,30 @@ def _get_all_table_grants(conn: Connection, include_tk: bool = False) -> dict[st
             "schema":    schema,
             "table":     table,
             "privilege": privilege,
+        })
+    return result
+
+
+def _get_all_column_grants(conn: Connection, include_tk: bool = False) -> dict[str, list[dict]]:
+    """Returns {role_name: [{schema, table, column, privilege}]} for all non-system tables."""
+    rows = conn.execute(text("""
+        SELECT
+            grantee,
+            table_schema   AS schema,
+            table_name     AS "table",
+            column_name    AS "column",
+            privilege_type AS privilege
+        FROM information_schema.role_column_grants
+        WHERE table_schema NOT LIKE 'pg\\_%'
+          AND table_schema NOT IN ('information_schema', '__META__')
+          AND (:include_tk OR table_schema NOT LIKE 'tk\\_%')
+          AND grantee NOT LIKE 'pg\\_%'
+        ORDER BY grantee, table_schema, table_name, column_name, privilege_type
+    """), {"include_tk": include_tk}).fetchall()
+
+    result: dict[str, list[dict]] = {}
+    for grantee, schema, table, column, privilege in rows:
+        result.setdefault(grantee, []).append({
+            "schema": schema, "table": table, "column": column, "privilege": privilege,
         })
     return result
