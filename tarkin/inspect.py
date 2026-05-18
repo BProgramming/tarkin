@@ -1,5 +1,6 @@
 """Inspects a database to produce a GovernanceProject."""
 from __future__ import annotations
+import re
 from sqlalchemy import inspect as sa_inspect, text, Inspector, Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.interfaces import ReflectedColumn
@@ -30,6 +31,19 @@ _SYSTEM_SCHEMAS = {
 
 def _is_excluded_schema(name: str) -> bool:
     return name.startswith("pg_") or name in _SYSTEM_SCHEMAS
+
+
+def _parse_pg_version_number(version_str: str) -> str:
+    """Extract a short numeric version (e.g. "16.2") from PostgreSQL's version() string."""
+    # version() returns e.g. "PostgreSQL 16.2 on x86_64-pc-linux-gnu, ..."
+    m = re.search(r'PostgreSQL\s+(\d+\.\d+)', version_str)
+    if m:
+        return m.group(1)
+    # Fall back to first whitespace-delimited token after "PostgreSQL"
+    parts = version_str.split()
+    if len(parts) >= 2:
+        return parts[1]
+    return version_str
 
 
 def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
@@ -67,7 +81,7 @@ def _build_project(engine: Engine, profile: ConnectionProfile, include_tk: bool 
             host          = profile.host,
             port          = profile.port,
             database      = profile.database,
-            version       = db_version.split(',')[0],
+            version       = _parse_pg_version_number(db_version),
             audit_enabled = bool(audit_enabled),
             profile       = profile.profile,
             owner         = profile.username,
@@ -199,7 +213,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
 
 
 def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) -> dict[str, dict[str, str | bool | None]]:
-    """Pull column-level details from information_schema that SA doesn't always expose: raw default expressions and uniqueness (via constraint, not index)."""
+    """Pull column-level details from information_schema."""
     rows = conn.execute(text("""
         SELECT
             c.column_name,

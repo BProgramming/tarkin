@@ -86,6 +86,15 @@ def generate_sql(
     return "\n".join(sections)
 
 
+def _tarkin_view_names_for_schema(schema) -> set:
+    """Return the set of view names that Tarkin manages for a schema."""
+    return {t.name for t in schema.tables} | {
+        f"{t.name}_current"
+        for t in schema.tables
+        if any(c.versioned for c in t.columns)
+    }
+
+
 def _generate_meta_schema() -> str:
     """Generate DDL for the ``__META__`` schema and all governance tables."""
     return r"""
@@ -318,7 +327,7 @@ def _generate_shadow_schemas(project: GovernanceProject) -> str:
     return "\n".join(lines)
 
 
-def _generate_schema_objects(project: GovernanceProject,current: GovernanceProject) -> str:
+def _generate_schema_objects(project: GovernanceProject, current: GovernanceProject) -> str:
     """Move schema objects from shadow schemas to the new public-facing schemas."""
     lines = []
 
@@ -330,11 +339,7 @@ def _generate_schema_objects(project: GovernanceProject,current: GovernanceProje
         if not current_schema:
             continue
 
-        tarkin_view_names = {t.name for t in schema.tables} | {
-            f"{t.name}_current"
-            for t in schema.tables
-            if any(c.versioned for c in t.columns)
-        }
+        tarkin_view_names = _tarkin_view_names_for_schema(schema)
 
         for seq_entry in current_schema.sequences:
             seq_name = seq_entry.split()[0]
@@ -522,7 +527,7 @@ def _generate_views(project: GovernanceProject) -> str:
     db_version = 0
     if project.database.version:
         try:
-            db_version = int(project.database.version.split(".")[0])
+            db_version = int(project.database.version.split(".")[0].split()[0])
         except (ValueError, IndexError):
             pass
 
@@ -557,7 +562,7 @@ def _generate_views(project: GovernanceProject) -> str:
                     f"CREATE VIEW {_q(schema.name)}.{_q(table.name + '_current')}{with_clause} AS\n"
                     f"    SELECT\n    {col_list}\n"
                     f"    FROM {_q(shadow)}.{_q(table.name)}\n"
-                    f"    WHERE __valid_to__ >= now();"
+                    f"    WHERE __valid_to__ = 'infinity'::timestamptz;"
                 )
 
             lines.append("")
@@ -830,9 +835,10 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
         for c in table.columns
     ) else ""
 
-    fn_name = _q("tr_" + table.name)
-    tbl_ref = f"{_q(shadow)}.{_q(table.name)}"
-    pk_filt = _pk_filter(table)
+    fn_name     = _q("tr_" + table.name)
+    tbl_ref     = f"{_q(shadow)}.{_q(table.name)}"
+    pk_filt     = _pk_filter(table, row="NEW")
+    pk_filt_old = _pk_filter(table, row="OLD")
 
     if any(c.versioned for c in table.columns):
         v_insert_cols = insert_cols + ", __valid_from__, __valid_to__"
@@ -861,7 +867,7 @@ BEGIN
     ELSIF TG_OP = 'DELETE' THEN
         UPDATE {tbl_ref}
         SET __valid_to__ = now()
-        WHERE {pk_filt} AND __valid_to__ = 'infinity'::timestamptz;
+        WHERE {pk_filt_old} AND __valid_to__ = 'infinity'::timestamptz;
         RETURN OLD;
     END IF;
 END;
@@ -890,7 +896,7 @@ BEGIN
 
     ELSIF TG_OP = 'DELETE' THEN
         DELETE FROM {tbl_ref}
-        WHERE {pk_filt};
+        WHERE {pk_filt_old};
         RETURN OLD;
     END IF;
 END;
@@ -939,7 +945,7 @@ def _attach_trigger(schema_name: str, table_name: str) -> str:
     )
 
 
-def _pk_filter(table: TableConfig) -> str:
+def _pk_filter(table: TableConfig, row: str = "NEW") -> str:
     """Return a WHERE clause fragment matching the primary key columns."""
     pk_cols = [col for idx in table.indexes if idx.primary_key for col in idx.columns]
     if not pk_cols:
@@ -948,7 +954,7 @@ def _pk_filter(table: TableConfig) -> str:
             f"Tarkin requires a primary key to generate safe trigger functions. "
             f"This should have been caught by validation. Please file a bug report."
         )
-    return " AND ".join(f"{_q(col)} = NEW.{_q(col)}" for col in pk_cols)
+    return " AND ".join(f"{_q(col)} = {row}.{_q(col)}" for col in pk_cols)
 
 
 def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> str:
@@ -1092,12 +1098,18 @@ def _generate_grants(project: GovernanceProject) -> str:
                 if tp.trigger:    table_privs.append("TRIGGER")
 
                 if tp.maintain:
-                    if int(project.database.version) < 16:
+                    try:
+                        db_ver = int(project.database.version.split(".")[0].split()[0])
+                    except (ValueError, IndexError):
+                        db_ver = 0
+                    if db_ver < 16:
                         warnings.warn("Grant privilege MAINTAIN is only supported on PostgreSQL 16 and above.")
                     else:
                         if role.can_maintain:
-                            # Emitted in version-guarded block below
-                            maintain_grants.append((f"{sp.name}.{tp.name}", role.name))
+                            maintain_grants.append((
+                                f"{_q(sp.name)}.{_q(tp.name)}",
+                                role.name,
+                            ))
                         else:
                             warnings.warn(
                                 f"Role '{role.name}' has maintain=True on {sp.name}.{tp.name} "
@@ -1355,12 +1367,14 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql AS $$
 DECLARE
-    rec         __META__.tarkin_subject_identifiers%ROWTYPE;
+    rec          __META__.tarkin_subject_identifiers%ROWTYPE;
     where_clause text;
-    col_name    text;
-    col_type    text;
-    i           int;
-    row_count   bigint;
+    params       text[];
+    col_name     text;
+    col_type     text;
+    i            int;
+    clause_idx   int;
+    row_count    bigint;
 BEGIN
     IF array_length(p_columns, 1) IS DISTINCT FROM array_length(p_values, 1) THEN
         RAISE EXCEPTION 'tarkin_erase_check: p_columns and p_values must have the same length';
@@ -1369,22 +1383,22 @@ BEGIN
     FOR rec IN
         SELECT * FROM __META__.tarkin_subject_identifiers
     LOOP
-        -- Build WHERE clause only for columns that are both in p_columns and are
-        -- identifier columns for this table.
+        -- Build WHERE clause and corresponding parameter array dynamically.
+        -- This avoids the previous hard cap of 8 positional parameters.
         where_clause := '';
+        params       := ARRAY[]::text[];
+        clause_idx   := 0;
+
         FOR i IN 1..array_length(p_columns, 1) LOOP
             col_name := p_columns[i];
             IF col_name = ANY(rec.identifier_cols) THEN
-                col_type := rec.identifier_types[
-                    array_position(rec.identifier_cols, col_name)
-                ];
+                col_type   := rec.identifier_types[array_position(rec.identifier_cols, col_name)];
+                clause_idx := clause_idx + 1;
+                params     := array_append(params, p_values[i]);
                 IF where_clause <> '' THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
-                where_clause := where_clause || format(
-                    '%I = $%s::%s',
-                    col_name, i, col_type
-                );
+                where_clause := where_clause || format('%I = $%s::%s', col_name, clause_idx, col_type);
             END IF;
         END LOOP;
 
@@ -1395,8 +1409,7 @@ BEGIN
         EXECUTE format(
             'SELECT count(*) FROM %I.%I WHERE %s',
             rec.shadow_schema, rec.shadow_table, where_clause
-        ) USING p_values[1], p_values[2], p_values[3], p_values[4],
-                p_values[5], p_values[6], p_values[7], p_values[8]
+        ) USING VARIADIC params
           INTO row_count;
 
         schema_name    := rec.schema_name;
@@ -1425,16 +1438,15 @@ DECLARE
     rec          __META__.tarkin_subject_identifiers%ROWTYPE;
     where_clause text;
     set_clause   text;
+    params       text[];
     col_name     text;
     col_type     text;
-    orig_val     text;
     i            int;
     j            int;
+    clause_idx   int;
     non_id_cols  text[];
     non_id_types text[];
     row_count    bigint;
-    all_cols     text[];
-    all_types    text[];
 BEGIN
     IF array_length(p_columns, 1) IS DISTINCT FROM array_length(p_values, 1) THEN
         RAISE EXCEPTION 'tarkin_erase_apply: p_columns and p_values must have the same length';
@@ -1444,19 +1456,19 @@ BEGIN
         SELECT * FROM __META__.tarkin_subject_identifiers
     LOOP
         where_clause := '';
+        params       := ARRAY[]::text[];
+        clause_idx   := 0;
+
         FOR i IN 1..array_length(p_columns, 1) LOOP
             col_name := p_columns[i];
             IF col_name = ANY(rec.identifier_cols) THEN
-                col_type := rec.identifier_types[
-                    array_position(rec.identifier_cols, col_name)
-                ];
+                col_type   := rec.identifier_types[array_position(rec.identifier_cols, col_name)];
+                clause_idx := clause_idx + 1;
+                params     := array_append(params, p_values[i]);
                 IF where_clause <> '' THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
-                where_clause := where_clause || format(
-                    '%I = $%s::%s',
-                    col_name, i, col_type
-                );
+                where_clause := where_clause || format('%I = $%s::%s', col_name, clause_idx, col_type);
             END IF;
         END LOOP;
 
@@ -1469,12 +1481,10 @@ BEGIN
                 'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
                  SELECT count(*) FROM deleted',
                 rec.shadow_schema, rec.shadow_table, where_clause
-            ) USING p_values[1], p_values[2], p_values[3], p_values[4],
-                    p_values[5], p_values[6], p_values[7], p_values[8]
+            ) USING VARIADIC params
               INTO row_count;
 
         ELSIF rec.erase_strategy IN ('nullify', 'obfuscate') THEN
-            -- Retrieve non-identifier column names and types from information_schema
             SELECT array_agg(column_name ORDER BY ordinal_position),
                    array_agg(udt_name    ORDER BY ordinal_position)
             INTO non_id_cols, non_id_types
@@ -1493,16 +1503,14 @@ BEGIN
                     END IF;
 
                     IF rec.erase_strategy = 'nullify' THEN
-                        -- Try NULL first; fall back to '[ERASED]' cast for non-nullable columns
                         set_clause := set_clause || format(
-                            '%I = CASE WHEN (SELECT is_nullable = ''YES'' '
-                            'FROM information_schema.columns '
-                            'WHERE table_schema = %L AND table_name = %L AND column_name = %L) '
-                            'THEN NULL ELSE ''[ERASED]''::%s END',
+                            $$%I = CASE WHEN (SELECT is_nullable = 'YES'
+                                FROM information_schema.columns
+                                WHERE table_schema = %L AND table_name = %L AND column_name = %L)
+                                THEN NULL ELSE '[ERASED]'::%s END$$,
                             col_name, rec.shadow_schema, rec.shadow_table, col_name, col_type
                         );
                     ELSE -- obfuscate
-                        -- Fetch current value, hash it, cast back
                         set_clause := set_clause || format(
                             $$%I = (
                                 SELECT CASE
@@ -1538,21 +1546,18 @@ BEGIN
             END IF;
 
             IF set_clause = '' THEN
-                -- Table has only identifier columns; treat as delete
                 EXECUTE format(
                     'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
                      SELECT count(*) FROM deleted',
                     rec.shadow_schema, rec.shadow_table, where_clause
-                ) USING p_values[1], p_values[2], p_values[3], p_values[4],
-                        p_values[5], p_values[6], p_values[7], p_values[8]
+                ) USING VARIADIC params
                   INTO row_count;
             ELSE
                 EXECUTE format(
                     'WITH updated AS (UPDATE %I.%I SET %s WHERE %s RETURNING 1)
                      SELECT count(*) FROM updated',
                     rec.shadow_schema, rec.shadow_table, set_clause, where_clause
-                ) USING p_values[1], p_values[2], p_values[3], p_values[4],
-                        p_values[5], p_values[6], p_values[7], p_values[8]
+                ) USING VARIADIC params
                   INTO row_count;
             END IF;
         END IF;
@@ -1578,7 +1583,18 @@ $$;
     return check_fn + "\n\n" + apply_fn + "\n"
 
 
-def _generate_meta_population (
+def _safe_dollar_quote(yaml_str: str) -> tuple[str, str]:
+    """Return a dollar-quote tag that does not appear anywhere in yaml_str."""
+    base = "tarkin_yaml"
+    tag  = base
+    n    = 0
+    while f"${tag}$" in yaml_str:
+        n  += 1
+        tag = f"{base}_{n}"
+    return f"${tag}$", f"${tag}$"
+
+
+def _generate_meta_population(
     project:        GovernanceProject,
     current:        GovernanceProject,
     needs_pgcrypto: bool = False,
@@ -1589,6 +1605,8 @@ def _generate_meta_population (
     profile        = _escape_sql_string(project.database.profile or "")
     database_name  = _escape_sql_string(project.database.name)
     checksum       = project_checksum(project)
+
+    dq_open, dq_close = _safe_dollar_quote(yaml_str)
 
     existing_role_names = {r.name for r in current.roles}
 
@@ -1661,18 +1679,14 @@ def _generate_meta_population (
         if not current_schema:
             continue
 
-        tarkin_view_names = {t.name for t in schema.tables} | {
-            f"{t.name}_current"
-            for t in schema.tables
-            if any(c.versioned for c in t.columns)
-        }
+        tarkin_view_names = _tarkin_view_names_for_schema(schema)
 
         for attr, kind in _object_kind_map:
             for entry in getattr(current_schema, attr):
                 if kind in ("function", "trigger_function", "procedure"):
                     obj_name = entry.split("(")[0].split()[0]
                 elif kind == "operator":
-                    obj_name = entry  # full signature e.g. "+(integer,integer)"
+                    obj_name = entry
                 else:
                     obj_name = entry.split()[0]
                 moved_objects.append((schema.name, shadow, kind, obj_name))
@@ -1694,7 +1708,7 @@ def _generate_meta_population (
         f"        '{profile}',",
         f"        '{database_name}',",
         f"        '{checksum}',",
-        f"        $tarkin_yaml${yaml_str}$tarkin_yaml$,",
+        f"        {dq_open}{yaml_str}{dq_close},",
         f"        {str(needs_pgcrypto).lower()}",
         f"    )",
         f"    RETURNING build_id INTO v_build_id;",
@@ -1959,7 +1973,7 @@ def _generate_rls(project: GovernanceProject) -> str:
     db_version = 0
     if project.database.version:
         try:
-            db_version = int(project.database.version.split(".")[0])
+            db_version = int(project.database.version.split(".")[0].split()[0])
         except (ValueError, IndexError):
             pass
 
@@ -2113,7 +2127,6 @@ def _generate_retention_columns(project: GovernanceProject, current: GovernanceP
                     f"ADD COLUMN __erase_on_expiry__ bool NOT NULL DEFAULT true;"
                 )
 
-            # Index on __expires_at__ so the sweep function performs well
             lines.append(
                 f"CREATE INDEX {_q('idx_' + table.name + '_expires_at')} "
                 f"ON {tbl_ref} (__expires_at__) "
@@ -2128,16 +2141,7 @@ def _generate_retention_columns(project: GovernanceProject, current: GovernanceP
 
 
 def _generate_retention(project: GovernanceProject) -> str:
-    """Generate tarkin_erase_expired_records() and the pg_cron job.
-
-    tarkin_erase_expired_records() sweeps all tables registered in
-    tarkin_retention, finds rows where __expires_at__ <= now() AND
-    __erase_on_expiry__ = true, applies the configured strategy, and
-    logs each batch to tarkin_erasures with was_scheduled = true.
-
-    The pg_cron job is created with a stable name (tarkin_retention_<dbname>)
-    so detach can unschedule it by name without needing META.
-    """
+    """Generate tarkin_erase_expired_records() and the pg_cron job."""
     retained = [
         (schema, table)
         for schema in project.schemas

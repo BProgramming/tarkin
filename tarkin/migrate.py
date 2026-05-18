@@ -9,10 +9,23 @@ from typing import cast
 
 from sqlalchemy import text
 
-from .codegen import project_checksum, _q, _escape_sql_string, _section
+from .codegen import (
+    project_checksum,
+    _q,
+    _section,
+    _generate_triggers,
+    _generate_views,
+    _safe_dollar_quote,
+)
 from .credentials import ConnectionProfile
 from .diff import diff_projects, Change, ChangeKind, ObjectType
-from .model import GovernanceProject, RoleConfig, SchemaPermissionConfig, TableConfig, SchemaConfig
+from .model import (
+    GovernanceProject,
+    RoleConfig,
+    SchemaPermissionConfig,
+    TableConfig,
+    SchemaConfig,
+)
 from .serialize import Serializer
 from .yaml import YamlLoader
 
@@ -245,23 +258,40 @@ def _emit_drop_indexes(changes: list[Change], before_table_map: dict) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def _emit_drop_views(changes: list[Change], before_schema_map: dict) -> str:
-    """Drop views and triggers for any schema/table that has structural changes."""
-    lines = []
-    affected_schemas: set[str] = set()
-
+def _affected_tables_for_changes(changes: list[Change]) -> dict[str, set[str]]:
+    """Return a mapping of schema_name -> {table_names} that have structural changes."""
+    affected: dict[str, set[str]] = {}
     for c in changes:
-        if c.object_type in (ObjectType.COLUMN, ObjectType.TABLE, ObjectType.SCHEMA):
-            parts = c.path.split(".")
-            if parts:
-                affected_schemas.add(parts[0])
+        parts = c.path.split(".")
+        if c.object_type == ObjectType.COLUMN and len(parts) == 3:
+            schema_name, table_name, _ = parts
+            affected.setdefault(schema_name, set()).add(table_name)
+        elif c.object_type == ObjectType.TABLE and len(parts) == 2:
+            schema_name, table_name = parts
+            affected.setdefault(schema_name, set()).add(table_name)
+        elif c.object_type == ObjectType.SCHEMA and len(parts) == 1:
+            # whole-schema change — we'll handle at schema level
+            affected.setdefault(parts[0], set())
+    return affected
 
-    for schema_name in sorted(affected_schemas):
+
+def _emit_drop_views(changes: list[Change], before_schema_map: dict) -> str:
+    """Drop views and triggers for changed tables only."""
+    lines = []
+    affected = _affected_tables_for_changes(changes)
+
+    for schema_name, changed_tables in sorted(affected.items()):
         schema = cast(SchemaConfig, before_schema_map.get(schema_name))
         if not schema:
             # New schema — nothing to drop
             continue
-        for table in schema.tables:
+
+        tables_to_drop = (
+            schema.tables if not changed_tables
+            else [t for t in schema.tables if t.name in changed_tables]
+        )
+
+        for table in tables_to_drop:
             lines.append(
                 f"DROP TRIGGER IF EXISTS {_q('tr_' + table.name)} "
                 f"ON {_q(schema_name)}.{_q(table.name)};"
@@ -424,37 +454,58 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
 
 
 def _emit_add_views(changes: list[Change], after: GovernanceProject) -> str:
-    """Recreate views for all affected schemas."""
-    from .codegen import _generate_views
-    affected_schemas: set[str] = set()
-    for c in changes:
-        if c.object_type in (ObjectType.COLUMN, ObjectType.TABLE, ObjectType.SCHEMA):
-            parts = c.path.split(".")
-            if parts:
-                affected_schemas.add(parts[0])
+    """Recreate views for changed tables only."""
+    affected = _affected_tables_for_changes(changes)
 
-    if not affected_schemas:
+    if not affected:
         return ""
 
-    filtered = after.model_copy(deep=True)
-    filtered.schemas = [s for s in after.schemas if s.name in affected_schemas]
+    # Build a filtered project containing only the changed tables per schema
+    filtered_schemas = []
+    for schema in after.schemas:
+        changed_tables = affected.get(schema.name)
+        if changed_tables is None:
+            continue
+        if not changed_tables:
+            # whole-schema change
+            filtered_schemas.append(schema)
+        else:
+            import copy
+            s = copy.copy(schema)
+            s = s.model_copy(update={"tables": [t for t in schema.tables if t.name in changed_tables]})
+            if s.tables:
+                filtered_schemas.append(s)
+
+    if not filtered_schemas:
+        return ""
+
+    filtered = after.model_copy(update={"schemas": filtered_schemas})
     return _generate_views(filtered)
 
 
 def _emit_add_triggers(changes: list[Change], after: GovernanceProject) -> str:
-    from .codegen import _generate_triggers
-    affected_schemas: set[str] = set()
-    for c in changes:
-        if c.object_type in (ObjectType.COLUMN, ObjectType.TABLE, ObjectType.SCHEMA):
-            parts = c.path.split(".")
-            if parts:
-                affected_schemas.add(parts[0])
+    """Recreate triggers for changed tables only."""
+    affected = _affected_tables_for_changes(changes)
 
-    if not affected_schemas:
+    if not affected:
         return ""
 
-    filtered = after.model_copy(deep=True)
-    filtered.schemas = [s for s in after.schemas if s.name in affected_schemas]
+    filtered_schemas = []
+    for schema in after.schemas:
+        changed_tables = affected.get(schema.name)
+        if changed_tables is None:
+            continue
+        if not changed_tables:
+            filtered_schemas.append(schema)
+        else:
+            s = schema.model_copy(update={"tables": [t for t in schema.tables if t.name in changed_tables]})
+            if s.tables:
+                filtered_schemas.append(s)
+
+    if not filtered_schemas:
+        return ""
+
+    filtered = after.model_copy(update={"schemas": filtered_schemas})
     return _generate_triggers(filtered)
 
 
@@ -577,7 +628,17 @@ def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: 
                         )
                 lines.append(f"REVOKE USAGE ON SCHEMA {_q(sp.name)} FROM {_q(role_name)};")
 
-    lines.append(_generate_roles(after, before))
+    synthetic_current_roles = list(before.roles)
+    if before.database.audit_enabled:
+        # Mark tarkin_audit as already existing so _generate_roles won't try to CREATE it
+        synthetic_current_roles.append(RoleConfig(
+            name="tarkin_audit",
+            can_login=False,
+            on=[SchemaPermissionConfig(name=before.schemas[0].name)] if before.schemas else [],
+        ))
+    synthetic_current = before.model_copy(update={"roles": synthetic_current_roles})
+
+    lines.append(_generate_roles(after, synthetic_current))
     lines.append(_generate_grants(after))
 
     return "\n".join(lines) + "\n"
@@ -585,9 +646,10 @@ def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: 
 
 def _emit_meta_update(after: GovernanceProject) -> str:
     """Update __META__.tarkin_builds with the new YAML and checksum."""
-    yaml_str  = _escape_sql_string(Serializer.to_yaml_string(after))
+    yaml_str  = Serializer.to_yaml_string(after)
     checksum  = project_checksum(after)
     version   = pkg_version("tarkin")
+    dq_open, dq_close = _safe_dollar_quote(yaml_str)
     return (
         f"INSERT INTO __META__.tarkin_builds "
         f"(tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin) "
@@ -595,7 +657,7 @@ def _emit_meta_update(after: GovernanceProject) -> str:
         f"(SELECT profile FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
         f"(SELECT database_name FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
         f"'{checksum}', "
-        f"$tarkin_yaml${yaml_str}$tarkin_yaml$, "
+        f"{dq_open}{yaml_str}{dq_close}, "
         f"(SELECT pgcrypto_enabled_by_tarkin FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1)"
         f");\n"
     )

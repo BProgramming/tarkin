@@ -195,10 +195,7 @@ class TestErasureValidation:
         )
         schema = SchemaConfig(name="public", tables=[table])
         proj   = GovernanceProject(database=make_database(), schemas=[schema], roles=[make_role()])
-        # Should validate (only a warning, not an error) — currently raises
-        # because we report it as an error. Adjust when severity is changed.
-        # For now just confirm it mentions the column.
-        with pytest.raises(ValidationError, match="score"):
+        with pytest.warns(UserWarning, match="score"):
             SemanticValidator.validate(proj)
 
 

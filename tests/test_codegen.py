@@ -302,7 +302,6 @@ class TestGenerateAudit:
         assert "audit_enabled=false" in sql
 
     def test_is_additive_not_destructive(self) -> None:
-        """The generated SQL must use current_setting() to merge, not overwrite."""
         proj = _make_project()
         proj.database.audit_enabled = True
         proj.database.audit_logged = [AuditLogLevel.DDL]
@@ -476,6 +475,15 @@ class TestGenerateViews:
         assert "hmac(''" in sql
         assert "current_setting('tarkin.hmac_key')" in sql
 
+    def test_current_view_uses_infinity_predicate(self) -> None:
+        versioned_col = ColumnConfig(name="name", type="text", versioned=True)
+        table         = _make_table_with_pk("events", extra_cols=[versioned_col])
+        schema        = SchemaConfig(name="public", tables=[table])
+        proj          = _make_project(schemas=[schema])
+        sql           = _generate_views(proj)
+        assert "__valid_to__ = 'infinity'::timestamptz" in sql
+        assert "__valid_to__ >= now()" not in sql
+
 
 class TestGenerateTriggers:
 
@@ -504,6 +512,25 @@ class TestGenerateTriggers:
         proj = _make_project(schemas=[SchemaConfig(name="public", tables=[_make_table_with_pk()])])
         sql  = _generate_triggers(proj)
         assert "TG_OP = 'DELETE'" in sql
+
+    def test_delete_trigger_uses_old_pk(self) -> None:
+        proj = _make_project(schemas=[SchemaConfig(name="public", tables=[_make_table_with_pk()])])
+        sql  = _generate_triggers(proj)
+        delete_idx = sql.index("TG_OP = 'DELETE'")
+        delete_section = sql[delete_idx:]
+        assert 'OLD."id"' in delete_section
+        assert 'WHERE "id" = OLD."id"' in delete_section
+
+    def test_versioned_delete_trigger_uses_old_pk(self) -> None:
+        """Issue 13: versioned DELETE (UPDATE __valid_to__) must also use OLD.pk."""
+        versioned_col = ColumnConfig(name="value", type="text", versioned=True)
+        table  = _make_table_with_pk("events", extra_cols=[versioned_col])
+        schema = SchemaConfig(name="public", tables=[table])
+        proj   = _make_project(schemas=[schema])
+        sql    = _generate_triggers(proj)
+        delete_idx = sql.index("TG_OP = 'DELETE'")
+        delete_section = sql[delete_idx:]
+        assert 'OLD."id"' in delete_section
 
     def test_versioned_table_uses_valid_to_pattern(self) -> None:
         versioned_col = ColumnConfig(name="value", type="text", versioned=True)
@@ -703,6 +730,14 @@ class TestGenerateGrantsMaintain:
         assert "160000" in sql
         assert "MAINTAIN" in sql
 
+    def test_maintain_grant_quotes_schema_and_table(self) -> None:
+        role = _make_full_role("maintainer", maintain=True)
+        role.can_maintain = True
+        proj = _make_project(roles=[role])
+        proj.database.version = "16"
+        sql  = _generate_grants(proj)
+        assert 'GRANT MAINTAIN ON "public"."users"' in sql
+
     def test_maintain_skipped_when_can_maintain_false(self) -> None:
         role = _make_full_role("reader", maintain=True)
         role.can_maintain = False
@@ -721,3 +756,11 @@ class TestGenerateGrantsMaintain:
         with pytest.warns(UserWarning, match="MAINTAIN"):
             sql = _generate_grants(proj)
         assert "server_version_num" not in sql
+
+    def test_version_string_with_patch_does_not_crash(self) -> None:
+        role = _make_full_role("maintainer", maintain=True)
+        role.can_maintain = True
+        proj = _make_project(roles=[role])
+        proj.database.version = "16.2"
+        sql = _generate_grants(proj)
+        assert "MAINTAIN" in sql

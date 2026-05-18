@@ -134,11 +134,13 @@ class SemanticValidator:
                             if col.is_subject_identifier:
                                 continue
                             if not col.nullable and not _is_text_compatible(col.type):
-                                errors.append(
+                                warnings.warn(
                                     f"Column '{schema.name}.{table.name}.{col.name}' is non-nullable "
                                     f"and non-text-compatible (type '{col.type}'). OBFUSCATE on this "
                                     f"column will fall back to the '[ERASED]' sentinel. "
-                                    f"Consider using NULLIFY or ensuring the column is nullable."
+                                    f"Consider using NULLIFY or ensuring the column is nullable.",
+                                    UserWarning,
+                                    stacklevel=3,
                                 )
 
         for schema in project.schemas:
@@ -165,7 +167,7 @@ class SemanticValidator:
         db_version = 0
         if project.database.version:
             try:
-                db_version = int(project.database.version.split(".")[0])
+                db_version = int(project.database.version.split(".")[0].split()[0])
             except (ValueError, IndexError):
                 pass
 
