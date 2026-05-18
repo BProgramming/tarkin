@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 import pytest
 from pathlib import Path
-
 from pydantic import SecretStr
+from sqlalchemy import text
 
 from tarkin.attach import attach, AttachError
 from tarkin.build import build, BuildError
@@ -207,3 +207,126 @@ class TestAttachDetach:
         # Now try to detach again — should fail cleanly
         with pytest.raises(DetachError):
             detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+
+
+class TestPgauditSnapshot:
+
+    @requires_db
+    def test_pre_attach_pgaudit_settings_restored_on_detach(
+        self, live_project: GovernanceProject, tmp_path: Path
+    ) -> None:
+        """Ensure that pgaudit.log survives an attach/detach cycle."""
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = prof.engine()
+        try:
+            # Establish a known pre-attach pgaudit.log value.
+            with engine.connect() as conn:
+                conn.execute(text(
+                    f'ALTER DATABASE "{prof.database}" SET pgaudit.log = \'ddl\''
+                ))
+                conn.commit()
+
+            proj = inspect_database(prof)
+            proj.database.profile       = prof.profile
+            proj.database.audit_enabled = True
+
+            try:
+                zip_path = build(proj, prof, out_dir=tmp_path)
+                attach(prof, build_path=zip_path)
+            except (BuildError, AttachError) as exc:
+                pytest.skip(f"Could not attach for pgaudit test: {exc}")
+
+            # The build row must have captured the pre-attach value, not NULL.
+            with engine.connect() as conn:
+                snapshot = conn.execute(text(
+                    "SELECT pgaudit_log_before FROM __META__.tarkin_builds "
+                    "ORDER BY built_at DESC LIMIT 1"
+                )).fetchone()
+            assert snapshot is not None
+            assert snapshot[0] == "ddl", (
+                f"Expected pgaudit_log_before='ddl', got {snapshot[0]!r}. "
+                f"The audit snapshot was not captured before the AUDIT section ran."
+            )
+
+            detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+
+            # Simplest reliable check: reconnect and read the effective setting.
+            with engine.connect() as conn:
+                effective = conn.execute(
+                    text("SELECT current_setting('pgaudit.log', true)")
+                ).scalar()
+            assert effective == "ddl", (
+                f"Expected pgaudit.log restored to 'ddl', got {effective!r}. "
+                f"Detach did not restore the pre-attach pgaudit configuration."
+            )
+        finally:
+            # Clean up the GUC we set so the test is repeatable.
+            with engine.connect() as conn:
+                conn.execute(text(
+                    f'ALTER DATABASE "{prof.database}" RESET pgaudit.log'
+                ))
+                conn.commit()
+            engine.dispose()
+
+
+class TestColumnGrantRoundtrip:
+
+    @requires_db
+    def test_pre_attach_column_grant_restored_on_detach(
+        self, live_project: GovernanceProject, tmp_path: Path
+    ) -> None:
+        """Bug #2: a hand-issued column-level grant must survive attach/detach.
+
+        REVOKE ALL during attach strips column-level privileges. Detach can only
+        restore them if inspect.py captured them via role_column_grants and they
+        were recorded in __META__.tarkin_revoked_grants.
+        """
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = prof.engine()
+        try:
+            # Grant a column-level privilege by hand, before any Tarkin run.
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "GRANT SELECT (name) ON public.test_table TO tarkin_role"
+                ))
+                conn.commit()
+
+            proj = inspect_database(prof)
+            proj.database.profile = prof.profile
+
+            try:
+                zip_path = build(proj, prof, out_dir=tmp_path)
+                attach(prof, build_path=zip_path)
+            except (BuildError, AttachError) as exc:
+                pytest.skip(f"Could not attach for column-grant test: {exc}")
+
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError as exc:
+                pytest.fail(f"Detach failed: {exc}")
+
+            # After detach, tarkin_role must once again hold SELECT (name).
+            with engine.connect() as conn:
+                grant = conn.execute(text(
+                    "SELECT 1 FROM information_schema.role_column_grants "
+                    "WHERE grantee = 'tarkin_role' "
+                    "  AND table_schema = 'public' "
+                    "  AND table_name = 'test_table' "
+                    "  AND column_name = 'name' "
+                    "  AND privilege_type = 'SELECT'"
+                )).fetchone()
+            assert grant is not None, (
+                "Pre-attach column grant SELECT (name) on public.test_table "
+                "was not restored on detach."
+            )
+        finally:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "REVOKE SELECT (name) ON public.test_table FROM tarkin_role"
+                ))
+                conn.commit()
+            engine.dispose()
