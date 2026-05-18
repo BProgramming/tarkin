@@ -1,5 +1,7 @@
 """Serializes a GovernanceProject to YAML."""
 from __future__ import annotations
+
+import hashlib
 from enum import Enum
 from io import StringIO
 from ruamel.yaml import YAML
@@ -307,3 +309,8 @@ class Serializer:
         if role.on:
             m["on"]               = CommentedSeq([cls._serialize_schema_permission(o) for o in role.on])
         return m
+
+
+def project_checksum(project: GovernanceProject) -> str:
+    """Return a SHA-256 hex digest of the project's serialized YAML."""
+    return hashlib.sha256(Serializer.to_yaml_string(project).encode()).hexdigest()

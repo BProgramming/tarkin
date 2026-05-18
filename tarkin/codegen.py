@@ -27,9 +27,8 @@ from .model import (
     SchemaConfig,
     TableConfig,
 )
-from .serialize import Serializer
+from .serialize import Serializer, project_checksum
 from .utils import (
-    project_checksum,
     sql_comment_block_section,
     sql_safe_dollar_quote,
     sql_safe_double_quote,

@@ -1,14 +1,9 @@
 from __future__ import annotations
-import hashlib
 import json
 import re
 import zipfile
 from pathlib import Path
 from sqlalchemy import Connection, text
-
-from .credentials import ConnectionProfile
-from .model import GovernanceProject
-from .serialize import Serializer
 
 OUT_DIR = Path("out")
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".tarkin" / "credentials.toml"
@@ -17,23 +12,6 @@ DEFAULT_CREDENTIALS_PATH = Path.home() / ".tarkin" / "credentials.toml"
 def build_output_directory(out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
-
-
-def check_pgcron_available(profile: ConnectionProfile) -> bool:
-    """Return True if pg_cron is installed and preloaded on the live database."""
-    engine = profile.engine()
-    try:
-        with engine.connect() as conn:
-            result = sql_select_single_scalar(conn, """
-                SELECT COUNT(*) > 0
-                FROM pg_extension e, pg_settings s
-                WHERE e.extname = 'pg_cron'
-                  AND s.name = 'shared_preload_libraries'
-                  AND s.setting LIKE '%pg_cron%'
-            """)
-            return bool(result)
-    finally:
-        engine.dispose()
 
 
 def pg_version(version: str) -> str:
@@ -48,11 +26,6 @@ def pg_version(version: str) -> str:
             return parts[1]
         else:
             return version
-
-
-def project_checksum(project: GovernanceProject) -> str:
-    """Return a SHA-256 hex digest of the project's serialized YAML."""
-    return hashlib.sha256(Serializer.to_yaml_string(project).encode()).hexdigest()
 
 
 def sql_comment_block_section(title: str, subtitle: str = "") -> str:

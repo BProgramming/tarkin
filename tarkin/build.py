@@ -5,16 +5,15 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from .codegen import generate_sql
-from .credentials import ConnectionProfile
+from .credentials import ConnectionProfile, check_pgcron_available
 from .inspect import inspect_database
 from .model import GovernanceProject
 from .utils import (
     OUT_DIR,
     build_output_directory,
-    check_pgcron_available,
-    project_checksum,
     write_artifact,
 )
+from .serialize import project_checksum
 
 
 def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path | None = None) -> Path:

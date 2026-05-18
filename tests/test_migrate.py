@@ -30,7 +30,7 @@ from tarkin.migrate import (
 )
 from tarkin.diff import diff_projects, Change, ChangeKind, ObjectType
 from tarkin.build import _build_metadata
-from tarkin.utils import project_checksum
+from tarkin.serialize import project_checksum
 from .fixtures import make_database, make_role
 
 

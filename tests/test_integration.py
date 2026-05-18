@@ -313,10 +313,10 @@ class TestColumnGrantRoundtrip:
             with engine.connect() as conn:
                 grant = conn.execute(text(
                     "SELECT 1 FROM information_schema.role_column_grants "
-                    "WHERE grantee = 'tarkin_role' "
-                    "  AND table_schema = 'public' "
-                    "  AND table_name = 'test_table' "
-                    "  AND column_name = 'name' "
+                    "WHERE grantee        = 'tarkin_role' "
+                    "  AND table_schema   = 'public' "
+                    "  AND table_name     = 'test_table' "
+                    "  AND column_name    = 'name' "
                     "  AND privilege_type = 'SELECT'"
                 )).fetchone()
             assert grant is not None, (

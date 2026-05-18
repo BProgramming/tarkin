@@ -9,7 +9,7 @@ from typing import Optional
 
 from .utils import (
     DEFAULT_CREDENTIALS_PATH,
-    pg_version,
+    pg_version, sql_select_single_scalar,
 )
 
 
@@ -157,3 +157,20 @@ def _clean_error(msg: str) -> str:
         msg = str(msg.replace(prefix, "")).strip()
     first_line = msg.splitlines()[0].strip() if msg.splitlines() else msg
     return first_line.lstrip("()")
+
+
+def check_pgcron_available(profile: ConnectionProfile) -> bool:
+    """Return True if pg_cron is installed and preloaded on the live database."""
+    engine = profile.engine()
+    try:
+        with engine.connect() as conn:
+            result = sql_select_single_scalar(conn, """
+                SELECT COUNT(*) > 0
+                FROM pg_extension e, pg_settings s
+                WHERE e.extname = 'pg_cron'
+                  AND s.name = 'shared_preload_libraries'
+                  AND s.setting LIKE '%pg_cron%'
+            """)
+            return bool(result)
+    finally:
+        engine.dispose()

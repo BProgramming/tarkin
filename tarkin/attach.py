@@ -9,8 +9,8 @@ from .credentials import ConnectionProfile
 from .inspect import inspect_database
 from .utils import (
     OUT_DIR,
-    project_checksum,
 )
+from .serialize import project_checksum
 
 
 def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:

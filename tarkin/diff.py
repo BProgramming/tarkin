@@ -54,15 +54,15 @@ def diff_projects(before: GovernanceProject,after:  GovernanceProject) -> list[C
     return changes
 
 
-def render_diff(changes: list[Change], output_path: Path) -> None:
+def render_diff(changes: list[Change], output: Path) -> None:
     """Write a human-readable Markdown diff report to *output_path*."""
-    build_output_directory(output_path)
+    build_output_directory(output.parent)
 
     lines: list[str] = ["# Tarkin Diff Report\n"]
 
     if not changes:
         lines.append("No changes detected between the two governance specifications.\n")
-        output_path.write_text("\n".join(lines), encoding="utf-8")
+        output.write_text("\n".join(lines), encoding="utf-8")
         return
 
     by_type: dict[ObjectType, list[Change]] = {}
@@ -110,7 +110,7 @@ def render_diff(changes: list[Change], output_path: Path) -> None:
                 f"| {before_str} | {after_str} | {note_str} |"
             )
 
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _fmt(value: Any) -> str:
