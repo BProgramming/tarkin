@@ -221,12 +221,15 @@ class TestPgauditSnapshot:
 
         engine = prof.engine()
         try:
-            # Establish a known pre-attach pgaudit.log value.
-            with engine.connect() as conn:
-                conn.execute(text(
-                    f'ALTER DATABASE "{prof.database}" SET pgaudit.log = \'ddl\''
-                ))
-                conn.commit()
+            setup_engine = prof.engine()
+            try:
+                with setup_engine.connect() as conn:
+                    conn.execute(text(
+                        f'ALTER DATABASE "{prof.database}" SET pgaudit.log = \'ddl\''
+                    ))
+                    conn.commit()
+            finally:
+                setup_engine.dispose()
 
             proj = inspect_database(prof)
             proj.database.profile       = prof.profile
@@ -244,6 +247,7 @@ class TestPgauditSnapshot:
                     "SELECT pgaudit_log_before FROM __META__.tarkin_builds "
                     "ORDER BY built_at DESC LIMIT 1"
                 )).fetchone()
+
             assert snapshot is not None
             assert snapshot[0] == "ddl", (
                 f"Expected pgaudit_log_before='ddl', got {snapshot[0]!r}. "
@@ -253,14 +257,18 @@ class TestPgauditSnapshot:
             detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
             # Simplest reliable check: reconnect and read the effective setting.
-            with engine.connect() as conn:
-                effective = conn.execute(
-                    text("SELECT current_setting('pgaudit.log', true)")
-                ).scalar()
-            assert effective == "ddl", (
-                f"Expected pgaudit.log restored to 'ddl', got {effective!r}. "
-                f"Detach did not restore the pre-attach pgaudit configuration."
-            )
+            verify_engine = prof.engine()
+            try:
+                with verify_engine.connect() as conn:
+                    effective = conn.execute(
+                        text("SELECT current_setting('pgaudit.log', true)")
+                    ).scalar()
+                assert effective == "ddl", (
+                    f"Expected pgaudit.log restored to 'ddl', got {effective!r}. "
+                    f"Detach did not restore the pre-attach pgaudit configuration."
+                )
+            finally:
+                verify_engine.dispose()
         finally:
             # Clean up the GUC we set so the test is repeatable.
             with engine.connect() as conn:
