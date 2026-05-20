@@ -16,9 +16,17 @@ from .utils import (
 from .serialize import project_checksum
 
 
-def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path | None = None) -> Path:
-    """Run a full Tarkin build against a live database."""
-    out = build_output_directory(out_dir or OUT_DIR)
+def build(
+    project: GovernanceProject,
+    profile: ConnectionProfile,
+    output_directory: Path | None = None,
+) -> Path:
+    """Run a full Tarkin build against a live database.
+
+    *output_directory* is the directory the build artifact zip is written to
+    (defaults to ``out/``). It is always treated as a directory.
+    """
+    out = build_output_directory(output_directory or OUT_DIR)
 
     print("Inspecting current database state...", end="\r")
     try:
@@ -29,6 +37,7 @@ def build(project: GovernanceProject, profile: ConnectionProfile, out_dir: Path 
 
     print("Checking requirements...", end="\r")
     _check_no_existing_build(current)
+    _check_owner_defined(project)
     _check_pgaudit_requirements(project, current)
     _check_pgcron_requirements(project, profile)
     print("Checking requirements... Done.")
@@ -60,6 +69,17 @@ def _check_no_existing_build(current: GovernanceProject) -> None:
         raise BuildError(
             "Tarkin uses the 'tarkin_audit' role to handle pgaudit operations, but a role with that name already exists. "
             "Please rename the existing role and try again."
+        )
+
+
+def _check_owner_defined(project: GovernanceProject) -> None:
+    """Fail if no database owner is set."""
+    if not project.database.owner:
+        raise BuildError(
+            "database.owner is not set. Tarkin revokes all shadow-schema access "
+            "from PUBLIC and re-grants it only to the database owner, so a named "
+            "owner role is required. Set 'owner' in the governance YAML "
+            "(it is captured automatically by 'tarkin inspect')."
         )
 
 

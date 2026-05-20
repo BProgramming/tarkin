@@ -12,13 +12,13 @@ The result:
 - Limited documentation (or a ton of work to write it all)
 Or, you take an off-the-shelf solution that's a complete black-box.
 
-But it's rocket-science, just a lot of work. I made this to help. And also so that I don't have to write out column GRANTs ever again.
+But it's not rocket science, just a lot of work. I made this to help. And also so that I don't have to write out column GRANTs ever again.
 
 ## How it works
 
 By design, Tarkin is an open book: open source, fully accessible code, fully human-readable output. The point of data governance is to keep things secure, so having any aspect of the process live in a black-box is counterintuitive.
 
-Tarkin is run through a Command Line Interface (CLI) tool built in Python with Typer. Some commands generate YAMLs for you to view and modify, or SQL scripts for you to validate, and others apply those scripts once you've decided they're ready. Nothing happens without your direct approval. And don't just take my word for it — check the GitHub repo [https://github.com/BProgramming/tarkin] yourself.
+Tarkin is run through a Command Line Interface (CLI) tool built in Python with Typer. Some commands generate YAMLs for you to view and modify, or SQL scripts for you to validate, and others apply those scripts once you've decided they're ready. Nothing happens without your direct approval. And don't just take my word for it — check [the GitHub repo](https://github.com/BProgramming/tarkin) yourself.
 
 ## Installation
 
@@ -26,7 +26,7 @@ Tarkin is run through a Command Line Interface (CLI) tool built in Python with T
 pip install tarkin
 ```
 
-Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security (RLS), or PostgreSQL 16+ for MAINTAIN priviledges.
+Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security (RLS), or PostgreSQL 16+ for MAINTAIN privileges.
 
 ## Quick start
 
@@ -69,6 +69,8 @@ password = "secret"
 
 When a column has `versioned: true`, Tarkin adds `__valid_from__` and `__valid_to__` columns to the shadow table to maintain a full history of changes. These columns are intentionally **not exposed through the public-facing view** — the view layer presents only the declared columns. The `_current` view variant (e.g. `users_current`) is created automatically and filters to live records (`__valid_to__ = 'infinity'`).
 
+Because a versioned table keeps historical rows that reuse the same key values, its original single-row primary key is replaced with a partial unique index covering only the live row (`__valid_to__ = 'infinity'`). As a consequence, **a versioned table cannot be the target of a foreign key**; `tarkin validate` rejects any configuration that does this.
+
 On `tarkin detach`:
 - With `--keep-versioning`: the `__valid_from__` and `__valid_to__` columns are retained in the restored table, along with all historical records. This is the safe default when history is valuable.
 - With `--drop-versioning`: only current records (`__valid_to__ = 'infinity'`) are retained and the versioning columns are dropped. **This operation is destructive and irreversible.**
@@ -110,4 +112,3 @@ See [REFERENCE.md](REFERENCE.md) for an overview of all available CLI commands.
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
-

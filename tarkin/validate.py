@@ -53,6 +53,7 @@ class SemanticValidator:
             cls._validate_tables(project),
             cls._validate_columns(project),
             cls._validate_cross_references(project),
+            cls._validate_versioned_fk_targets(project),
             cls._validate_clearance_rules(project),
             cls._validate_roles(project),
         ]
@@ -96,7 +97,7 @@ class SemanticValidator:
     def _validate_erasure_config(cls, project: GovernanceProject) -> str | None:
         """Validate erasure configuration is internally consistent."""
         errors: list[str] = []
-        identifier_tables: set[tuple[str, str]] = set()
+        identifier_tables: dict[tuple[str, str], str] = {}
 
         for schema in project.schemas:
             for table in schema.tables:
@@ -117,7 +118,7 @@ class SemanticValidator:
                     )
 
                 if has_identifier and has_strategy:
-                    identifier_tables.add((schema.name, table.name))
+                    identifier_tables[(schema.name, table.name)] = str(table.erase_strategy)
                     if table.erase_strategy == ErasureStrategy.OBFUSCATE:
                         for col in table.columns:
                             if col.is_subject_identifier:
@@ -139,9 +140,46 @@ class SemanticValidator:
                     if target in identifier_tables and table.erase_strategy is None:
                         errors.append(
                             f"Table '{schema.name}.{table.name}' has a foreign key "
-                            f"'{fk.name}' referencing '{fk.referenced_schema}.{fk.referenced_table}' "
-                            f"which is a subject-identified table with DELETE strategy. "
-                            f"Assign an erase_strategy to '{schema.name}.{table.name}'."
+                            f"'{fk.name}' referencing '{fk.referenced_schema}.{fk.referenced_table}', "
+                            f"a subject-identified table with erase strategy "
+                            f"'{identifier_tables[target]}'. Assign an erase_strategy to "
+                            f"'{schema.name}.{table.name}'."
+                        )
+
+        return "\n".join(errors) if errors else None
+
+    @classmethod
+    def _validate_versioned_fk_targets(cls, project: GovernanceProject) -> str | None:
+        """Validate that a versioned table is not the target of a foreign key.
+
+        Versioning replaces the table's single-row primary key with a partial
+        unique index that only covers the live row (__valid_to__ = 'infinity').
+        Historical rows reuse the same key values, so the bare key column(s) are
+        no longer uniquely constrained and there is nothing for a foreign key to
+        reference. A config that does this cannot produce working SQL, so it is
+        rejected here rather than failing at attach time.
+        """
+        errors: list[str] = []
+        versioned_tables: set[tuple[str, str]] = {
+            (s.name, t.name)
+            for s in project.schemas
+            for t in s.tables
+            if any(c.versioned for c in t.columns)
+        }
+        if not versioned_tables:
+            return None
+
+        for schema in project.schemas:
+            for table in schema.tables:
+                for fk in table.foreign_keys:
+                    target = (fk.referenced_schema, fk.referenced_table)
+                    if target in versioned_tables:
+                        errors.append(
+                            f"Foreign key '{fk.name}' in {schema.name}.{table.name} "
+                            f"references '{fk.referenced_schema}.{fk.referenced_table}', "
+                            f"which is a versioned table. A versioned table cannot be the "
+                            f"target of a foreign key: versioning removes its single primary "
+                            f"key in favour of a partial unique index over live rows only."
                         )
 
         return "\n".join(errors) if errors else None

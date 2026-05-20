@@ -8,16 +8,20 @@ If you discover a security vulnerability in Tarkin, please report it via GitHub 
 
 All Tarkin releases are published to PyPI via GitHub Actions using OIDC trusted publishing — no long-lived API tokens are involved. Each release is built from a tagged commit with `SOURCE_DATE_EPOCH` set for reproducible builds.
 
-A Software Bill of Materials (SBOM) in CycloneDX format is attached to each GitHub release and generated from `uv.lock` to reflect the exact dependency tree at build time.
+Two assets are attached to every GitHub release:
 
-To verify a release:
+- `SHA256SUMS.txt` — SHA-256 checksums of each built wheel and sdist.
+- `sbom.json` — a Software Bill of Materials in CycloneDX format, generated from `uv.lock` to reflect the exact dependency tree at build time.
+
+To verify a downloaded release:
 
 ```bash
 pip download tarkin==<version> --no-deps -d /tmp/tarkin-dist
-sha256sum /tmp/tarkin-dist/tarkin-<version>*.whl
+cd /tmp/tarkin-dist
+sha256sum tarkin-<version>*
 ```
 
-Compare against the checksums in the GitHub release notes.
+Compare the output against the matching lines in `SHA256SUMS.txt` attached to the corresponding GitHub release. (`SHA256SUMS.txt` records paths relative to the build's `dist/` directory, so the file names will match the downloaded artifacts.)
 
 ### Audit Trail and Tamper Evidence
 
@@ -39,7 +43,11 @@ The YAML itself should be treated as sensitive configuration. It contains cleara
 
 ### Shadow Schema Model
 
-During `tarkin attach`, existing schemas are renamed to `tk_<schema>` (shadow schemas). The public-facing schemas are recreated with views and triggers that implement the governance model. The shadow schemas hold the actual data and are inaccessible to non-owner roles.
+During `tarkin attach`, existing schemas are renamed to `tk_<schema>` (shadow schemas). The public-facing schemas are recreated with views and triggers that implement the governance model. The shadow schemas hold the actual data.
+
+To keep the shadow data reachable only through the governed view layer, Tarkin revokes **all** privileges on each shadow schema and its tables from `PUBLIC`, then re-grants full access only to the database owner (`database.owner` in the YAML — this is why a build fails if no owner is set). Every role declared in the YAML is also explicitly revoked from the shadow schemas.
+
+**Important caveat.** This protects against access inherited via `PUBLIC`. It does **not** retroactively remove a *direct, role-specific* grant on the underlying tables that was issued outside Tarkin to a role that is **not** declared in the governance YAML — Tarkin only revokes from roles it knows about. For the shadow-schema boundary to be complete, the governance YAML must enumerate every role that holds access to the governed schemas. After attach, audit `tk_<schema>` grants (e.g. via `\dp tk_<schema>.*`) to confirm no unexpected role retains direct access.
 
 On `tarkin detach`, the process is reversed: views and triggers are dropped, shadow schemas are renamed back to their original names, and all previously revoked grants are restored. The goal of detach is to return the database to exactly the state it was in before attach.
 
@@ -88,4 +96,4 @@ When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgau
 ## Known Limitations
 
 - The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.
-
+- The shadow-schema boundary depends on the governance YAML enumerating every role with access to the governed schemas (see *Shadow Schema Model* above).

@@ -10,8 +10,25 @@ DEFAULT_CREDENTIALS_PATH = Path.home() / ".tarkin" / "credentials.toml"
 
 
 def build_output_directory(out_dir: Path) -> Path:
+    """Create *out_dir* (and parents) if it does not exist and return it.
+
+    Note: this always treats its argument as a *directory*. Callers that hold a
+    file path must pass ``path.parent`` — see the `output_file` / `output_directory`
+    parameter naming used throughout the codebase.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
+
+
+def find_latest_artifact(out_dir: Path = OUT_DIR) -> Path | None:
+    """Return the most recently created build/migrate artifact in *out_dir*, or None."""
+    if not out_dir.exists():
+        return None
+    artifacts = sorted(
+        list(out_dir.glob("tarkin_build_*.zip")) + list(out_dir.glob("tarkin_migrate_*.zip")),
+        key=lambda p: p.name,
+    )
+    return artifacts[-1] if artifacts else None
 
 
 def pg_version(version: str) -> str:

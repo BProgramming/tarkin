@@ -135,6 +135,8 @@ class YamlLoader:
     def _parse_database(cls, d: dict) -> DatabaseConfig:
         """Parse the database configuration block."""
         raw_logged = d.get("audit_logged", ["ddl", "write"])
+        # version default mirrors DatabaseConfig.version ("14") so a hand-written
+        # YAML that omits it does not silently parse as version 0.
         return DatabaseConfig(
             name               = d.get("name", "default_database"),
             description        = d.get("description"),
@@ -143,7 +145,7 @@ class YamlLoader:
             host               = d.get("host", "localhost"),
             port               = d.get("port", 5432),
             database           = d.get("database", "postgres"),
-            version            = d.get("version", ""),
+            version            = d.get("version", "14"),
             engine             = DatabaseEngine(d.get("engine", "postgres")),
             profile            = d.get("profile"),
             owner              = d.get("owner"),
@@ -185,7 +187,7 @@ class YamlLoader:
             name                 = d.get("name", "default_table"),
             description          = d.get("description"),
             clearance            = d.get("clearance", 0),
-            audit_enabled        = d.get("audit_enabled", True),
+            audit_enabled        = d.get("audit_enabled", False),
             erase_strategy       = ErasureStrategy(raw_erase) if raw_erase else None,
             rls_enabled          = d.get("rls_enabled", False),
             rls_force            = d.get("rls_force", False),

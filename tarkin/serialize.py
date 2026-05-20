@@ -187,6 +187,7 @@ class Serializer:
             m["description"]          = col.description
         m["type"]                     = col.type
         m["clearance"]                = col.clearance
+        m["audit_enabled"]            = col.audit_enabled
         m["nullable"]                 = col.nullable
         m["unique"]                   = col.unique
         m["immutable"]                = col.immutable

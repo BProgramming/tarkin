@@ -431,8 +431,11 @@ def _generate_schema_objects(project: GovernanceProject, current: GovernanceProj
 
 def _generate_versioning_columns(project: GovernanceProject, current: GovernanceProject) -> str:
     """Generate ALTER TABLE statements to add versioning columns to shadow tables."""
-    lines = []
-    current_col_map = {(s.name, t.name): {c.name for c in t.columns} for s in current.schemas for t in s.tables}
+    lines: list[str] = []
+    current_col_map = {
+        (s.name, t.name): {c.name for c in t.columns}
+        for s in current.schemas for t in s.tables
+    }
 
     for schema in project.schemas:
         shadow = f"tk_{schema.name}"
@@ -460,9 +463,39 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
                     f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
                     f"ADD COLUMN __valid_to__ timestamptz NOT NULL DEFAULT 'infinity'::timestamptz;"
                 )
+
+            shadow_lit = sql_safe_escape_string(shadow)
+            table_lit  = sql_safe_escape_string(table.name)
+            lines.extend([
+                "DO $$",
+                "DECLARE _pk_name text;",
+                "BEGIN",
+                "    SELECT conname INTO _pk_name FROM pg_constraint",
+                f"    WHERE conrelid = '{shadow}.{table.name}'::regclass AND contype = 'p';",
+                "    IF _pk_name IS NOT NULL THEN",
+                "        EXECUTE format('ALTER TABLE %I.%I DROP CONSTRAINT %I',",
+                f"                       '{shadow_lit}', '{table_lit}', _pk_name);",
+                "    END IF;",
+                "END;",
+                "$$ LANGUAGE plpgsql;",
+            ])
+
+            pk_cols: list[str] = []
+            for idx in table.indexes:
+                if idx.primary_key:
+                    pk_cols = list(idx.columns)
+                    break
+            if not pk_cols:
+                raise ValueError(
+                    f"Versioned table {schema.name}.{table.name} has no primary key. "
+                    f"This should have been caught during validation and is a Tarkin bug. Please file a bug report."
+                )
+
+            cols_sql = ", ".join(sql_safe_double_quote(c) for c in pk_cols)
+            idx_name = sql_safe_double_quote(f"idx_{table.name}_current")
             lines.append(
-                f"CREATE INDEX {sql_safe_double_quote('idx_' + table.name + '_current')} "
-                f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} (__valid_to__) "
+                f"CREATE UNIQUE INDEX {idx_name}"
+                f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} ({cols_sql}) "
                 f"WHERE __valid_to__ = 'infinity'::timestamptz;"
             )
             lines.append("")
@@ -848,85 +881,108 @@ def _generate_triggers(project: GovernanceProject) -> str:
 
 
 def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
-    """Generate the PL/pgSQL trigger function body for a table."""
-    writable_cols = [c.name for c in table.columns if not c.is_generated]
+    """Emit the INSTEAD OF trigger function for *table*'s public-facing view.
 
-    insert_cols = ", ".join(sql_safe_double_quote(c) for c in writable_cols)
-    insert_vals = ", ".join(f"NEW.{sql_safe_double_quote(c)}" for c in writable_cols)
+    Insert path uses a "fill defaults at NULL" pattern: each writable column
+    whose ColumnConfig.default is set gets an `IF NEW.col IS NULL THEN
+    NEW.col := <default_expr>; END IF;` before the static INSERT. This honours
+    table-level defaults (serial PKs, now() timestamps, etc.) that an INSTEAD
+    OF trigger would otherwise silently NULL-out. Trade-off: users cannot
+    explicitly insert NULL into a defaulted column via the view.
 
-    immutable_checks = _generate_immutable_checks(table) if any(c.immutable for c in table.columns) else ""
-    sensitive_stubs  = _generate_sensitive_stubs(table) if any(
-        c.sensitive or c.masking_strategy != MaskingStrategy.NONE
-        for c in table.columns
-    ) else ""
+    For versioned tables the same fill block runs, and the INSERT additionally
+    sets __valid_from__ = now() and __valid_to__ = 'infinity'.
+    """
+    quote = sql_safe_double_quote
 
-    fn_name     = sql_safe_double_quote("tr_" + table.name)
-    tbl_ref     = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
-    pk_filt     = _pk_filter(table, row="NEW")
-    pk_filt_old = _pk_filter(table, row="OLD")
+    writable      = [c for c in table.columns if not c.is_generated]
+    writable_cols = [c.name for c in writable]
 
-    if any(c.versioned for c in table.columns):
-        v_insert_cols = insert_cols + ", __valid_from__, __valid_to__"
-        v_insert_vals = insert_vals + ", now(), 'infinity'::timestamptz"
+    if not writable_cols:
+        raise ValueError(
+            f"Table {table.name} has no writable columns; cannot generate trigger."
+        )
 
-        return f"""
-CREATE OR REPLACE FUNCTION {sql_safe_double_quote(shadow)}.{fn_name}()
+    # Fill-default block: one IF per defaulted column. Inlined default
+    # expression comes straight from ColumnConfig.default (captured by inspect;
+    # nextval/now()/literals are all valid PL/pgSQL expressions).
+    fill_lines: list[str] = []
+    for col in writable:
+        if col.default is not None:
+            fill_lines.append(
+                f"        IF NEW.{quote(col.name)} IS NULL THEN "
+                f"NEW.{quote(col.name)} := {col.default}; END IF;"
+            )
+    fill_block = "\n".join(fill_lines) + ("\n" if fill_lines else "")
+
+    immutable_block = _generate_immutable_checks(table) \
+        if any(c.immutable for c in table.columns) else ""
+
+    insert_cols = ", ".join(quote(c) for c in writable_cols)
+    insert_vals = ", ".join(f"NEW.{quote(c)}" for c in writable_cols)
+
+    fn_ref  = f"{quote(shadow)}.{quote('tr_' + table.name)}"
+    tbl_ref = f"{quote(shadow)}.{quote(table.name)}"
+    pk_new  = _pk_filter(table, row="NEW")
+    pk_old  = _pk_filter(table, row="OLD")
+
+    is_versioned = any(c.versioned for c in table.columns)
+
+    if is_versioned:
+        v_cols = insert_cols + ', "__valid_from__", "__valid_to__"'
+        v_vals = insert_vals + ", now(), 'infinity'::timestamptz"
+        body = f"""\
+CREATE OR REPLACE FUNCTION {fn_ref}()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-{sensitive_stubs}
-        INSERT INTO {tbl_ref} ({v_insert_cols})
-        VALUES ({v_insert_vals});
+{fill_block}        INSERT INTO {tbl_ref} ({v_cols})
+        VALUES ({v_vals});
         RETURN NEW;
 
     ELSIF TG_OP = 'UPDATE' THEN
-{immutable_checks}{sensitive_stubs}
-        UPDATE {tbl_ref}
-        SET __valid_to__ = now()
-        WHERE {pk_filt} AND __valid_to__ = 'infinity'::timestamptz;
+{immutable_block}        UPDATE {tbl_ref}
+        SET "__valid_to__" = now()
+        WHERE {pk_new} AND "__valid_to__" = 'infinity'::timestamptz;
 
-        INSERT INTO {tbl_ref} ({v_insert_cols})
-        VALUES ({v_insert_vals});
+{fill_block}        INSERT INTO {tbl_ref} ({v_cols})
+        VALUES ({v_vals});
         RETURN NEW;
 
     ELSIF TG_OP = 'DELETE' THEN
         UPDATE {tbl_ref}
-        SET __valid_to__ = now()
-        WHERE {pk_filt_old} AND __valid_to__ = 'infinity'::timestamptz;
+        SET "__valid_to__" = now()
+        WHERE {pk_old} AND "__valid_to__" = 'infinity'::timestamptz;
         RETURN OLD;
     END IF;
 END;
-$$;
-""".strip()
-
+$$;"""
     else:
-        update_set = ", ".join(f"{sql_safe_double_quote(c)} = NEW.{sql_safe_double_quote(c)}" for c in writable_cols)
-
-        return f"""
-CREATE OR REPLACE FUNCTION {sql_safe_double_quote(shadow)}.{fn_name}()
+        update_set = ", ".join(f"{quote(c)} = NEW.{quote(c)}" for c in writable_cols)
+        body = f"""\
+CREATE OR REPLACE FUNCTION {fn_ref}()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-{sensitive_stubs}
-        INSERT INTO {tbl_ref} ({insert_cols})
+{fill_block}        INSERT INTO {tbl_ref} ({insert_cols})
         VALUES ({insert_vals});
         RETURN NEW;
 
     ELSIF TG_OP = 'UPDATE' THEN
-{immutable_checks}{sensitive_stubs}
-        UPDATE {tbl_ref}
+{immutable_block}        UPDATE {tbl_ref}
         SET {update_set}
-        WHERE {pk_filt};
+        WHERE {pk_new};
         RETURN NEW;
 
     ELSIF TG_OP = 'DELETE' THEN
         DELETE FROM {tbl_ref}
-        WHERE {pk_filt_old};
+        WHERE {pk_old};
         RETURN OLD;
     END IF;
 END;
-$$;
-""".strip()
+$$;"""
+
+    return body
 
 
 def _generate_immutable_checks(table: TableConfig) -> str:
@@ -1007,7 +1063,13 @@ def _generate_roles(project: GovernanceProject, current: GovernanceProject) -> s
 
     if project.database.audit_enabled:
         db_name = sql_safe_double_quote(project.database.name)
-        lines.append("CREATE ROLE tarkin_audit NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;")
+        current_role_names = {r.name for r in current.roles}
+        if "tarkin_audit" in current_role_names:
+            lines.append("-- tarkin_audit role is already present and will not be recreated.")
+        else:
+            lines.append(
+                "CREATE ROLE tarkin_audit NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;"
+            )
         lines.append(f"ALTER DATABASE {db_name} SET pgaudit.role = 'tarkin_audit';")
         lines.append("")
 
@@ -1050,12 +1112,21 @@ def _generate_grants(project: GovernanceProject) -> str:
             stacklevel=2,
         )
 
-    for role in project.roles:
-        if role.name == project.database.owner:
-            continue
+    if shadow_schemas:
+        lines.append("-- Revoke PUBLIC from shadow schemas, regrant to owner")
         for shadow in shadow_schemas:
-            lines.append(f"REVOKE ALL ON SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
-            lines.append(f"REVOKE ALL ON ALL TABLES IN SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
+            lines.append(f"REVOKE ALL ON SCHEMA {sql_safe_double_quote(shadow)} FROM PUBLIC;")
+            lines.append(f"REVOKE ALL ON ALL TABLES IN SCHEMA {sql_safe_double_quote(shadow)} FROM PUBLIC;")
+        lines.append("")
+
+        for role in project.roles:
+            for shadow in shadow_schemas:
+                if role.name == project.database.owner:
+                    lines.append(f"GRANT ALL ON SCHEMA {sql_safe_double_quote(shadow)} TO {sql_safe_double_quote(role.name)};")
+                    lines.append(f"GRANT ALL ON ALL TABLES IN SCHEMA {sql_safe_double_quote(shadow)} TO {sql_safe_double_quote(role.name)};")
+                else:
+                    lines.append(f"REVOKE ALL ON SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
+                    lines.append(f"REVOKE ALL ON ALL TABLES IN SCHEMA {sql_safe_double_quote(shadow)} FROM {sql_safe_double_quote(role.name)};")
 
     if lines:
         lines.append("")
@@ -1480,8 +1551,11 @@ BEGIN
                                             substr(encode(digest(%I::text,'sha256'),'hex'),17,4) ||'-'||
                                             substr(encode(digest(%I::text,'sha256'),'hex'),21,12)
                                         )
-                                    WHEN udt_name ILIKE 'int4' OR udt_name ILIKE 'int8'
-                                      OR udt_name ILIKE 'int2' OR udt_name ILIKE 'numeric'
+                                    WHEN udt_name ILIKE 'int2'
+                                        THEN ((('x'||left(encode(digest(%I::text,'sha256'),'hex'),4))::bit(16)::int) %% 32768)::text
+                                    WHEN udt_name ILIKE 'int4'
+                                        THEN ((('x'||left(encode(digest(%I::text,'sha256'),'hex'),8))::bit(32)::bigint) %% 2147483648)::text
+                                    WHEN udt_name ILIKE 'int8' OR udt_name ILIKE 'numeric'
                                       OR udt_name ILIKE 'float4' OR udt_name ILIKE 'float8'
                                         THEN (('x'||left(encode(digest(%I::text,'sha256'),'hex'),16))::bit(64)::bigint)::text
                                     WHEN udt_name ILIKE 'bool'
@@ -1491,10 +1565,9 @@ BEGIN
                                 FROM information_schema.columns
                                 WHERE table_schema=%L AND table_name=%L AND column_name=%L
                             )$$,
-                            col_name,
-                            col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name,
-                            col_type,
-                            rec.shadow_schema, rec.shadow_table, col_name
+                            col_name, col_name, col_name, col_name, col_name, col_name,
+                            col_name, col_name, col_name, col_name, col_name,
+                            col_type, rec.shadow_schema, rec.shadow_table, col_name
                         );
                     END IF;
                 END LOOP;
@@ -1617,6 +1690,9 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
                     obj_name = entry.split("(")[0].split()[0]
                 elif kind == "operator":
                     obj_name = entry
+                elif kind == "type":
+                    parts = entry.split()
+                    obj_name = parts[1] if len(parts) > 1 else parts[0]
                 else:
                     obj_name = entry.split()[0]
                 moved_objects.append((schema.name, shadow, kind, obj_name))
@@ -2097,16 +2173,20 @@ BEGIN
                                           substr(encode(digest(%I::text,'sha256'),'hex'),13,4)||'-'||
                                           substr(encode(digest(%I::text,'sha256'),'hex'),17,4)||'-'||
                                           substr(encode(digest(%I::text,'sha256'),'hex'),21,12))
-                                WHEN udt_name ILIKE 'int4' OR udt_name ILIKE 'int8' OR udt_name ILIKE 'int2'
-                                  OR udt_name ILIKE 'numeric' OR udt_name ILIKE 'float4' OR udt_name ILIKE 'float8'
+                                WHEN udt_name ILIKE 'int2'
+                                    THEN ((('x'||left(encode(digest(%I::text,'sha256'),'hex'),4))::bit(16)::int) %% 32768)::text
+                                WHEN udt_name ILIKE 'int4'
+                                    THEN ((('x'||left(encode(digest(%I::text,'sha256'),'hex'),8))::bit(32)::bigint) %% 2147483648)::text
+                                WHEN udt_name ILIKE 'int8' OR udt_name ILIKE 'numeric'
+                                  OR udt_name ILIKE 'float4' OR udt_name ILIKE 'float8'
                                     THEN (('x'||left(encode(digest(%I::text,'sha256'),'hex'),16))::bit(64)::bigint)::text
                                 WHEN udt_name ILIKE 'bool'
                                     THEN (get_byte(digest(%I::text,'sha256'),0)%%2=0)::text
                                 ELSE '[ERASED]'
                             END::%s FROM information_schema.columns
                             WHERE table_schema=%L AND table_name=%L AND column_name=%L)$$,
-                            col_name,
-                            col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name,
+                            col_name, col_name, col_name, col_name, col_name, col_name,
+                            col_name, col_name, col_name, col_name, col_name,
                             col_type, shadow_schema, shadow_table, col_name);
                     END IF;
                 END LOOP;

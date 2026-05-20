@@ -13,34 +13,48 @@ from .utils import (
 
 
 def erase_check(
-    profile: ConnectionProfile,
-    columns: list[str],
-    values:  list[str],
-    output:  Path | None = None,
+    profile:          ConnectionProfile,
+    columns:          list[str],
+    values:           list[str],
+    output_directory: Path | None = None,
 ) -> list[dict]:
-    """Call __META__.tarkin_erase_check() and return (and optionally write) the result."""
+    """Call __META__.tarkin_erase_check() and return (and write) the result.
+
+    *output_directory* is the directory the result JSON is written to
+    (defaults to ``out/``). It is always treated as a directory.
+    """
     if len(columns) != len(values):
-        raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
+        raise EraseError(
+            "Unequal number of columns and values provided. "
+            "Specify exactly one --value for each --column, in the same order."
+        )
     results = _call_function(profile, "tarkin_erase_check", columns, values)
-    output  = output or OUT_DIR
-    build_output_directory(output)
-    _write_result(output, "erase_check", columns, values, results)
+    out_dir = output_directory or OUT_DIR
+    build_output_directory(out_dir)
+    _write_result(out_dir, "erase_check", columns, values, results)
     return results
 
 
 def erase_apply(
-    profile: ConnectionProfile,
-    columns: list[str],
-    values:  list[str],
-    output:  Path | None = None,
+    profile:          ConnectionProfile,
+    columns:          list[str],
+    values:           list[str],
+    output_directory: Path | None = None,
 ) -> list[dict]:
-    """Call __META__.tarkin_erase_apply() and return (and optionally write) the result."""
+    """Call __META__.tarkin_erase_apply() and return (and write) the result.
+
+    *output_directory* is the directory the result JSON is written to
+    (defaults to ``out/``). It is always treated as a directory.
+    """
     if len(columns) != len(values):
-        raise EraseError("unequal number of columns and values provided. Please specify an equal amount of each.")
+        raise EraseError(
+            "Unequal number of columns and values provided. "
+            "Specify exactly one --value for each --column, in the same order."
+        )
     results = _call_function(profile, "tarkin_erase_apply", columns, values)
-    output  = output or OUT_DIR
-    build_output_directory(output)
-    _write_result(output, "erase_apply", columns, values, results)
+    out_dir = output_directory or OUT_DIR
+    build_output_directory(out_dir)
+    _write_result(out_dir, "erase_apply", columns, values, results)
     return results
 
 

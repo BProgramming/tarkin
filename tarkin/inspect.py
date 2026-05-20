@@ -155,12 +155,9 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
         name     = sa_col["name"]
         pg_extra = pg_cols.get(name, {})
 
-        col_type    = _pg_type_string(sa_col) # noqa
-        default = pg_extra.get("column_default")
-        default = str(default) if default is not None else None
-
-        if default and default.startswith("nextval("):
-            default = None
+        col_type = _pg_type_string(sa_col)  # noqa
+        default  = pg_extra.get("column_default")
+        default  = str(default) if default is not None else None
 
         nullable = sa_col.get("nullable", True)
         unique   = bool(pg_extra.get("is_unique", False))
@@ -389,8 +386,8 @@ def _get_sequences(conn: Connection, schema_name: str) -> list[str]:
 def _get_custom_types(conn: Connection, schema_name: str) -> list[str]:
     """
     Return custom type signatures.
-    Enums:      'my_enum (val1, val2, val3)'
-    Composites: 'my_type (col1 text, col2 int)'
+    Enums:      'ENUM my_enum (val1, val2, val3)'
+    Composites: 'TYPE my_type (col1 text, col2 int)'
     Domains:    excluded (handled separately).
     """
     rows = conn.execute(text("""

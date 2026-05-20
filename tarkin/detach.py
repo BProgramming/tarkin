@@ -58,6 +58,7 @@ def detach(
             moved_objects,
             subject_identifier_indexes,
             retention_tables,
+            versioned_pks,
         ) = _read_meta(profile)
     except Exception as exc:
         if not no_restore_grants:
@@ -77,6 +78,7 @@ def detach(
         moved_objects               = []
         subject_identifier_indexes  = []
         retention_tables            = []
+        versioned_pks               = {}
     print("Reading build metadata... Done.")
 
     if not has_versioning:
@@ -109,6 +111,7 @@ def detach(
         moved_objects,
         subject_identifier_indexes,
         retention_tables,
+        versioned_pks,
     )
     print("Generating rollback SQL... Done.")
 
@@ -117,16 +120,16 @@ def detach(
         engine = profile.engine()
         raw = engine.raw_connection()
         try:
+            raw.driver_connection.autocommit = True
             cursor = raw.cursor()
             cursor.execute(sql)
-            raw.commit()
             cursor.close()
         finally:
             raw.close()
         engine.dispose()
     except Exception as exc:
         raise DetachError(
-            f"Failed to detach. Database state may be inconsistent.\n"
+            f"Failed to detach. Database has been rolled back; state should be unchanged.\n"
             f"Error: {exc}"
         ) from exc
     print("Removing Tarkin model from database... Done.")
@@ -155,6 +158,7 @@ def _read_meta(
     list[tuple[str, str, str, str]],
     list[tuple[str, str, list[str]]],
     list[tuple[str, str]],
+    dict[str, dict[str, list[str]]],
 ]:
     """Read __META__ tables to retrieve all state needed for a clean detach."""
     engine = profile.engine()
@@ -172,7 +176,7 @@ def _read_meta(
                 "ORDER BY built_at DESC LIMIT 1"
             )).fetchone()
             if not row:
-                return [], [], profile.database, False, {}, [], [], [], [], []
+                return [], [], profile.database, False, {}, [], [], [], [], [], {}
 
             build_id                    = row[0]
             db_name                     = row[1]
@@ -240,10 +244,26 @@ def _read_meta(
             ), {"bid": build_id}).fetchall()
             retention_tables = [(r[0], r[1]) for r in ret_rows]
 
+
+            pk_rows = conn.execute(text("""
+                SELECT DISTINCT i.schema_name, i.table_name, i.columns
+                FROM __META__.tarkin_indexes i
+                WHERE i.build_id = :bid
+                  AND i.primary_key = true
+                  AND EXISTS (
+                      SELECT 1 FROM __META__.tarkin_columns c
+                      WHERE c.build_id = :bid
+                        AND c.schema_name = i.schema_name
+                        AND c.table_name = i.table_name
+                        AND c.versioned = true
+                  )
+            """), {"bid": build_id}).fetchall()
+            versioned_pks = {r[0]: {r[1]: list(r[2])} for r in pk_rows}
+
             return (
                 tarkin_roles, grants, db_name, pgcrypto_enabled_by_tarkin,
                 pgaudit_snapshot, added_fks, added_generated_cols, moved_objects,
-                subject_identifier_indexes, retention_tables,
+                subject_identifier_indexes, retention_tables, versioned_pks,
             )
     finally:
         engine.dispose()
@@ -275,6 +295,7 @@ def _generate_detach_sql(
     moved_objects:              list[tuple[str, str, str, str]],
     subject_identifier_indexes: list[tuple[str, str, list[str]]],
     retention_tables:           list[tuple[str, str]],
+    versioned_pks:              dict[str, dict[str, list[str]]],
 ) -> str:
     """
     Generate the full rollback SQL for a detach operation.
@@ -338,7 +359,7 @@ def _generate_detach_sql(
                         f"WHERE __valid_to__ != 'infinity'::timestamptz;"
                     )
                     lines.append(
-                        f'DROP INDEX IF EXISTS {sql_safe_double_quote("idx_" + table.name + "_current")};'
+                        f'DROP INDEX IF EXISTS {sql_safe_double_quote(shadow)}.{sql_safe_double_quote("idx_" + table.name + "_current")};'
                     )
                     lines.append(
                         f'ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} '
@@ -348,6 +369,12 @@ def _generate_detach_sql(
                         f'ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} '
                         f"DROP COLUMN __valid_to__;"
                     )
+                    if versioned_pks[original_name][table.name]:
+                        cols_sql = ", ".join(sql_safe_double_quote(c) for c in versioned_pks[original_name][table.name])
+                        lines.append(
+                            f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
+                            f"ADD PRIMARY KEY ({cols_sql});"
+                        )
 
         lines.append("")
 

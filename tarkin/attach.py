@@ -9,13 +9,19 @@ from .credentials import ConnectionProfile
 from .inspect import inspect_database
 from .utils import (
     OUT_DIR,
+    find_latest_artifact,
 )
 from .serialize import project_checksum
 
 
 def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
     """Apply a Tarkin model to a live database."""
-    zip_path = build_path or _find_latest_artifact()
+    zip_path = build_path or find_latest_artifact(OUT_DIR)
+    if zip_path is None:
+        raise AttachError(
+            f"No artifacts found in {OUT_DIR}. "
+            f"Run 'tarkin build' or 'tarkin migrate' to generate an artifact."
+        )
     print(f"Using artifact: {zip_path}")
 
     metadata, sql = _read_artifact(zip_path)
@@ -40,15 +46,17 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
         engine = profile.engine()
         raw = engine.raw_connection()
         try:
+            raw.driver_connection.autocommit = True
             cursor = raw.cursor()
             cursor.execute(sql)
-            raw.commit()
             cursor.close()
         finally:
             raw.close()
         engine.dispose()
     except Exception as exc:
-        raise AttachError(f"Failed to apply {verb}. Database has been rolled back.\n\tError: {exc}") from exc
+        raise AttachError(
+            f"Failed to apply {verb}. Database has been rolled back.\n\tError: {exc}"
+        ) from exc
     print(f"Applying {verb} to database... Done.")
 
     print(f"Tarkin {verb} successfully applied.")
@@ -120,18 +128,6 @@ def _validate_for_migration(profile: ConnectionProfile, metadata: dict, tk_schem
             f"Re-run 'tarkin migrate' against the current build to generate a fresh artifact."
         )
     print("Verifying migration source... Done.")
-
-
-def _find_latest_artifact() -> Path:
-    """Find the most recent build/migrate artifact in out/."""
-    if not OUT_DIR.exists():
-        raise AttachError(f"No artifacts found in {OUT_DIR}. Run 'tarkin build' or 'tarkin migrate' to generate an artifact.")
-
-    artifacts = sorted(list(OUT_DIR.glob("tarkin_build_*.zip")) + list(OUT_DIR.glob("tarkin_migrate_*.zip")))
-    if not artifacts:
-        raise AttachError(f"No artifacts found in {OUT_DIR}. Run 'tarkin build' first.")
-
-    return artifacts[-1]
 
 
 def _read_artifact(zip_path: Path) -> tuple[dict, str]:

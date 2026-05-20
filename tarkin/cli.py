@@ -48,6 +48,7 @@ from .utils import (
     DEFAULT_CREDENTIALS_PATH,
     OUT_DIR,
     build_output_directory,
+    find_latest_artifact,
 )
 from .validate import (
     SemanticValidator,
@@ -69,9 +70,14 @@ _profile_option = typer.Option(
     help="Named connection profile from credentials.toml.",
 )
 
-_output_option = typer.Option(
+_output_file_option = typer.Option(
     None, "--output", "-o",
     help="Output file path.",
+)
+
+_output_directory_option = typer.Option(
+    None, "--output", "-o",
+    help="Output directory (artifacts/results are written inside it).",
 )
 
 
@@ -119,7 +125,7 @@ def test_connections(
 @app.command(name="inspect")
 def inspect_database_build_yaml(
     profile:     str            = _profile_option,
-    output:      Optional[Path] = _output_option,
+    output_file: Optional[Path] = _output_file_option,
     credentials: Optional[Path] = _credentials_option,
     validate:    bool           = typer.Option(
         True, "--validate/--no-validate",
@@ -182,11 +188,11 @@ def inspect_database_build_yaml(
 
         yaml_str = Serializer.to_yaml_string(proj)
 
-        if output is None:
-            output = OUT_DIR / f"{prof.database}_model.yaml"
-        build_output_directory(output)
-        output.write_text(yaml_str, encoding="utf-8")
-        print(f"Written to {output}.")
+        if output_file is None:
+            output_file = OUT_DIR / f"{prof.database}_model.yaml"
+        build_output_directory(output_file.parent)
+        output_file.write_text(yaml_str, encoding="utf-8")
+        print(f"Written to {output_file}.")
 
 
 @app.command(name="validate")
@@ -200,20 +206,20 @@ def validate_data_model(
 
 @app.command(name="build")
 def build_data_model_from_yaml(
-    config:      Path           = typer.Argument(..., help="Path to governance YAML."),
-    profile:     Optional[str]  = typer.Option(
+    config:           Path           = typer.Argument(..., help="Path to governance YAML."),
+    profile:          Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Override the credentials profile specified in the YAML.",
     ),
-    credentials: Optional[Path] = _credentials_option,
-    output:      Optional[Path] = _output_option,
+    credentials:      Optional[Path] = _credentials_option,
+    output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
     Compile a governance YAML into a build artifact.
 
     Connects to the live database, inspects its current state, generates the
     SQL needed to implement the governance model, and writes a .zip artifact
-    to 'out/' (or the path given by --output).  The artifact contains the
+    to 'out/' (or the directory given by --output). The artifact contains the
     generated SQL and build metadata to be used by 'tarkin attach'.
     """
     proj = _load_and_validate(config)
@@ -241,7 +247,7 @@ def build_data_model_from_yaml(
     print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
-        zip_path = build(proj, prof, out_dir=output)
+        zip_path = build(proj, prof, output_directory=output_directory)
         print(f"Build complete: {zip_path}")
     except BuildError as exc:
         _die(str(exc))
@@ -273,11 +279,18 @@ def attach_to_database(
         return
 
     if not profile:
-        build_path = build_path or _find_latest_artifact_path()
+        build_path = build_path or find_latest_artifact(OUT_DIR)
         if build_path:
-            with zipfile.ZipFile(build_path) as zf:
-                metadata = json.loads(zf.read("tarkin_build.json").decode())
-                profile  = metadata.get("profile")
+            try:
+                with zipfile.ZipFile(build_path) as zf:
+                    metadata = json.loads(zf.read("tarkin_build.json").decode())
+                    profile  = metadata.get("profile")
+            except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as exc:
+                _die(
+                    f"Could not read the profile from artifact {build_path}: {exc}. "
+                    f"Pass --profile explicitly, or re-generate the artifact."
+                )
+                return
 
     if not profile:
         _die("No credentials profile specified. Use --profile or ensure the build artifact contains one.")
@@ -300,12 +313,10 @@ def attach_to_database(
     except AttachError as exc:
         _die(str(exc))
 
+
 @app.command(name="detach")
 def detach_from_database(
-    profile:            Optional[str]  = typer.Option(
-        None, "--profile", "-p",
-        help="Credentials profile to use.",
-    ),
+    profile:            str            = _profile_option,
     credentials:        Optional[Path] = _credentials_option,
     keep_versioning:    bool           = typer.Option(
         False, "--keep-versioning", "-k",
@@ -343,10 +354,6 @@ def detach_from_database(
     if not creds:
         return
 
-    if not profile:
-        _die("No credentials profile specified. Use --profile.")
-        return
-
     prof = _resolve_profile(creds, profile)
     if not prof:
         return
@@ -372,9 +379,9 @@ def detach_from_database(
 
 @app.command(name="diff")
 def diff_yaml(
-    before:  Path           = typer.Argument(..., help="Path to the baseline governance YAML."),
-    after:   Path           = typer.Argument(..., help="Path to the target governance YAML."),
-    output:  Optional[Path] = _output_option,
+    before:      Path           = typer.Argument(..., help="Path to the baseline governance YAML."),
+    after:       Path           = typer.Argument(..., help="Path to the target governance YAML."),
+    output_file: Optional[Path] = _output_file_option,
 ) -> None:
     """
     Compare two governance YAMLs and report all differences.
@@ -390,28 +397,26 @@ def diff_yaml(
 
     changes = diff_projects(before_proj, after_proj)
 
-    if output is None:
-        before_stem = before.stem
-        after_stem  = after.stem
-        output = OUT_DIR / f"diff_{before_stem}_{after_stem}.md"
+    if output_file is None:
+        output_file = OUT_DIR / f"diff_{before.stem}_{after.stem}.md"
 
-    render_diff(changes, output)
+    render_diff(changes, output_file)
 
     if changes:
-        print(f"{len(changes)} change(s) detected. Report written to {output}.")
+        print(f"{len(changes)} change(s) detected. Report written to {output_file}.")
     else:
-        print(f"No changes detected. Report written to {output}.")
+        print(f"No changes detected. Report written to {output_file}.")
 
 
 @app.command(name="migrate")
 def migrate_data_model(
-    config:      Path           = typer.Argument(..., help="Path to the target governance YAML."),
-    profile:     Optional[str]  = typer.Option(
+    config:           Path           = typer.Argument(..., help="Path to the target governance YAML."),
+    profile:          Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Override the credentials profile specified in the YAML.",
     ),
-    credentials: Optional[Path] = _credentials_option,
-    output:      Optional[Path] = _output_option,
+    credentials:      Optional[Path] = _credentials_option,
+    output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
     Generate a migration artifact from the current live build to a new governance YAML.
@@ -445,7 +450,7 @@ def migrate_data_model(
     print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
-        zip_path = migrate(proj, prof, output=output)
+        zip_path = migrate(proj, prof, output_directory=output_directory)
         print(f"Migration artifact: {zip_path}")
         print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
     except MigrateError as exc:
@@ -454,28 +459,25 @@ def migrate_data_model(
 
 @app.command(name="erase")
 def erase_subject(
-    profile:     str            = _profile_option,
-    credentials: Optional[Path] = _credentials_option,
-    column:      list[str]      = typer.Option(
+    profile:          str            = _profile_option,
+    credentials:      Optional[Path] = _credentials_option,
+    column:           list[str]      = typer.Option(
         ..., "--column", "-col",
         help="Identifier column name to match on. Repeat for multiple columns.",
     ),
-    value:       list[str]      = typer.Option(
+    value:            list[str]      = typer.Option(
         ..., "--value", "-val",
         help="Value corresponding to each --column (in the same order). Repeat for multiple values.",
     ),
-    check:       bool           = typer.Option(
+    check:            bool           = typer.Option(
         False, "--check",
         help="Preview which rows would be affected without modifying any data.",
     ),
-    apply:       bool           = typer.Option(
+    apply:            bool           = typer.Option(
         False, "--apply",
         help="Execute the erasure and log the result to __META__.tarkin_erasures.",
     ),
-    output:      Optional[Path] = typer.Option(
-        None, "--output", "-o",
-        help="Directory to write the result JSON. Defaults to 'out/'.",
-    ),
+    output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
     Erase data subject records from a Tarkin-attached database.
@@ -507,7 +509,7 @@ def erase_subject(
     if not prof:
         return
 
-    output = output or OUT_DIR
+    out_dir = output_directory or OUT_DIR
 
     print(f"Connecting to {prof.safe_repr()}...", end="\r")
     result = check_connection(prof)
@@ -518,7 +520,7 @@ def erase_subject(
 
     try:
         if check:
-            rows = erase_check(prof, list(column), list(value), output=output)
+            rows = erase_check(prof, list(column), list(value), output_directory=out_dir)
             print(f"\nErase check results ({len(rows)} table(s) matched):")
             for row in rows:
                 print(
@@ -529,7 +531,7 @@ def erase_subject(
             if not rows:
                 print("  No matching rows found.")
         else:
-            rows = erase_apply(prof, list(column), list(value), output=output)
+            rows = erase_apply(prof, list(column), list(value), output_directory=out_dir)
             print(f"\nErase apply results ({len(rows)} table(s) affected):")
             for row in rows:
                 print(
@@ -571,18 +573,6 @@ def purge_output(
     shutil.rmtree(output)
     build_output_directory(output)
     print("Directory out/ purged.")
-
-
-def _find_latest_artifact_path() -> Path | None:
-    """Return the path to the most recently created build/migrate artifact, or None."""
-    if not OUT_DIR.exists():
-        return None
-    artifacts: list[Path] = sorted(
-        list(OUT_DIR.glob("tarkin_build_*.zip")) +
-        list(OUT_DIR.glob("tarkin_migrate_*.zip")),
-        key=lambda p: p.name,
-    )
-    return artifacts[-1] if artifacts else None
 
 
 def _load_credentials(path: Optional[Path]) -> CredentialsFile | None:
