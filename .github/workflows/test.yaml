@@ -39,14 +39,14 @@ jobs:
         run: |
           ATTEMPTS=0
           MAX_ATTEMPTS=30
-          until docker exec tarkin_test_db pg_isready -U tarkin -d tarkin_test > /dev/null 2>&1; do
+          until docker exec tarkin_test_db psql -U tarkin -d postgres -c "SELECT 1" > /dev/null 2>&1; do
             ATTEMPTS=$((ATTEMPTS + 1))
             if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
               echo "Database failed to start after ${MAX_ATTEMPTS} attempts."
               docker logs tarkin_test_db
               exit 1
             fi
-            sleep 0.5
+            sleep 1
           done
           echo "Database ready."
 
