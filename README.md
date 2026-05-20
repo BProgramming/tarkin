@@ -1,5 +1,3 @@
-# ReadMe
-
 # Tarkin: govern your data
 
 An open source governance compiler for PostgreSQL.
