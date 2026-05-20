@@ -1,6 +1,8 @@
 """Integration tests for Tarkin."""
 from __future__ import annotations
 import os
+from typing import cast
+
 import pytest
 from pathlib import Path
 from pydantic import SecretStr
@@ -9,10 +11,13 @@ from sqlalchemy import text
 from tarkin.attach import attach, AttachError
 from tarkin.build import build, BuildError
 from tarkin.credentials import CredentialsFile, DEFAULT_CREDENTIALS_PATH, check_connection
+from tarkin.detach import _read_meta
 from tarkin.detach import detach, DetachError
 from tarkin.inspect import inspect_database
-from tarkin.model import GovernanceProject
+from tarkin.migrate import migrate, MigrateError
+from tarkin.model import ColumnConfig, GovernanceProject
 from tarkin.validate import SemanticValidator
+
 
 def _integration_profile():
     """Return a ConnectionProfile for integration tests, or None if not configured."""
@@ -337,4 +342,281 @@ class TestColumnGrantRoundtrip:
                     "REVOKE SELECT (name) ON public.test_table FROM tarkin_role"
                 ))
                 conn.commit()
+            engine.dispose()
+
+
+class TestMigrateRoundtrip:
+    """End-to-end: build → attach → migrate → re-attach → detach.
+
+    Key design note: the `after` project must be derived from the pre-attach
+    `before` project (the governance model), NOT from inspecting the live
+    database after attach.  Post-attach, inspect sees views instead of tables
+    and shadow schemas instead of originals, so diffing that state against
+    the META YAML produces garbage changes and invalid migration SQL.
+    """
+
+    @requires_db
+    def test_migrate_roundtrip(self, tmp_path: Path) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        # --- Step 1: capture the pre-attach governance model. ---
+        before = inspect_database(prof)
+        before.database.profile = prof.profile
+
+        # Build the `after` model by mutating a deep copy of `before`
+        # BEFORE attaching — this gives us a valid governance-layer diff.
+        target_schema = next(
+            (s for s in before.schemas if s.tables and not s.name.startswith("tk_")),
+            None,
+        )
+        if target_schema is None:
+            pytest.skip("No suitable schema/table found for migration test.")
+
+        after = before.model_copy(deep=True)
+        after_schema = next(s for s in after.schemas if s.name == target_schema.name)
+        after_schema.tables[0].columns.append(
+            ColumnConfig(name="_tarkin_test_col", type="text", nullable=True)
+        )
+
+        # --- Step 2: build and attach the initial (before) project. ---
+        try:
+            build_zip = build(before, prof, output_directory=tmp_path)
+            attach(prof, build_path=build_zip)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach initial build: {exc}")
+
+        try:
+            # --- Step 3: generate and apply the migration. ---
+            try:
+                migrate_zip = migrate(after, prof, output=tmp_path)
+            except MigrateError as exc:
+                pytest.fail(f"migrate() raised unexpectedly: {exc}")
+
+            try:
+                attach(prof, build_path=migrate_zip)
+            except AttachError as exc:
+                pytest.fail(f"Re-attach of migration artifact failed: {exc}")
+
+            # --- Step 4: verify __META__ is fully populated after migrate. ---
+            # This is the exact failure mode of Bug #3: _read_meta returns
+            # empty results when the old _emit_meta_update is used, causing
+            # detach to run DROP SCHEMA public CASCADE.
+            (
+                tarkin_roles,
+                revoked_grants,
+                db_name,
+                _pgcrypto,
+                _pgaudit,
+                _added_fks,
+                _added_gen_cols,
+                moved_objects,
+                _subj_indexes,
+                _retention,
+                _versioned_pks,
+            ) = _read_meta(prof)
+
+            assert db_name, "_read_meta returned empty db_name after migrate re-attach."
+
+            engine = prof.engine()
+            try:
+                with engine.connect() as conn:
+                    # tarkin_migrations must have rows for the migration changes.
+                    migration_count = conn.execute(text(
+                        "SELECT COUNT(*) FROM __META__.tarkin_migrations "
+                        "WHERE change_type != 'created'"
+                    )).scalar()
+
+                    # tarkin_schemas must be populated for the latest build.
+                    schema_count = conn.execute(text(
+                        "SELECT COUNT(*) FROM __META__.tarkin_schemas ts "
+                        "JOIN __META__.tarkin_builds tb USING (build_id) "
+                        "WHERE tb.built_at = (SELECT MAX(built_at) FROM __META__.tarkin_builds)"
+                    )).scalar()
+            finally:
+                engine.dispose()
+
+            assert migration_count and migration_count > 0, (
+                "No migration rows found in __META__.tarkin_migrations after migrate. "
+                "_emit_migrate_meta_update may not be writing tarkin_migrations rows."
+            )
+            assert schema_count and schema_count > 0, (
+                "tarkin_schemas is empty for the latest build after migrate. "
+                "The _emit_per_build_inserts helper may not be running."
+            )
+
+        finally:
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass
+
+
+class TestPublicSchemaGrantRoundtrip:
+    """PUBLIC pseudo-role schema grants must be captured and restored.
+
+    has_schema_privilege('public', schema, priv) correctly tests PUBLIC's
+    grants even though PUBLIC doesn't appear in pg_roles, so the capture
+    must happen via explicit IF blocks in _generate_meta_population.
+    """
+
+    @requires_db
+    def test_public_schema_usage_restored_on_detach(
+        self, tmp_path: Path
+    ) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = prof.engine()
+        try:
+            # Confirm PUBLIC has USAGE on public (true in stock PG).
+            # If not, grant it explicitly so the test is meaningful.
+            with engine.connect() as conn:
+                had_usage = conn.execute(text(
+                    "SELECT has_schema_privilege('public', 'public', 'USAGE')"
+                )).scalar()
+                if not had_usage:
+                    conn.execute(text("GRANT USAGE ON SCHEMA public TO PUBLIC"))
+                    conn.commit()
+
+            proj = inspect_database(prof)
+            proj.database.profile = prof.profile
+
+            try:
+                zip_path = build(proj, prof, output_directory=tmp_path)
+                attach(prof, build_path=zip_path)
+            except (BuildError, AttachError) as exc:
+                pytest.skip(f"Could not attach for PUBLIC grant test: {exc}")
+
+            try:
+                # Verify the grant was captured in META.
+                with engine.connect() as conn:
+                    captured = conn.execute(text(
+                        "SELECT COUNT(*) FROM __META__.tarkin_revoked_grants "
+                        "WHERE role_name = 'PUBLIC' "
+                        "  AND schema_name = 'public' "
+                        "  AND grant_type = 'USAGE'"
+                    )).scalar()
+
+                assert captured and int(captured) > 0, (
+                    "PUBLIC USAGE grant on schema 'public' was not recorded in "
+                    "tarkin_revoked_grants. The has_schema_privilege capture in "
+                    "_generate_meta_population may not be running. "
+                    "Check that the IF has_schema_privilege blocks were added "
+                    "inside the DO block, before 'END; $$ LANGUAGE plpgsql;'."
+                )
+
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+
+                # PUBLIC must once again have USAGE on public after detach.
+                with engine.connect() as conn:
+                    restored = conn.execute(text(
+                        "SELECT has_schema_privilege('public', 'public', 'USAGE')"
+                    )).scalar()
+
+                assert restored, (
+                    "PUBLIC USAGE on schema 'public' was not restored after detach. "
+                    "tarkin_revoked_grants row exists but detach may not be "
+                    "emitting GRANT ... TO PUBLIC."
+                )
+
+            except DetachError as exc:
+                pytest.fail(f"Detach failed: {exc}")
+
+        finally:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("GRANT USAGE ON SCHEMA public TO PUBLIC"))
+                    conn.commit()
+            except Exception:
+                pass
+            engine.dispose()
+
+
+class TestOverloadedFunctionMeta:
+    """tarkin_moved_objects must store full signatures for functions/aggregates.
+
+    ALTER FUNCTION name SET SCHEMA is ambiguous when overloads exist.
+    ALTER FUNCTION name(arg_types) SET SCHEMA is unambiguous.
+    Detach will fail with a DuplicateFunction error if bare names are stored.
+    """
+
+    @requires_db
+    def test_overloaded_functions_stored_with_full_signature(
+        self, tmp_path: Path
+    ) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = prof.engine()
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("""
+                    CREATE OR REPLACE FUNCTION public.tarkin_test_overload(x int)
+                    RETURNS int LANGUAGE sql AS $$ SELECT x $$
+                """))
+                conn.execute(text("""
+                    CREATE OR REPLACE FUNCTION public.tarkin_test_overload(x text)
+                    RETURNS text LANGUAGE sql AS $$ SELECT x $$
+                """))
+                conn.commit()
+
+            proj = inspect_database(prof)
+            proj.database.profile = prof.profile
+
+            try:
+                zip_path = build(proj, prof, output_directory=tmp_path)
+                attach(prof, build_path=zip_path)
+            except (BuildError, AttachError) as exc:
+                pytest.skip(f"Could not attach for overload test: {exc}")
+
+            try:
+                # Both overloads must appear with full argument signatures.
+                with engine.connect() as conn:
+                    rows = conn.execute(text(
+                        "SELECT object_name FROM __META__.tarkin_moved_objects "
+                        "WHERE object_kind IN ('function', 'trigger_function', 'procedure', 'aggregate') "
+                        "  AND object_name LIKE 'tarkin_test_overload(%'"
+                    )).fetchall()
+
+                names = [r[0] for r in rows]
+                assert len(names) == 2, (
+                    f"Expected 2 overloaded function entries in tarkin_moved_objects, "
+                    f"got {len(names)}: {names}. "
+                    f"Bare names collapse overloads to one row."
+                )
+                assert any("integer" in n or "int" in n for n in names), (
+                    f"Expected an entry with int/integer arg type, got: {names}"
+                )
+                assert any("text" in n for n in names), (
+                    f"Expected an entry with text arg type, got: {names}"
+                )
+
+                # Detach must succeed — fails with bare names because
+                # ALTER FUNCTION public.tarkin_test_overload SET SCHEMA
+                # is ambiguous when two overloads exist.
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+
+            except DetachError as exc:
+                pytest.fail(
+                    f"Detach failed, likely due to ambiguous ALTER FUNCTION "
+                    f"on overloaded functions: {exc}"
+                )
+
+        finally:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text(
+                        "DROP FUNCTION IF EXISTS public.tarkin_test_overload(int)"
+                    ))
+                    conn.execute(text(
+                        "DROP FUNCTION IF EXISTS public.tarkin_test_overload(text)"
+                    ))
+                    conn.commit()
+            except Exception:
+                pass
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass
             engine.dispose()

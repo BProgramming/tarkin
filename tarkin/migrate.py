@@ -37,11 +37,12 @@ from .yaml import YamlLoader
 from .utils import (
     OUT_DIR,
     build_output_directory,
+    emit_per_build_inserts,
     sql_comment_block_section,
     sql_safe_dollar_quote,
     sql_safe_double_quote,
     sql_safe_escape_string,
-    write_artifact, emit_per_build_inserts,
+    write_artifact,
 )
 
 

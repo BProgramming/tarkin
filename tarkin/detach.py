@@ -519,7 +519,8 @@ def _generate_detach_sql(
 
         for (role_name, schema_name, grant_type) in schema_grants:
             if schema_name:
-                lines.append(f'GRANT {grant_type} ON SCHEMA {sql_safe_double_quote(schema_name)} TO {sql_safe_double_quote(role_name)};')
+                grantee = "PUBLIC" if role_name == "PUBLIC" else sql_safe_double_quote(role_name)
+                lines.append(f'GRANT {grant_type} ON SCHEMA {sql_safe_double_quote(schema_name)} TO {grantee};')
 
         for (role_name, schema_name, table_name, grant_type) in table_grants:
             if schema_name and table_name:

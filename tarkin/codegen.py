@@ -52,6 +52,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         _generate_meta_schema(),
         sql_comment_block_section("BUILD RECORD"),
         _generate_build_record(project, needs_pgcrypto),
+        sql_comment_block_section("PUBLIC SCHEMA GRANT CAPTURE"),
+        _generate_public_schema_grant_capture(project),
         sql_comment_block_section("SHADOW SCHEMAS"),
         _generate_shadow_schemas(project),
         sql_comment_block_section("SCHEMA OBJECTS"),
@@ -357,6 +359,37 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_retention (
     retention_days int         NOT NULL
 );
 """.strip()
+
+
+def _generate_public_schema_grant_capture(project: GovernanceProject) -> str:
+    """Capture PUBLIC pseudo-role schema privileges before shadow rename.
+
+    Must run after the tarkin_builds INSERT (BUILD RECORD section) but
+    before _generate_shadow_schemas renames the schemas, because
+    has_schema_privilege('public', schema, priv) returns false once the
+    schema no longer exists under its original name.
+    """
+    lines = [
+        "DO $$",
+        "DECLARE",
+        "    v_build_id bigint;",
+        "BEGIN",
+        "    SELECT currval(pg_get_serial_sequence('__META__.tarkin_builds', 'build_id'))",
+        "    INTO v_build_id;",
+        "",
+    ]
+    for schema in project.schemas:
+        sn = sql_safe_escape_string(schema.name)
+        for priv in ("USAGE", "CREATE"):
+            lines.append(f"    IF has_schema_privilege('public', '{sn}', '{priv}') THEN")
+            lines.append(
+                f"        INSERT INTO __META__.tarkin_revoked_grants "
+                f"(build_id, role_name, schema_name, table_name, column_name, grant_type) "
+                f"VALUES (v_build_id, 'PUBLIC', '{sn}', NULL, NULL, '{priv}');"
+            )
+            lines.append(f"    END IF;")
+    lines += ["END;", "$$ LANGUAGE plpgsql;", ""]
+    return "\n".join(lines)
 
 
 def _generate_shadow_schemas(project: GovernanceProject) -> str:
