@@ -1,10 +1,12 @@
-# Tarkin
+# Tarkin: govern your data
 
-Governance compiler for PostgreSQL.
+An open source governance compiler for PostgreSQL.
+
+![Careful, Princess. Disclosing the Rebellion's location like that is strictly in violation of GDPR.](./tarkin.jpg)
 
 ## Why?
 
-Data governance is tough. Regulations aren't made with implementation in mind, and data engineers often aren't the ones making decisions about it.
+Data governance is tough. Regulations aren't made with implementation in mind, and data engineers often aren't the ones making those decisions anyway.
 
 The result:
 - A lot of ad-hoc work in triggers, functions, and manual grants
