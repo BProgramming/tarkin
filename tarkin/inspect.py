@@ -27,10 +27,6 @@ from .utils import (
 )
 
 
-def _is_excluded_schema(name: str) -> bool:
-    return name.startswith("pg_") or name == "__META__"
-
-
 def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
     """Inspect a live PostgreSQL database and return a GovernanceProject."""
     engine = profile.engine()
@@ -81,7 +77,7 @@ def _get_user_schemas(conn: Connection, include_tk: bool = False) -> list[str]:
     rows = conn.execute(text("""
         SELECT schema_name
         FROM information_schema.schemata
-        WHERE schema_name NOT IN ('information_schema', '__META__')
+        WHERE schema_name NOT IN ('information_schema', '__META__', 'cron')
           AND schema_name NOT LIKE 'pg\\_%'  ESCAPE '\\'
           AND (:include_tk OR schema_name NOT LIKE 'tk\\_%'  ESCAPE '\\')
         ORDER BY schema_name
@@ -803,7 +799,7 @@ def _get_all_schema_grants(conn: Connection, include_tk: bool = False) -> dict[s
         CROSS JOIN pg_roles r
         CROSS JOIN (VALUES ('USAGE'), ('CREATE')) AS p(privilege_type)
         WHERE n.nspname NOT LIKE 'pg\\_%'
-          AND n.nspname NOT IN ('information_schema', '__META__')
+          AND n.nspname NOT IN ('information_schema', '__META__', 'cron')
           AND (:include_tk OR n.nspname NOT LIKE 'tk\\_%')
           AND r.rolname NOT LIKE 'pg\\_%'
           AND has_schema_privilege(r.rolname, n.nspname, p.privilege_type)
@@ -826,7 +822,7 @@ def _get_all_table_grants(conn: Connection, include_tk: bool = False) -> dict[st
             privilege_type AS privilege
         FROM information_schema.role_table_grants
         WHERE table_schema NOT LIKE 'pg\\_%'
-          AND table_schema NOT IN ('information_schema', '__META__')
+          AND table_schema NOT IN ('information_schema', '__META__', 'cron')
           AND (:include_tk OR table_schema NOT LIKE 'tk\\_%')
           AND grantee NOT LIKE 'pg\\_%'
         ORDER BY grantee, table_schema, table_name, privilege_type
@@ -853,7 +849,7 @@ def _get_all_column_grants(conn: Connection, include_tk: bool = False) -> dict[s
             privilege_type AS privilege
         FROM information_schema.role_column_grants
         WHERE table_schema NOT LIKE 'pg\\_%'
-          AND table_schema NOT IN ('information_schema', '__META__')
+          AND table_schema NOT IN ('information_schema', '__META__', 'cron')
           AND (:include_tk OR table_schema NOT LIKE 'tk\\_%')
           AND grantee NOT LIKE 'pg\\_%'
         ORDER BY grantee, table_schema, table_name, column_name, privilege_type
