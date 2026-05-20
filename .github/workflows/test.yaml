@@ -18,7 +18,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --extra test
 
       - name: Build test image
         run: docker build -f Dockerfile.test -t tarkin_test_postgres .
