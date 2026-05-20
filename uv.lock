@@ -401,11 +401,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "psycopg", extras = ["binary"] },
-    { name = "pydantic" },
-    { name = "ruamel-yaml" },
-    { name = "sqlalchemy" },
-    { name = "typer" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1,<4.0" },
+    { name = "pydantic", specifier = ">=2.0,<3.0" },
+    { name = "ruamel-yaml", specifier = ">=0.18,<1.0" },
+    { name = "sqlalchemy", specifier = ">=2.0,<3.0" },
+    { name = "typer", specifier = ">=0.9,<1.0" },
 ]
 
 [[package]]
