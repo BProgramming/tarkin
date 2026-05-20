@@ -1,0 +1,85 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build test image
+        run: docker build -f Dockerfile.test -t tarkin_test_postgres .
+
+      - name: Start test database
+        run: |
+          docker run -d \
+            --name tarkin_test_db \
+            -e POSTGRES_DB=tarkin_test \
+            -e POSTGRES_USER=tarkin \
+            -e POSTGRES_PASSWORD=tarkin \
+            -p 54320:5432 \
+            tarkin_test_postgres \
+            -c shared_preload_libraries=pgaudit,pg_cron \
+            -c cron.database_name=tarkin_test
+
+      - name: Wait for database
+        run: |
+          ATTEMPTS=0
+          MAX_ATTEMPTS=30
+          until docker exec tarkin_test_db pg_isready -U tarkin -d tarkin_test > /dev/null 2>&1; do
+            ATTEMPTS=$((ATTEMPTS + 1))
+            if [ $ATTEMPTS -ge $MAX_ATTEMPTS ]; then
+              echo "Database failed to start after ${MAX_ATTEMPTS} attempts."
+              docker logs tarkin_test_db
+              exit 1
+            fi
+            sleep 0.5
+          done
+          echo "Database ready."
+
+      - name: Set up test fixtures
+        run: |
+          docker exec tarkin_test_db psql -U tarkin -d tarkin_test -c "DROP ROLE IF EXISTS tarkin_audit;"
+          docker exec tarkin_test_db psql -U tarkin -d tarkin_test -c "
+            CREATE EXTENSION IF NOT EXISTS pgaudit;
+            CREATE EXTENSION IF NOT EXISTS pg_cron;
+            CREATE TABLE IF NOT EXISTS public.test_table (
+              id bigint PRIMARY KEY,
+              name text NOT NULL,
+              created_at timestamptz DEFAULT now()
+            );
+            CREATE ROLE tarkin_role;
+            GRANT USAGE ON SCHEMA public TO tarkin_role;
+            GRANT SELECT ON public.test_table TO tarkin_role;
+            GRANT tarkin_role TO tarkin;
+          "
+
+      - name: Run tests
+        env:
+          TARKIN_TEST_HOST: localhost
+          TARKIN_TEST_PORT: "54320"
+          TARKIN_TEST_DB: tarkin_test
+          TARKIN_TEST_USER: tarkin
+          TARKIN_TEST_PASSWORD: tarkin
+        run: uv run pytest tests/ -v
+
+      - name: Show database logs on failure
+        if: failure()
+        run: docker logs tarkin_test_db
+
+      - name: Stop test database
+        if: always()
+        run: docker rm -f tarkin_test_db || true
