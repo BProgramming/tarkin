@@ -1,6 +1,6 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
@@ -16,7 +16,7 @@ Include as much of the following as you can:
 
 You can expect an acknowledgement within **5 business days** and a status update within **14 days**.
 
-## Release Integrity
+## Release integrity
 
 All Tarkin releases are published to PyPI via GitHub Actions using OIDC trusted publishing — no long-lived API tokens are involved. Each release is built from a tagged commit with `SOURCE_DATE_EPOCH` set for reproducible builds.
 
@@ -35,7 +35,7 @@ sha256sum tarkin-<version>*
 
 Compare the output against the matching lines in `SHA256SUMS.txt` attached to the corresponding GitHub release. (`SHA256SUMS.txt` records paths relative to the build's `dist/` directory, so the file names will match the downloaded artifacts.)
 
-### Audit Trail and Tamper Evidence
+### Audit trail and tamper evidence
 
 When `audit_enabled: true` is configured, Tarkin sets `pgaudit.log = write`, which causes PostgreSQL to log every INSERT, UPDATE, and DELETE against the shadow tables. These log entries are written to the OS-level log infrastructure (syslog, journald, CloudWatch Logs, or equivalent) which is not accessible to database users. A database superuser can modify or delete rows in `__META__`, but cannot retroactively edit what pgaudit has already written to the system log.
 
@@ -47,13 +47,13 @@ In practice this means:
 
 Tarkin does not provide log retention, shipping, or alerting; those are the operator's responsibility. The guarantee Tarkin provides is that the instrumentation is in place.
 
-## Governance YAML Security Model
+## Governance YAML security model
 
 Tarkin's governance YAML is a declaration of intent, not a capability boundary: it describes what the database should look like, and the actual enforcement happens via PostgreSQL's native permission system (GRANT/REVOKE, column-level privileges, pgaudit).
 
 The YAML itself should be treated as sensitive configuration. It contains clearance levels, role definitions, masking strategies, and the full schema topology. Do not store it in public repositories or expose it to untrusted parties.
 
-### Shadow Schema Model
+### Shadow schema model
 
 During `tarkin attach`, existing schemas are renamed to `tk_<schema>` (shadow schemas). The public-facing schemas are recreated with views and triggers that implement the governance model. The shadow schemas hold the actual data.
 
@@ -63,7 +63,7 @@ To keep the shadow data reachable only through the governed view layer, Tarkin r
 
 On `tarkin detach`, the process is reversed: views and triggers are dropped, shadow schemas are renamed back to their original names, and all previously revoked grants are restored. The goal of detach is to return the database to exactly the state it was in before attach.
 
-### pgcrypto Extension
+### pgcrypto extension
 
 If Tarkin enables the `pgcrypto` extension for SHA or HMAC column hashing, a record is written to `__META__.tarkin_builds` indicating this. On `tarkin detach`, a warning is printed if Tarkin was responsible for enabling it, noting that the extension can be dropped manually if it is not otherwise in use:
 
@@ -73,7 +73,7 @@ DROP EXTENSION IF EXISTS pgcrypto;
 
 Tarkin does not drop `pgcrypto` automatically, as it may have been in use before attach.
 
-### HMAC Key Management
+### HMAC key management
 
 Tarkin supports HMAC256 column hashing, which requires a secret key. This key is handled as follows:
 
@@ -85,32 +85,32 @@ Tarkin supports HMAC256 column hashing, which requires a secret key. This key is
 - **Rotating the key** invalidates all existing HMAC-hashed values. If you rotate the key and re-attach, any stored HMAC values from the previous key will no longer match. Plan key rotation carefully.
 - The key is never written to `__META__` or included in build artifacts.
 
-### Column Masking Security Notes
+### Column masking security notes
 
-#### Non-Cryptographic Hashing (xxhash)
+#### Non-cryptographic hashing (xxhash)
 
 The `xxhash` strategy uses `hashtextextended`, which is fast but non-cryptographic. Given knowledge of the source data distribution (e.g. a list of SSNs or postcodes), hash values are trivially reversible. Use `sha256`, `sha512`, or `hmac256` for sensitive columns.
 
-#### Cryptographic Hashing Without a Key (sha256, sha512)
+#### Cryptographic hashing without a key (sha256, sha512)
 
 SHA256 and SHA512 are cryptographic hash functions but are still vulnerable to dictionary attacks on low-entropy data. An attacker with a list of candidate values (e.g. all valid postal codes) can hash each one and compare. Use `hmac256` with a strong secret key for maximum protection.
 
-#### Sensitive Columns
+#### Sensitive columns
 
 The `sensitive: true` flag restricts column access to roles with `can_access_sensitive: true`, enforced via column-level `REVOKE`/`GRANT SELECT` on views. This is PostgreSQL-native enforcement, and is not dependent on Tarkin's trigger layer.
 
 Sensitive columns that also have `masking_strategy: none` will emit a build-time warning. Roles with `can_access_sensitive: true` will see the raw value.
 
-### pgaudit Configuration
+### pgaudit configuration
 
 When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgaudit additively: existing audit settings are merged rather than overwritten. On attach, Tarkin captures the pre-existing `pgaudit.log`, `pgaudit.log_catalog`, and `pgaudit.log_relation` values and stores them in `__META__`. These are restored on detach.
 
-## Known Limitations
+## Known limitations
 
 - The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.
 - The shadow-schema boundary depends on the governance YAML enumerating every role with access to the governed schemas (see *Shadow Schema Model* above).
 
-## Out of Scope
+## Out of scope
 
 - Vulnerabilities in PostgreSQL itself.
 - Issues requiring an attacker to already have write access to the governed database. This must be controlled via secure access to your RDS of choice.
