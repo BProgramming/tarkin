@@ -29,6 +29,7 @@ from .model import (
 )
 from .serialize import Serializer, project_checksum
 from .utils import (
+    emit_per_build_inserts,
     sql_comment_block_section,
     sql_safe_dollar_quote,
     sql_safe_double_quote,
@@ -397,6 +398,9 @@ def _generate_schema_objects(project: GovernanceProject, current: GovernanceProj
         for proc_sig in current_schema.procedures:
             lines.append(f"ALTER PROCEDURE {sql_safe_double_quote(shadow)}.{proc_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
+        for agg_sig in current_schema.aggregates:
+            lines.append(f"ALTER AGGREGATE {sql_safe_double_quote(shadow)}.{agg_sig} SET SCHEMA {sql_safe_double_quote(schema.name)};")
+
         for type_entry in current_schema.types:
             parts     = type_entry.split()
             type_name = parts[1] if len(parts) >= 2 else parts[0]
@@ -422,6 +426,18 @@ def _generate_schema_objects(project: GovernanceProject, current: GovernanceProj
 
         for ft_name in current_schema.foreign_tables:
             lines.append(f"ALTER FOREIGN TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(ft_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
+
+        for cfg_name in current_schema.fts_configurations:
+            lines.append(f"ALTER TEXT SEARCH CONFIGURATION {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(cfg_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
+
+        for dict_name in current_schema.fts_dictionaries:
+            lines.append(f"ALTER TEXT SEARCH DICTIONARY {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(dict_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
+
+        for parser_name in current_schema.fts_parsers:
+            lines.append(f"ALTER TEXT SEARCH PARSER {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(parser_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
+
+        for tmpl_name in current_schema.fts_templates:
+            lines.append(f"ALTER TEXT SEARCH TEMPLATE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(tmpl_name)} SET SCHEMA {sql_safe_double_quote(schema.name)};")
 
         if lines:
             lines.append("")
@@ -1664,31 +1680,40 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
     current_schema_map = {s.name: s for s in current.schemas}
     moved_objects: list[tuple[str, str, str, str]] = []
 
-    _object_kind_map = [
-        ("sequences",          "sequence"),
-        ("functions",          "function"),
-        ("trigger_functions",  "trigger_function"),
-        ("procedures",         "procedure"),
-        ("types",              "type"),
-        ("domains",            "domain"),
-        ("collations",         "collation"),
-        ("operators",          "operator"),
-        ("foreign_tables",     "foreign_table"),
+    _sig_kinds = {
+        ("functions", "function"),
+        ("trigger_functions", "trigger_function"),
+        ("procedures", "procedure"),
+        ("aggregates", "aggregate"),
+    }
+    _name_kinds = [
+        ("sequences", "sequence"),
+        ("types", "type"),
+        ("domains", "domain"),
+        ("collations", "collation"),
+        ("operators", "operator"),
+        ("foreign_tables", "foreign_table"),
+        ("fts_configurations", "fts_configuration"),
+        ("fts_dictionaries", "fts_dictionary"),
+        ("fts_parsers", "fts_parser"),
+        ("fts_templates", "fts_template"),
     ]
 
     for schema in project.schemas:
-        shadow         = f"tk_{schema.name}"
+        shadow = f"tk_{schema.name}"
         current_schema = current_schema_map.get(schema.name)
         if not current_schema:
             continue
 
         tarkin_view_names = _tarkin_view_names_for_schema(schema)
 
-        for attr, kind in _object_kind_map:
+        for attr, kind in _sig_kinds:
             for entry in getattr(current_schema, attr):
-                if kind in ("function", "trigger_function", "procedure"):
-                    obj_name = entry.split("(")[0].split()[0]
-                elif kind == "operator":
+                moved_objects.append((schema.name, shadow, kind, entry))
+
+        for attr, kind in _name_kinds:
+            for entry in getattr(current_schema, attr):
+                if kind == "operator":
                     obj_name = entry
                 elif kind == "type":
                     parts = entry.split()
@@ -1716,10 +1741,6 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
 
     for schema in project.schemas:
         sn = sql_safe_escape_string(schema.name)
-        lines.append(
-            f"    INSERT INTO __META__.tarkin_schemas (build_id, name, shadow_name, clearance, audit_enabled) "
-            f"VALUES (v_build_id, '{sn}', 'tk_{sn}', {schema.clearance}, {str(schema.audit_enabled).lower()});"
-        )
         sc = _object_checksum({"name": schema.name, "clearance": schema.clearance})
         lines.append(
             f"    INSERT INTO __META__.tarkin_migrations "
@@ -1732,10 +1753,6 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
         for table in schema.tables:
             sn = sql_safe_escape_string(schema.name)
             tn = sql_safe_escape_string(table.name)
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_tables (build_id, schema_name, name, clearance, audit_enabled) "
-                f"VALUES (v_build_id, '{sn}', '{tn}', {table.clearance}, {str(table.audit_enabled).lower()});"
-            )
             tc = _object_checksum({"schema": schema.name, "name": table.name, "clearance": table.clearance})
             lines.append(
                 f"    INSERT INTO __META__.tarkin_migrations "
@@ -1747,24 +1764,9 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
     for schema in project.schemas:
         for table in schema.tables:
             for col in table.columns:
-                sn  = sql_safe_escape_string(schema.name)
-                tn  = sql_safe_escape_string(table.name)
-                cn  = sql_safe_escape_string(col.name)
-                ct  = sql_safe_escape_string(col.type)
-                dv  = f"'{sql_safe_escape_string(col.default)}'" if col.default else "NULL"
-                ge  = f"'{sql_safe_escape_string(col.generated_expression)}'" if col.generated_expression else "NULL"
-                ms  = sql_safe_escape_string(col.masking_strategy)
-                gs  = sql_safe_escape_string(col.generated_storage)
-                lines.append(
-                    f"    INSERT INTO __META__.tarkin_columns "
-                    f"(build_id, schema_name, table_name, name, type, clearance, nullable, \"unique\", "
-                    f"immutable, versioned, sensitive, masking_strategy, "
-                    f"default_value, generated_expression, generated_storage) "
-                    f"VALUES (v_build_id, '{sn}', '{tn}', '{cn}', '{ct}', {col.clearance}, "
-                    f"{str(col.nullable).lower()}, {str(col.unique).lower()}, "
-                    f"{str(col.immutable).lower()}, {str(col.versioned).lower()}, "
-                    f"{str(col.sensitive).lower()}, '{ms}', {dv}, {ge}, '{gs}');"
-                )
+                sn = sql_safe_escape_string(schema.name)
+                tn = sql_safe_escape_string(table.name)
+                cn = sql_safe_escape_string(col.name)
                 cc = _object_checksum({
                     "schema": schema.name, "table": table.name, "name": col.name,
                     "type": col.type, "clearance": col.clearance,
@@ -1777,39 +1779,47 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
                 )
     lines.append("")
 
-    for schema in project.schemas:
-        for table in schema.tables:
-            for idx in table.indexes:
-                sn  = sql_safe_escape_string(schema.name)
-                tn  = sql_safe_escape_string(table.name)
-                idn = sql_safe_escape_string(idx.name)
-                ca  = "ARRAY[" + ", ".join(f"'{c}'" for c in idx.columns) + "]"
-                pf  = f"'{sql_safe_escape_string(idx.partial_filter)}'" if idx.partial_filter else "NULL"
-                lines.append(
-                    f"    INSERT INTO __META__.tarkin_indexes "
-                    f"(build_id, schema_name, table_name, name, columns, index_type, \"unique\", primary_key, partial_filter) "
-                    f"VALUES (v_build_id, '{sn}', '{tn}', '{idn}', {ca}, '{idx.index_type}', "
-                    f"{str(idx.unique).lower()}, {str(idx.primary_key).lower()}, {pf});"
-                )
+    for role in project.roles:
+        rn = sql_safe_escape_string(role.name)
+        rc = _object_checksum({
+            "name": role.name, "clearance": role.clearance,
+            "can_login": role.can_login, "can_admin": role.can_admin,
+        })
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_migrations "
+            f"(build_id, object_type, object_name, change_type, checksum_before, checksum_after) "
+            f"VALUES (v_build_id, 'role', '{rn}', 'created', NULL, '{rc}');"
+        )
     lines.append("")
 
-    for schema in project.schemas:
-        for table in schema.tables:
-            for fk in table.foreign_keys:
-                sn  = sql_safe_escape_string(schema.name)
-                tn  = sql_safe_escape_string(table.name)
-                fn_ = sql_safe_escape_string(fk.name)
-                lines.append(
-                    f"    INSERT INTO __META__.tarkin_foreign_keys "
-                    f"(build_id, schema_name, table_name, name, column_name, "
-                    f"referenced_schema, referenced_table, referenced_column) "
-                    f"VALUES (v_build_id, '{sn}', '{tn}', '{fn_}', "
-                    f"'{sql_safe_escape_string(fk.column)}', "
-                    f"'{sql_safe_escape_string(fk.referenced_schema)}', "
-                    f"'{sql_safe_escape_string(fk.referenced_table)}', "
-                    f"'{sql_safe_escape_string(fk.referenced_column)}');"
-                )
+    build_id_expr = "currval(pg_get_serial_sequence('__META__.tarkin_builds', 'build_id'))"
+    lines.append(emit_per_build_inserts(project, build_id_expr))
+
+    for role in project.roles:
+        rn = sql_safe_escape_string(role.name)
+        moa = ("ARRAY[" + ", ".join(f"'{sql_safe_escape_string(m)}'" for m in role.member_of) + "]"
+               if role.member_of else "ARRAY[]::text[]")
+        added = str(role.name not in existing_role_names).lower()
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_roles "
+            f"(build_id, name, clearance, can_login, can_admin, can_write, "
+            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            f"VALUES (v_build_id, '{rn}', {role.clearance}, "
+            f"{str(role.can_login).lower()}, {str(role.can_admin).lower()}, "
+            f"{str(role.can_write).lower()}, {str(role.can_maintain).lower()}, "
+            f"{str(role.can_access_sensitive).lower()}, {added}, "
+            f"{moa});"
+        )
     lines.append("")
+
+    if project.database.audit_enabled:
+        lines.append(
+            f"    INSERT INTO __META__.tarkin_roles "
+            f"(build_id, name, clearance, can_login, can_admin, can_write, "
+            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            f"VALUES (v_build_id, 'tarkin_audit', 0, false, false, false, false, false, true, ARRAY[]::text[]);"
+        )
+        lines.append("")
 
     for (shadow, table_name, constraint_name) in added_fks:
         sh = sql_safe_escape_string(shadow)
@@ -1848,70 +1858,6 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
     if moved_objects:
         lines.append("")
 
-    for role in project.roles:
-        rn  = sql_safe_escape_string(role.name)
-        moa = ("ARRAY[" + ", ".join(f"'{sql_safe_escape_string(m)}'" for m in role.member_of) + "]"
-               if role.member_of else "ARRAY[]::text[]")
-        added = str(role.name not in existing_role_names).lower()
-        lines.append(
-            f"    INSERT INTO __META__.tarkin_roles "
-            f"(build_id, name, clearance, can_login, can_admin, can_write, "
-            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
-            f"VALUES (v_build_id, '{rn}', {role.clearance}, "
-            f"{str(role.can_login).lower()}, {str(role.can_admin).lower()}, "
-            f"{str(role.can_write).lower()}, {str(role.can_maintain).lower()}, "
-            f"{str(role.can_access_sensitive).lower()}, {added}, "
-            f"{moa});"
-        )
-        rc = _object_checksum({
-            "name": role.name, "clearance": role.clearance,
-            "can_login": role.can_login, "can_admin": role.can_admin,
-        })
-        lines.append(
-            f"    INSERT INTO __META__.tarkin_migrations "
-            f"(build_id, object_type, object_name, change_type, checksum_before, checksum_after) "
-            f"VALUES (v_build_id, 'role', '{rn}', 'created', NULL, '{rc}');"
-        )
-    lines.append("")
-
-    for role in project.roles:
-        for sp in role.on:
-            rn = sql_safe_escape_string(role.name)
-            sn = sql_safe_escape_string(sp.name)
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_role_schemas "
-                f"(build_id, role_name, schema_name, \"usage\", \"create\") "
-                f"VALUES (v_build_id, '{rn}', '{sn}', "
-                f"{str(sp.usage).lower()}, {str(sp.create).lower()});"
-            )
-    lines.append("")
-
-    for role in project.roles:
-        for sp in role.on:
-            for tp in sp.tables:
-                rn = sql_safe_escape_string(role.name)
-                sn = sql_safe_escape_string(sp.name)
-                tn = sql_safe_escape_string(tp.name)
-                lines.append(
-                    f"    INSERT INTO __META__.tarkin_role_tables "
-                    f"(build_id, role_name, schema_name, table_name, \"select\", "
-                    f"\"insert\", \"update\", \"delete\", \"truncate\", \"references\", \"trigger\", \"maintain\") "
-                    f"VALUES (v_build_id, '{rn}', '{sn}', '{tn}', "
-                    f"{str(tp.select).lower()}, {str(tp.insert).lower()}, "
-                    f"{str(tp.update).lower()}, {str(tp.delete).lower()}, "
-                    f"{str(tp.truncate).lower()}, {str(tp.references).lower()}, "
-                    f"{str(tp.trigger).lower()}, {str(tp.maintain).lower()});"
-                )
-    lines.append("")
-
-    if project.database.audit_enabled:
-        lines.append(
-            f"    INSERT INTO __META__.tarkin_roles "
-            f"(build_id, name, clearance, can_login, can_admin, can_write, "
-            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
-            f"VALUES (v_build_id, 'tarkin_audit', 0, false, false, false, false, false, true, ARRAY[]::text[]);"
-        )
-
     for (role_name, schema_name, table_name, column_name, grant_type) in revoked_grants:
         rn = sql_safe_escape_string(role_name)
         sn = sql_safe_escape_string(schema_name)
@@ -1925,41 +1871,6 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
         )
     if revoked_grants:
         lines.append("")
-
-    for schema in project.schemas:
-        shadow = f"tk_{schema.name}"
-        for table in schema.tables:
-            id_cols = [c for c in table.columns if c.is_subject_identifier]
-            if not id_cols or table.erase_strategy is None:
-                continue
-            sn        = sql_safe_escape_string(schema.name)
-            tn        = sql_safe_escape_string(table.name)
-            sh        = sql_safe_escape_string(shadow)
-            es        = sql_safe_escape_string(str(table.erase_strategy))
-            col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.name)}'" for c in id_cols) + "]"
-            col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.type)}'" for c in id_cols) + "]"
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_subject_identifiers "
-                f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
-                f"identifier_cols, identifier_types, erase_strategy) "
-                f"VALUES (v_build_id, '{sn}', '{tn}', '{sh}', '{tn}', "
-                f"{col_names}, {col_types}, '{es}');"
-            )
-    lines.append("")
-
-    for schema in project.schemas:
-        for table in schema.tables:
-            if table.retention_days is None or table.erase_strategy is None:
-                continue
-            sn = sql_safe_escape_string(schema.name)
-            tn = sql_safe_escape_string(table.name)
-            es = sql_safe_escape_string(str(table.erase_strategy))
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_retention "
-                f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
-                f"VALUES (v_build_id, '{sn}', '{tn}', '{es}', {table.retention_days});"
-            )
-    lines.append("")
 
     lines += ["END;", "$$;"]
     return "\n".join(lines)

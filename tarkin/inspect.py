@@ -98,12 +98,18 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
     mat_views          = _get_materialized_views(conn, schema_name)
     functions          = _get_functions(conn, schema_name)
     trigger_functions  = _get_trigger_functions(conn, schema_name)
+    procedures         = _get_procedures(conn, schema_name)
     sequences          = _get_sequences(conn, schema_name)
     types_             = _get_custom_types(conn, schema_name)
     collations         = _get_collations(conn, schema_name)
     domains            = _get_domains(conn, schema_name)
     operators          = _get_operators(conn, schema_name)
     foreign_tables     = _get_foreign_tables(conn, schema_name)
+    aggregates         = _get_aggregates(conn, schema_name)
+    fts_configurations = _get_fts_configurations(conn, schema_name)
+    fts_dictionaries   = _get_fts_dictionaries(conn, schema_name)
+    fts_parsers        = _get_fts_parsers(conn, schema_name)
+    fts_templates      = _get_fts_templates(conn, schema_name)
 
     return SchemaConfig(
         name               = schema_name,
@@ -112,12 +118,18 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
         materialized_views = mat_views,
         functions          = functions,
         trigger_functions  = trigger_functions,
+        procedures         = procedures,
         sequences          = sequences,
         types              = types_,
         collations         = collations,
         domains            = domains,
         operators          = operators,
         foreign_tables     = foreign_tables,
+        aggregates         = aggregates,
+        fts_configurations = fts_configurations,
+        fts_dictionaries   = fts_dictionaries,
+        fts_parsers        = fts_parsers,
+        fts_templates      = fts_templates,
     )
 
 
@@ -155,7 +167,7 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
         name     = sa_col["name"]
         pg_extra = pg_cols.get(name, {})
 
-        col_type = _pg_type_string(sa_col)  # noqa
+        col_type = _pg_type_string(sa_col)
         default  = pg_extra.get("column_default")
         default  = str(default) if default is not None else None
 
@@ -319,7 +331,12 @@ def _get_materialized_views(conn: Connection, schema_name: str) -> list[str]:
 
 
 def _get_functions(conn: Connection, schema_name: str) -> list[str]:
-    """Return function signatures (name + arg types). Body is not stored in the governance YAML."""
+    """Return non-trigger function signatures (name + arg types).
+
+    Uses pg_get_function_identity_arguments which returns the canonical
+    argument type list needed for ALTER FUNCTION ... SET SCHEMA.
+    Body is not stored in the governance YAML.
+    """
     rows = conn.execute(text("""
         SELECT p.proname || '(' ||
                pg_get_function_identity_arguments(p.oid) || ')'  AS sig
@@ -339,7 +356,11 @@ def _get_functions(conn: Connection, schema_name: str) -> list[str]:
 
 
 def _get_trigger_functions(conn: Connection, schema_name: str) -> list[str]:
-    """Return trigger function signatures (functions whose return type is trigger). Body is not stored in the governance YAML."""
+    """Return trigger function signatures (functions whose return type is trigger).
+
+    Stores full signature so ALTER FUNCTION can disambiguate overloads.
+    Body is not stored in the governance YAML.
+    """
     rows = conn.execute(text("""
         SELECT p.proname || '(' ||
                pg_get_function_identity_arguments(p.oid) || ')'  AS sig
@@ -348,6 +369,25 @@ def _get_trigger_functions(conn: Connection, schema_name: str) -> list[str]:
         JOIN pg_type      t ON t.oid = p.prorettype
         WHERE n.nspname   = :schema
           AND t.typname   = 'trigger'
+        ORDER BY sig
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_procedures(conn: Connection, schema_name: str) -> list[str]:
+    """Return procedure signatures (name + arg types)."""
+    rows = conn.execute(text("""
+        SELECT p.proname || '(' ||
+               pg_get_function_identity_arguments(p.oid) || ')'  AS sig
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = :schema
+          AND p.prokind = 'p'
+          AND NOT EXISTS (
+                SELECT 1 FROM pg_depend d
+                WHERE d.objid = p.oid
+                  AND d.deptype IN ('e', 'x')
+            )
         ORDER BY sig
     """), {"schema": schema_name}).fetchall()
     return [r[0] for r in rows]
@@ -509,6 +549,73 @@ def _get_foreign_tables(conn: Connection, schema_name: str) -> list[str]:
         WHERE n.nspname = :schema
           AND c.relkind = 'f'
         ORDER BY c.relname
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_aggregates(conn: Connection, schema_name: str) -> list[str]:
+    """Return aggregate signatures as 'name(arg_types)'."""
+    rows = conn.execute(text("""
+        SELECT p.proname || '(' ||
+               pg_get_function_identity_arguments(p.oid) || ')' AS sig
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = :schema
+          AND p.prokind = 'a'
+          AND NOT EXISTS (
+              SELECT 1 FROM pg_depend d
+              WHERE d.objid = p.oid
+                AND d.deptype IN ('e', 'x')
+          )
+        ORDER BY sig
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_fts_configurations(conn: Connection, schema_name: str) -> list[str]:
+    """Return text search configuration names in this schema."""
+    rows = conn.execute(text("""
+        SELECT cfg.cfgname
+        FROM pg_ts_config cfg
+        JOIN pg_namespace n ON n.oid = cfg.cfgnamespace
+        WHERE n.nspname = :schema
+        ORDER BY cfg.cfgname
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_fts_dictionaries(conn: Connection, schema_name: str) -> list[str]:
+    """Return text search dictionary names in this schema."""
+    rows = conn.execute(text("""
+        SELECT dict.dictname
+        FROM pg_ts_dict dict
+        JOIN pg_namespace n ON n.oid = dict.dictnamespace
+        WHERE n.nspname = :schema
+        ORDER BY dict.dictname
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_fts_parsers(conn: Connection, schema_name: str) -> list[str]:
+    """Return text search parser names in this schema."""
+    rows = conn.execute(text("""
+        SELECT prs.prsname
+        FROM pg_ts_parser prs
+        JOIN pg_namespace n ON n.oid = prs.prsnamespace
+        WHERE n.nspname = :schema
+        ORDER BY prs.prsname
+    """), {"schema": schema_name}).fetchall()
+    return [r[0] for r in rows]
+
+
+def _get_fts_templates(conn: Connection, schema_name: str) -> list[str]:
+    """Return text search template names in this schema."""
+    rows = conn.execute(text("""
+        SELECT tmpl.tmplname
+        FROM pg_ts_template tmpl
+        JOIN pg_namespace n ON n.oid = tmpl.tmplnamespace
+        WHERE n.nspname = :schema
+        ORDER BY tmpl.tmplname
     """), {"schema": schema_name}).fetchall()
     return [r[0] for r in rows]
 

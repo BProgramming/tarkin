@@ -429,24 +429,41 @@ def _generate_detach_sql(
 
     if moved_objects:
         lines.append("-- Move schema objects back to shadow schemas")
-        _alter_map = {
+        _sig_alter_map = {
+            "function":         "ALTER FUNCTION",
+            "trigger_function": "ALTER FUNCTION",
+            "procedure":        "ALTER PROCEDURE",
+            "aggregate":        "ALTER AGGREGATE",
+        }
+        _name_alter_map = {
             "sequence":          "ALTER SEQUENCE",
-            "function":          "ALTER FUNCTION",
-            "trigger_function":  "ALTER FUNCTION",
-            "procedure":         "ALTER PROCEDURE",
             "type":              "ALTER TYPE",
             "domain":            "ALTER DOMAIN",
             "collation":         "ALTER COLLATION",
             "view":              "ALTER VIEW",
             "materialized_view": "ALTER MATERIALIZED VIEW",
             "foreign_table":     "ALTER FOREIGN TABLE",
+            "fts_configuration": "ALTER TEXT SEARCH CONFIGURATION",
+            "fts_dictionary":    "ALTER TEXT SEARCH DICTIONARY",
+            "fts_parser":        "ALTER TEXT SEARCH PARSER",
+            "fts_template":      "ALTER TEXT SEARCH TEMPLATE",
         }
         for (schema_name, shadow_name, object_kind, object_name) in moved_objects:
             if object_kind == "operator":
-                lines.append(f'ALTER OPERATOR {sql_safe_double_quote(schema_name)}.{object_name} SET SCHEMA {sql_safe_double_quote(shadow_name)};')
+                lines.append(
+                    f'ALTER OPERATOR {sql_safe_double_quote(schema_name)}.{object_name} '
+                    f'SET SCHEMA {sql_safe_double_quote(shadow_name)};'
+                )
+            elif object_kind in _sig_alter_map:
+                lines.append(
+                    f'{_sig_alter_map[object_kind]} {sql_safe_double_quote(schema_name)}.{object_name} '
+                    f'SET SCHEMA {sql_safe_double_quote(shadow_name)};'
+                )
             else:
-                alter_cmd = _alter_map.get(object_kind, "ALTER")
-                lines.append(f'{alter_cmd} {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(object_name)} SET SCHEMA {sql_safe_double_quote(shadow_name)};')
+                lines.append(
+                    f'{_name_alter_map.get(object_kind, "ALTER")} {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(object_name)} '
+                    f'SET SCHEMA {sql_safe_double_quote(shadow_name)};'
+                )
         lines.append("")
 
     if tarkin_created_roles:

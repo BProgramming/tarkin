@@ -1,6 +1,8 @@
 """Generate a migration artifact from the current build to a new governance YAML."""
 from __future__ import annotations
 import copy
+import hashlib
+import json
 from collections import defaultdict
 from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
@@ -12,6 +14,8 @@ from .codegen import (
     _generate_rls,
     _generate_triggers,
     _generate_views,
+    _generate_roles,
+    _generate_grants,
 )
 from .credentials import ConnectionProfile
 from .diff import (
@@ -36,7 +40,8 @@ from .utils import (
     sql_comment_block_section,
     sql_safe_dollar_quote,
     sql_safe_double_quote,
-    write_artifact,
+    sql_safe_escape_string,
+    write_artifact, emit_per_build_inserts,
 )
 
 
@@ -64,7 +69,9 @@ def migrate(
         )
 
     print("Generating migration SQL...", end="\r")
-    sql = _generate_migration_sql(before, after, changes)
+    yaml_str  = Serializer.to_yaml_string(after)
+    checksum  = project_checksum(after)
+    sql       = _generate_migration_sql(before, after, changes, profile, checksum, yaml_str)
     print("Generating migration SQL... Done.")
 
     timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
@@ -111,9 +118,12 @@ def _read_current_build(profile: ConnectionProfile) -> tuple[GovernanceProject, 
 
 
 def _generate_migration_sql(
-    before:  GovernanceProject,
-    after:   GovernanceProject,
-    changes: list[Change],
+    before:   GovernanceProject,
+    after:    GovernanceProject,
+    changes:  list[Change],
+    profile:  ConnectionProfile,
+    checksum: str,
+    yaml_str: str,
 ) -> str:
     """Generate ordered, transactional migration SQL from a list of Changes.
 
@@ -168,7 +178,7 @@ def _generate_migration_sql(
     add_fks      = _emit_add_fks(changes, after_table_map)
     add_rls      = _emit_add_rls(changes, after_table_map, after)
     role_ops     = _emit_role_changes(changes, before, after)
-    meta_update  = _emit_meta_update(after)
+    meta_update  = _emit_migrate_meta_update(after, changes, profile, checksum, yaml_str)
 
     for title, sql_block in [
         ("DROP FK CONSTRAINTS",       drop_fks),
@@ -192,6 +202,202 @@ def _generate_migration_sql(
 
     sections += [sql_comment_block_section("TRANSACTION END"), "COMMIT;\n"]
     return "\n".join(sections)
+
+
+def _emit_migrate_meta_update(
+    after:    GovernanceProject,
+    changes:  list[Change],
+    profile:  ConnectionProfile,
+    checksum: str,
+    yaml_str: str,
+) -> str:
+    """Carry __META__ forward to a new build_id during migrate.
+
+    Single DO block that:
+      1. Reads the prior build_id (latest tarkin_builds row).
+      2. Inserts a new tarkin_builds row, copying carry-over fields
+         (pgaudit_*_before, pgcrypto_enabled_by_tarkin) from the prior row.
+      3. Carries forward (INSERT...SELECT with new build_id):
+            tarkin_moved_objects, tarkin_added_fks,
+            tarkin_added_generated_cols, tarkin_revoked_grants
+      4. Regenerates from `after` (declarative state) via _emit_per_build_inserts,
+         with added_by_tarkin preservation for tarkin_roles.
+      5. Writes one tarkin_migrations row per Change.
+    """
+    pkg_ver      = pkg_version("tarkin")
+    profile_lit  = sql_safe_escape_string(profile.profile)
+    database_lit = sql_safe_escape_string(profile.database)
+    checksum_lit = sql_safe_escape_string(checksum)
+    yaml_tag_open, yaml_tag_close = sql_safe_dollar_quote(yaml_str)
+
+    parts: list[str] = [
+        "DO $$", "DECLARE",
+        "    v_prev_build_id bigint;",
+        "    v_new_build_id  bigint;",
+        "BEGIN",
+        "    SELECT build_id INTO v_prev_build_id",
+        "    FROM __META__.tarkin_builds",
+        "    ORDER BY built_at DESC LIMIT 1;",
+        "",
+        "    INSERT INTO __META__.tarkin_builds (",
+        "        tarkin_version, profile, database_name, checksum, yaml,",
+        "        pgcrypto_enabled_by_tarkin,",
+        "        pgaudit_log_before, pgaudit_log_catalog_before,",
+        "        pgaudit_log_relation_before, pgaudit_role_before",
+        "    )",
+        "    SELECT",
+        f"        '{sql_safe_escape_string(pkg_ver)}',",
+        f"        '{profile_lit}',",
+        f"        '{database_lit}',",
+        f"        '{checksum_lit}',",
+        f"        {yaml_tag_open}{yaml_str}{yaml_tag_close},",
+        "        pgcrypto_enabled_by_tarkin,",
+        "        pgaudit_log_before, pgaudit_log_catalog_before,",
+        "        pgaudit_log_relation_before, pgaudit_role_before",
+        "    FROM __META__.tarkin_builds",
+        "    WHERE build_id = v_prev_build_id",
+        "    RETURNING build_id INTO v_new_build_id;",
+        "",
+    ]
+
+    for tbl, cols in (
+        ("tarkin_moved_objects",        "schema_name, shadow_name, object_kind, object_name"),
+        ("tarkin_added_fks",            "shadow_schema, table_name, constraint_name"),
+        ("tarkin_added_generated_cols", "shadow_schema, table_name, column_name"),
+        ("tarkin_revoked_grants",       "role_name, schema_name, table_name, column_name, grant_type"),
+    ):
+        parts.append(f"    INSERT INTO __META__.{tbl} (build_id, {cols})")
+        parts.append(f"    SELECT v_new_build_id, {cols}")
+        parts.append(f"    FROM __META__.{tbl} WHERE build_id = v_prev_build_id;")
+        parts.append("")
+
+    after_role_names = {r.name for r in after.roles}
+    for r in after.roles:
+        name_lit  = sql_safe_escape_string(r.name)
+        clearance = str(int(r.clearance)) if r.clearance is not None else "0"
+        bools = {
+            "can_login":            "true" if r.can_login            else "false",
+            "can_admin":            "true" if r.can_admin            else "false",
+            "can_write":            "true" if r.can_write            else "false",
+            "can_maintain":         "true" if r.can_maintain         else "false",
+            "can_access_sensitive": "true" if r.can_access_sensitive else "false",
+        }
+        member_of_pg = (
+            "ARRAY[]::text[]" if not r.member_of
+            else "ARRAY[" + ", ".join(
+                f"'{sql_safe_escape_string(m)}'" for m in r.member_of
+            ) + "]::text[]"
+        )
+        parts.append(
+            f"    INSERT INTO __META__.tarkin_roles "
+            f"(build_id, name, clearance, can_login, can_admin, can_write, "
+            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            f"VALUES (v_new_build_id, '{name_lit}', {clearance}, "
+            f"{bools['can_login']}, {bools['can_admin']}, {bools['can_write']}, "
+            f"{bools['can_maintain']}, {bools['can_access_sensitive']}, "
+            f"COALESCE("
+            f"(SELECT added_by_tarkin FROM __META__.tarkin_roles "
+            f"WHERE build_id = v_prev_build_id AND name = '{name_lit}'), "
+            f"false), "
+            f"{member_of_pg});"
+        )
+
+    if after_role_names:
+        names_csv = ", ".join(
+            f"'{sql_safe_escape_string(n)}'" for n in sorted(after_role_names)
+        )
+    else:
+        names_csv = "'___tarkin_no_after_roles___'"
+    parts.append(
+        "    INSERT INTO __META__.tarkin_roles "
+        "(build_id, name, clearance, can_login, can_admin, can_write, "
+        "can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+        "SELECT v_new_build_id, name, clearance, can_login, can_admin, "
+        "can_write, can_maintain, can_access_sensitive, added_by_tarkin, member_of "
+        "FROM __META__.tarkin_roles "
+        "WHERE build_id = v_prev_build_id "
+        "  AND added_by_tarkin = true "
+        f"  AND name NOT IN ({names_csv});"
+    )
+    parts.append("")
+
+    if after.database.audit_enabled:
+        parts.append(
+            "    INSERT INTO __META__.tarkin_roles "
+            "(build_id, name, clearance, can_login, can_admin, can_write, "
+            "can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            "SELECT v_new_build_id, name, clearance, can_login, can_admin, "
+            "can_write, can_maintain, can_access_sensitive, added_by_tarkin, member_of "
+            "FROM __META__.tarkin_roles "
+            "WHERE build_id = v_prev_build_id "
+            "  AND name = 'tarkin_audit' "
+            "  AND NOT EXISTS ("
+            "      SELECT 1 FROM __META__.tarkin_roles "
+            "      WHERE build_id = v_new_build_id AND name = 'tarkin_audit'"
+            "  );"
+        )
+        parts.append("")
+
+    per_build = emit_per_build_inserts(after, "v_new_build_id")
+    parts.append(per_build)
+
+    def _change_checksum(c: Change) -> str:
+        payload = {
+            "path":  c.path,
+            "field": c.field,
+            "after": str(c.after) if c.after is not None else None,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()[:16]
+
+    _kind_to_object_type = {
+        str(ObjectType.SCHEMA):      "schema",
+        str(ObjectType.TABLE):       "table",
+        str(ObjectType.COLUMN):      "column",
+        str(ObjectType.INDEX):       "index",
+        str(ObjectType.FOREIGN_KEY): "foreign_key",
+        str(ObjectType.ROLE):        "role",
+        str(ObjectType.DATABASE):    "database",
+        str(ObjectType.PERMISSION):  "permission",
+    }
+
+    for ch in changes:
+        parts_path = ch.path.split(".")
+        ot = _kind_to_object_type.get(str(ch.object_type), "other")
+        ct = str(ch.kind).casefold()  # 'added' | 'removed' | 'modified'
+
+        if len(parts_path) == 1:
+            obj_schema = "NULL"
+            obj_table  = "NULL"
+            obj_name   = f"'{sql_safe_escape_string(parts_path[0])}'"
+        elif len(parts_path) == 2:
+            obj_schema = f"'{sql_safe_escape_string(parts_path[0])}'"
+            obj_table  = "NULL"
+            obj_name   = f"'{sql_safe_escape_string(parts_path[1])}'"
+        else:
+            obj_schema = f"'{sql_safe_escape_string(parts_path[0])}'"
+            obj_table  = f"'{sql_safe_escape_string(parts_path[1])}'"
+            obj_name   = f"'{sql_safe_escape_string(parts_path[2])}'"
+
+        chk = _change_checksum(ch)
+        before_chk = (
+            f"'{sql_safe_escape_string(str(ch.before))}'"
+            if ch.before is not None else "NULL"
+        )
+        parts.append(
+            f"    INSERT INTO __META__.tarkin_migrations "
+            f"(build_id, object_type, object_schema, object_table, object_name, "
+            f"change_type, checksum_before, checksum_after) "
+            f"VALUES (v_new_build_id, '{ot}', {obj_schema}, {obj_table}, {obj_name}, "
+            f"'{ct}', {before_chk}, '{chk}');"
+        )
+
+    parts.append("")
+    parts.append("END;")
+    parts.append("$$ LANGUAGE plpgsql;")
+    parts.append("")
+    return "\n".join(parts)
 
 
 def _emit_drop_fks(changes: list[Change]) -> str:
@@ -339,6 +545,7 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
     for c in changes:
         if c.object_type != ObjectType.TABLE:
             continue
+
         if c.kind == ChangeKind.ADDED:
             parts = c.path.split(".")
             if len(parts) != 2:
@@ -350,26 +557,126 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
             table = next((t for t in schema.tables if t.name == table_name), None)
             if not table:
                 continue
-            shadow = f"tk_{schema_name}"
-            col_defs = ", ".join(
-                f"{sql_safe_double_quote(col.name)} {col.type}"
-                + (" NOT NULL" if not col.nullable else "")
-                for col in table.columns
-                if not col.is_generated
-            )
-            lines.append(f"CREATE TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ({col_defs});")
-            for idx in table.indexes:
-                unique = "UNIQUE " if idx.unique else ""
-                cols   = ", ".join(sql_safe_double_quote(c) for c in idx.columns)
-                if idx.primary_key:
-                    lines.append(
-                        f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ADD PRIMARY KEY ({cols});"
+
+            shadow   = f"tk_{schema_name}"
+            shadow_q = sql_safe_double_quote(shadow)
+            table_q  = sql_safe_double_quote(table_name)
+
+            col_lines: list[str] = []
+            for col in table.columns:
+                qname = sql_safe_double_quote(col.name)
+                if col.is_generated and col.generated_expression:
+                    storage = col.generated_storage or "STORED"
+                    col_lines.append(
+                        f"{qname} {col.type} GENERATED ALWAYS AS "
+                        f"({col.generated_expression}) {storage}"
                     )
                 else:
+                    col_parts = [qname, col.type]
+                    if not col.nullable:
+                        col_parts.append("NOT NULL")
+                    if col.default is not None and not col.is_generated:
+                        col_parts.append(f"DEFAULT {col.default}")
+                    col_lines.append(" ".join(col_parts))
+
+            if any(c2.versioned for c2 in table.columns):
+                col_lines.append('"__valid_from__" timestamptz NOT NULL DEFAULT now()')
+                col_lines.append(
+                    '"__valid_to__" timestamptz NOT NULL '
+                    "DEFAULT 'infinity'::timestamptz"
+                )
+
+            if table.retention_days is not None:
+                col_lines.append(
+                    f'"__expires_at__" timestamptz NOT NULL '
+                    f"DEFAULT now() + interval '{int(table.retention_days)} days'"
+                )
+                col_lines.append('"__erase_on_expiry__" bool NOT NULL DEFAULT true')
+
+            col_defs = ", ".join(col_lines)
+            lines.append(f"CREATE TABLE {shadow_q}.{table_q} ({col_defs});")
+
+            # Indexes: versioned tables get a partial unique index instead of PK.
+            is_versioned = any(c2.versioned for c2 in table.columns)
+            for idx in table.indexes:
+                cols = ", ".join(sql_safe_double_quote(col) for col in idx.columns)
+                if idx.primary_key:
+                    if is_versioned:
+                        # Replace PK with partial unique index on current rows.
+                        idx_q = sql_safe_double_quote(f"idx_{table_name}_current")
+                        lines.append(
+                            f"CREATE UNIQUE INDEX {idx_q} ON {shadow_q}.{table_q} "
+                            f"({cols}) WHERE __valid_to__ = 'infinity'::timestamptz;"
+                        )
+                    else:
+                        lines.append(
+                            f"ALTER TABLE {shadow_q}.{table_q} ADD PRIMARY KEY ({cols});"
+                        )
+                else:
+                    unique = "UNIQUE " if idx.unique else ""
+                    partial = f" WHERE {idx.partial_filter}" if idx.partial_filter else ""
                     lines.append(
                         f"CREATE {unique}INDEX {sql_safe_double_quote(idx.name)} "
-                        f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} ({cols});"
+                        f"ON {shadow_q}.{table_q} ({cols}){partial};"
                     )
+
+            if table.retention_days is not None:
+                idx_q = sql_safe_double_quote(f"idx_{table_name}_expires_at")
+                lines.append(
+                    f"CREATE INDEX {idx_q} ON {shadow_q}.{table_q} (__expires_at__) "
+                    f"WHERE __erase_on_expiry__ = true;"
+                )
+
+            id_cols = [col for col in table.columns if col.is_subject_identifier]
+            for col in id_cols:
+                idx_name = sql_safe_double_quote(f"tarkin_subject_{table_name}_{col.name}")
+                lines.append(
+                    f"CREATE INDEX {idx_name} ON {shadow_q}.{table_q} "
+                    f"({sql_safe_double_quote(col.name)});"
+                )
+
+            for col in table.columns:
+                if col.is_generated and col.generated_expression:
+                    sh = sql_safe_escape_string(shadow)
+                    tn = sql_safe_escape_string(table_name)
+                    cn = sql_safe_escape_string(col.name)
+                    lines.append(
+                        f"INSERT INTO __META__.tarkin_added_generated_cols "
+                        f"(build_id, shadow_schema, table_name, column_name) "
+                        f"VALUES ("
+                        f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
+                        f"'{sh}', '{tn}', '{cn}');"
+                    )
+
+            if id_cols and table.erase_strategy is not None:
+                sn        = sql_safe_escape_string(schema_name)
+                tn        = sql_safe_escape_string(table_name)
+                sh        = sql_safe_escape_string(shadow)
+                es        = sql_safe_escape_string(str(table.erase_strategy))
+                col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c2.name)}'" for c2 in id_cols) + "]"
+                col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c2.type)}'" for c2 in id_cols) + "]"
+                lines.append(
+                    f"INSERT INTO __META__.tarkin_subject_identifiers "
+                    f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
+                    f"identifier_cols, identifier_types, erase_strategy) "
+                    f"VALUES ("
+                    f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
+                    f"'{sn}', '{tn}', '{sh}', '{tn}', {col_names}, {col_types}, '{es}');"
+                )
+
+            if table.retention_days is not None and table.erase_strategy is not None:
+                sn = sql_safe_escape_string(schema_name)
+                tn = sql_safe_escape_string(table_name)
+                es = sql_safe_escape_string(str(table.erase_strategy))
+                lines.append(
+                    f"INSERT INTO __META__.tarkin_retention "
+                    f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
+                    f"VALUES ("
+                    f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
+                    f"'{sn}', '{tn}', '{es}', {table.retention_days});"
+                )
+
+            lines.append("")
 
         elif c.kind == ChangeKind.REMOVED:
             parts = c.path.split(".")
@@ -387,7 +694,7 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
             "audit_enabled", "clearance", "erase_strategy",
             "retention_days",
         ):
-            # These are metadata or codegen-level — handled in other sections or META update
+            # These are metadata or codegen-level — handled in other sections or META update.
             pass
 
     return "\n".join(lines) + "\n" if lines else ""
@@ -409,11 +716,30 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
             tbl = cast(TableConfig, after_table_map.get((schema_name, table_name)))
             col = next((c2 for c2 in tbl.columns if c2.name == col_name), None) if tbl else None
             if col:
-                null_clause = "" if col.nullable else " NOT NULL"
-                default     = f" DEFAULT {col.default}" if col.default else ""
-                lines.append(
-                    f"ALTER TABLE {tbl_ref} ADD COLUMN {sql_safe_double_quote(col_name)} {col.type}{null_clause}{default};"
-                )
+                qcol = sql_safe_double_quote(col_name)
+                if col.is_generated and col.generated_expression:
+                    storage = col.generated_storage or "STORED"
+                    lines.append(
+                        f"ALTER TABLE {tbl_ref} ADD COLUMN {qcol} {col.type} "
+                        f"GENERATED ALWAYS AS ({col.generated_expression}) {storage};"
+                    )
+                    sh = sql_safe_escape_string(shadow)
+                    tn = sql_safe_escape_string(table_name)
+                    cn = sql_safe_escape_string(col_name)
+                    lines.append(
+                        f"INSERT INTO __META__.tarkin_added_generated_cols "
+                        f"(build_id, shadow_schema, table_name, column_name) "
+                        f"VALUES ("
+                        f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
+                        f"'{sh}', '{tn}', '{cn}');"
+                    )
+                else:
+                    null_clause = "" if col.nullable else " NOT NULL"
+                    default     = f" DEFAULT {col.default}" if col.default else ""
+                    lines.append(
+                        f"ALTER TABLE {tbl_ref} ADD COLUMN {sql_safe_double_quote(col_name)} "
+                        f"{col.type}{null_clause}{default};"
+                    )
 
         elif c.kind == ChangeKind.REMOVED:
             lines.append(
@@ -451,7 +777,7 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
                     )
             elif c.field in ("masking_strategy", "mask_config", "sensitive",
                              "clearance", "is_subject_identifier", "versioned"):
-                # View-layer changes — handled by view recreation
+                # View-layer changes — handled by view recreation.
                 pass
 
     return "\n".join(lines) + "\n" if lines else ""
@@ -566,12 +892,22 @@ def _emit_add_fks(changes: list[Change], after_table_map: dict) -> str:
 
 
 def _emit_add_rls(changes: list[Change], after_table_map: dict, after: GovernanceProject) -> str:
+    """Recreate RLS for tables with modified RLS fields AND newly-added tables with rls_enabled."""
     affected: set[tuple[str, str]] = set()
     for c in changes:
         if c.object_type == ObjectType.TABLE and c.field and c.field.startswith("rls"):
             parts = c.path.split(".")
             if len(parts) == 2:
                 affected.add((parts[0], parts[1]))
+
+    for c in changes:
+        if c.object_type == ObjectType.TABLE and c.kind == ChangeKind.ADDED:
+            parts = c.path.split(".")
+            if len(parts) == 2:
+                schema_name, table_name = parts
+                tbl = cast(TableConfig, after_table_map.get((schema_name, table_name)))
+                if tbl and tbl.rls_enabled:
+                    affected.add((schema_name, table_name))
 
     if not affected:
         return ""
@@ -600,7 +936,6 @@ def _emit_add_rls(changes: list[Change], after_table_map: dict, after: Governanc
 
 
 def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: GovernanceProject) -> str:
-    from .codegen import _generate_roles, _generate_grants
     role_changes = [c for c in changes if c.object_type in (ObjectType.ROLE, ObjectType.PERMISSION)]
     if not role_changes:
         return ""
@@ -639,31 +974,6 @@ def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: 
     lines.append(_generate_grants(after))
 
     return "\n".join(lines) + "\n"
-
-
-def _emit_meta_update(after: GovernanceProject) -> str:
-    """Update __META__.tarkin_builds with the new YAML and checksum."""
-    yaml_str  = Serializer.to_yaml_string(after)
-    checksum  = project_checksum(after)
-    version   = pkg_version("tarkin")
-    dq_open, dq_close = sql_safe_dollar_quote(yaml_str)
-    latest = "(SELECT {col} FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1)"
-    return (
-        f"INSERT INTO __META__.tarkin_builds "
-        f"(tarkin_version, profile, database_name, checksum, yaml, pgcrypto_enabled_by_tarkin, "
-        f"pgaudit_log_before, pgaudit_log_catalog_before, pgaudit_log_relation_before, pgaudit_role_before) "
-        f"VALUES ('{version}', "
-        f"{latest.format(col='profile')}, "
-        f"{latest.format(col='database_name')}, "
-        f"'{checksum}', "
-        f"{dq_open}{yaml_str}{dq_close}, "
-        f"{latest.format(col='pgcrypto_enabled_by_tarkin')}, "
-        f"{latest.format(col='pgaudit_log_before')}, "
-        f"{latest.format(col='pgaudit_log_catalog_before')}, "
-        f"{latest.format(col='pgaudit_log_relation_before')}, "
-        f"{latest.format(col='pgaudit_role_before')}"
-        f");\n"
-    )
 
 
 def _migration_metadata(
