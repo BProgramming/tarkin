@@ -9,11 +9,11 @@ authors = [
     { name = "Brent Pollard", email = "brentjpollard@gmail.com" }
 ]
 dependencies = [
-    "typer",
-    "pydantic",
-    "sqlalchemy",
-    "psycopg[binary]",
-    "ruamel.yaml"
+    "typer>=0.9,<1.0",
+    "pydantic>=2.0,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "psycopg[binary]>=3.1,<4.0",
+    "ruamel.yaml>=0.18,<1.0"
 ]
 
 [project.scripts]

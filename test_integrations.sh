@@ -22,7 +22,7 @@ docker run -d \
   -e POSTGRES_PASSWORD="$DB_PASS" \
   -p "$DB_PORT:5432" \
   "$IMAGE_NAME" \
-  -c shared_preload_libraries=pgaudit
+  -c shared_preload_libraries=pgaudit,pg_cron
 
 echo "Waiting for database to be ready..."
 ATTEMPTS=0

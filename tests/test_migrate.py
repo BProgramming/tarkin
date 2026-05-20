@@ -384,26 +384,30 @@ class TestGenerateMigrationSql:
     def test_migration_sql_has_begin_and_commit(self) -> None:
         before, after = self._build_before_after()
         changes = diff_projects(before, after)
-        sql = _generate_migration_sql(before, after, changes)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "BEGIN;" in sql
         assert "COMMIT;" in sql
 
     def test_migration_sql_has_section_headers(self) -> None:
         before, after = self._build_before_after()
         changes = diff_projects(before, after)
-        sql = _generate_migration_sql(before, after, changes)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "TARKIN MIGRATION" in sql
 
     def test_migration_sql_updates_meta(self) -> None:
         before, after = self._build_before_after()
         changes = diff_projects(before, after)
-        sql = _generate_migration_sql(before, after, changes)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "tarkin_builds" in sql
 
     def test_migration_sql_contains_column_add(self) -> None:
         before, after = self._build_before_after()
         changes = diff_projects(before, after)
-        sql = _generate_migration_sql(before, after, changes)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert 'ADD COLUMN "email"' in sql
 
     def test_no_changes_raises(self) -> None:

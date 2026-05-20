@@ -118,7 +118,7 @@ class TestBuild:
             proj.database.profile = prof.profile
 
             try:
-                zip_path = build(proj, prof, out_dir=tmp_path)
+                zip_path = build(proj, prof, output_directory=tmp_path)
                 assert zip_path.exists()
                 assert zip_path.suffix == ".zip"
             except BuildError as exc:
@@ -136,7 +136,7 @@ class TestAttachDetach:
         proj.database.profile = prof.profile
 
         try:
-            zip_path = build(proj, prof, out_dir=tmp_path)
+            zip_path = build(proj, prof, output_directory=tmp_path)
         except BuildError as exc:
             pytest.skip(f"Build failed: {exc}")
 
@@ -159,7 +159,7 @@ class TestAttachDetach:
         proj.database.profile = prof.profile
 
         try:
-            zip_path = build(proj, prof, out_dir=tmp_path)
+            zip_path = build(proj, prof, output_directory=tmp_path)
             attach(prof, build_path=zip_path)
         except (BuildError, AttachError) as exc:
             pytest.skip(f"Could not attach for detach test: {exc}")
@@ -179,7 +179,7 @@ class TestAttachDetach:
         proj.database.profile = prof.profile
 
         try:
-            zip_path = build(proj, prof, out_dir=tmp_path)
+            zip_path = build(proj, prof, output_directory=tmp_path)
             attach(prof, build_path=zip_path)
         except (BuildError, AttachError) as exc:
             pytest.skip(f"Could not attach for double-attach test: {exc}")
@@ -236,7 +236,7 @@ class TestPgauditSnapshot:
             proj.database.audit_enabled = True
 
             try:
-                zip_path = build(proj, prof, out_dir=tmp_path)
+                zip_path = build(proj, prof, output_directory=tmp_path)
                 attach(prof, build_path=zip_path)
             except (BuildError, AttachError) as exc:
                 pytest.skip(f"Could not attach for pgaudit test: {exc}")
@@ -307,7 +307,7 @@ class TestColumnGrantRoundtrip:
             proj.database.profile = prof.profile
 
             try:
-                zip_path = build(proj, prof, out_dir=tmp_path)
+                zip_path = build(proj, prof, output_directory=tmp_path)
                 attach(prof, build_path=zip_path)
             except (BuildError, AttachError) as exc:
                 pytest.skip(f"Could not attach for column-grant test: {exc}")

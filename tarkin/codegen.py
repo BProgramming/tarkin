@@ -1872,6 +1872,20 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
     if revoked_grants:
         lines.append("")
 
+    for schema in project.schemas:
+        sn = sql_safe_escape_string(schema.name)
+        for priv in ("USAGE", "CREATE"):
+            lines.append(
+                f"    IF has_schema_privilege('public', '{sn}', '{priv}') THEN"
+            )
+            lines.append(
+                f"        INSERT INTO __META__.tarkin_revoked_grants "
+                f"(build_id, role_name, schema_name, table_name, column_name, grant_type) "
+                f"VALUES (v_build_id, 'PUBLIC', '{sn}', NULL, NULL, '{priv}');"
+            )
+            lines.append(f"    END IF;")
+    lines.append("")
+
     lines += ["END;", "$$;"]
     return "\n".join(lines)
 

@@ -1,8 +1,20 @@
 # Security Policy
 
-## Reporting Vulnerabilities
+## Reporting a Vulnerability
 
-If you discover a security vulnerability in Tarkin, please report it via GitHub Security Advisories rather than opening a public issue. We aim to respond within 72 hours.
+Please **do not** open a public GitHub issue for security vulnerabilities.
+
+Report vulnerabilities privately via GitHub's Security Advisory feature:
+**[Report a vulnerability](../../security/advisories/new)**
+
+Include as much of the following as you can:
+
+- A description of the vulnerability and its potential impact
+- Steps to reproduce or a proof-of-concept
+- Affected versions
+- Any suggested mitigations
+
+You can expect an acknowledgement within **5 business days** and a status update within **14 days**.
 
 ## Release Integrity
 
@@ -97,3 +109,8 @@ When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgau
 
 - The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.
 - The shadow-schema boundary depends on the governance YAML enumerating every role with access to the governed schemas (see *Shadow Schema Model* above).
+
+## Out of Scope
+
+- Vulnerabilities in PostgreSQL itself.
+- Issues requiring an attacker to already have write access to the governed database. This must be controlled via secure access to your RDS of choice.
