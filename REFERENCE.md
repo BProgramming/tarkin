@@ -116,7 +116,7 @@ What it does:
 Applies a build or migration artifact to a live database.
 
 Options:
---build | -b:       path to artifact zip (defaults to the most recent tarkin\_build\_*.zip or tarkin\_migrate\_*.zip in out/)
+--build | -b:       path to artifact zip (defaults to the most recent tarkin\_build\_\*.zip or tarkin\_migrate\_\*.zip in out/)
 --profile | -p:     credentials profile (read from the artifact metadata if omitted)
 --credentials | -c: path to credentials.toml
 
@@ -166,7 +166,7 @@ What it does:
 - Moves schema objects (sequences, functions, etc.) back to shadow schemas
 - Drops Tarkin-created roles (REASSIGN OWNED, DROP OWNED, DROP ROLE)
 - Runs DROP SCHEMA ... CASCADE on the public-facing schemas; renames tk\_<schema> back to <schema>
-- Drops tarkin\_rls\_* policies via pg\_policies query; disables RLS and NO FORCE on restored tables
+- Drops tarkin\_rls\_\* policies via pg\_policies query; disables RLS and NO FORCE on restored tables
 - Restores pre-attach grants (schema-level first, then table-level)
 - Drops \_\_META\_\_ CASCADE
 - Restores pgaudit settings (log, log\_catalog, log\_relation, role) to pre-attach values
@@ -218,7 +218,7 @@ What it does:
 - Raises MigrateError if no differences are detected
 - Generates ordered, transactional migration SQL in 14 sections:
   - Drop FK constraints for removed or modified FKs
-  - Drop all tarkin\_rls\_* policies and disables RLS on tables whose RLS config changed
+  - Drop all tarkin\_rls\_\* policies and disables RLS on tables whose RLS config changed
   - Drop indexes (for removed or modified non-PK indexes only, PK changes emit a -- WARNING manual intervention stub)
   - Drop views and triggers for all tables in affected schemas
   - Schema changes: CREATE for added schemas (both public and tk\_); DROP CASCADE with warning for removed schemas
@@ -228,7 +228,7 @@ What it does:
   - Recreate INSTEAD OF trigger functions and trigger attachments
   - Recreate removed/modified indexes (PK changes emit a warning stub)
   - Recreate removed/modified FKs referencing shadow tables
-  - Recreate RLS enable/force and tarkin\_rls\_* policies for changed tables
+  - Recreate RLS enable/force and tarkin\_rls\_\* policies for changed tables
   - Revoke existing grants for affected roles, then regenerate roles and grants from the after-state
   - Insert a new \_\_META\_\_.tarkin\_builds row with the after-YAML and target checksum
 - Writes out/tarkin\_migrate\_<timestamp>.zip with tarkin\_build.json (metadata including artifact\_type: "migrate", source\_checksum, target\_checksum, change\_count, and the full serialised change list) and tarkin\_build.sql
