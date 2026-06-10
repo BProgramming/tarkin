@@ -110,11 +110,12 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
 
     for schema in project.schemas:
         sn = sql_safe_escape_string(schema.name)
+        sd = f"'{sql_safe_escape_string(schema.description)}'" if schema.description else "NULL"
         lines.append(
             f"    INSERT INTO __META__.tarkin_schemas "
-            f"(build_id, name, shadow_name, clearance, audit_enabled) "
+            f"(build_id, name, shadow_name, clearance, audit_enabled, description) "
             f"VALUES ({b}, '{sn}', 'tk_{sn}', {schema.clearance}, "
-            f"{str(schema.audit_enabled).lower()});"
+            f"{str(schema.audit_enabled).lower()}, {sd});"
         )
     if project.schemas:
         lines.append("")
@@ -123,11 +124,12 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
         for table in schema.tables:
             sn = sql_safe_escape_string(schema.name)
             tn = sql_safe_escape_string(table.name)
+            td = f"'{sql_safe_escape_string(table.description)}'" if table.description else "NULL"
             lines.append(
                 f"    INSERT INTO __META__.tarkin_tables "
-                f"(build_id, schema_name, name, clearance, audit_enabled) "
+                f"(build_id, schema_name, name, clearance, audit_enabled, description) "
                 f"VALUES ({b}, '{sn}', '{tn}', {table.clearance}, "
-                f"{str(table.audit_enabled).lower()});"
+                f"{str(table.audit_enabled).lower()}, {td});"
             )
     if any(s.tables for s in project.schemas):
         lines.append("")
@@ -143,15 +145,16 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                 ge  = f"'{sql_safe_escape_string(col.generated_expression)}'" if col.generated_expression else "NULL"
                 ms  = sql_safe_escape_string(col.masking_strategy)
                 gs  = sql_safe_escape_string(col.generated_storage)
+                cd  = f"'{sql_safe_escape_string(col.description)}'" if col.description else "NULL"
                 lines.append(
                     f"    INSERT INTO __META__.tarkin_columns "
                     f"(build_id, schema_name, table_name, name, type, clearance, nullable, \"unique\", "
                     f"immutable, versioned, sensitive, masking_strategy, "
-                    f"default_value, generated_expression, generated_storage) "
+                    f"default_value, generated_expression, generated_storage, description) "
                     f"VALUES ({b}, '{sn}', '{tn}', '{cn}', '{ct}', {col.clearance}, "
                     f"{str(col.nullable).lower()}, {str(col.unique).lower()}, "
                     f"{str(col.immutable).lower()}, {str(col.versioned).lower()}, "
-                    f"{str(col.sensitive).lower()}, '{ms}', {dv}, {ge}, '{gs}');"
+                    f"{str(col.sensitive).lower()}, '{ms}', {dv}, {ge}, '{gs}', {cd});"
                 )
     if any(t.columns for s in project.schemas for t in s.tables):
         lines.append("")

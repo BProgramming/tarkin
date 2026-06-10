@@ -27,7 +27,10 @@ from .model import (
     SchemaConfig,
     TableConfig,
 )
-from .serialize import Serializer, project_checksum
+from .serialize import (
+    Serializer,
+    project_checksum,
+)
 from .utils import (
     emit_per_build_inserts,
     sql_comment_block_section,
@@ -88,6 +91,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         _generate_retention(project),
         sql_comment_block_section("META POPULATION"),
         _generate_meta_population(project, current),
+        sql_comment_block_section("DISCOVERY FUNCTIONS"),
+        _generate_discovery_functions(),
         sql_comment_block_section("TRANSACTION END"),
         "COMMIT;\n",
     ]
@@ -183,7 +188,8 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_schemas (
     name            text NOT NULL,
     shadow_name     text NOT NULL,
     clearance       int NOT NULL DEFAULT 0,
-    audit_enabled   bool NOT NULL DEFAULT true
+    audit_enabled   bool NOT NULL DEFAULT true,
+    description     text
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_tables (
@@ -192,7 +198,8 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_tables (
     schema_name     text NOT NULL,
     name            text NOT NULL,
     clearance       int NOT NULL DEFAULT 0,
-    audit_enabled   bool NOT NULL DEFAULT true
+    audit_enabled   bool NOT NULL DEFAULT true,
+    description     text
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_columns (
@@ -211,7 +218,8 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_columns (
     masking_strategy     text NOT NULL DEFAULT 'none',
     default_value        text,
     generated_expression text,
-    generated_storage    text
+    generated_storage    text,
+    description          text
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_indexes (
@@ -280,7 +288,8 @@ CREATE TABLE IF NOT EXISTS __META__.tarkin_roles (
     can_maintain          bool NOT NULL DEFAULT false,
     can_access_sensitive  bool NOT NULL DEFAULT false,
     added_by_tarkin       bool NOT NULL DEFAULT false,
-    member_of             text[] NOT NULL DEFAULT '{}'
+    member_of             text[] NOT NULL DEFAULT '{}',
+    description           text
 );
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_role_schemas (
@@ -1833,15 +1842,16 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
         moa = ("ARRAY[" + ", ".join(f"'{sql_safe_escape_string(m)}'" for m in role.member_of) + "]"
                if role.member_of else "ARRAY[]::text[]")
         added = str(role.name not in existing_role_names).lower()
+        rd = f"'{sql_safe_escape_string(role.description)}'" if role.description else "NULL"
         lines.append(
             f"    INSERT INTO __META__.tarkin_roles "
             f"(build_id, name, clearance, can_login, can_admin, can_write, "
-            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of) "
+            f"can_maintain, can_access_sensitive, added_by_tarkin, member_of, description) "
             f"VALUES (v_build_id, '{rn}', {role.clearance}, "
             f"{str(role.can_login).lower()}, {str(role.can_admin).lower()}, "
             f"{str(role.can_write).lower()}, {str(role.can_maintain).lower()}, "
             f"{str(role.can_access_sensitive).lower()}, {added}, "
-            f"{moa});"
+            f"{moa}, {rd});"
         )
     lines.append("")
 
@@ -2211,3 +2221,199 @@ def _escape_hmac_key() -> str:
 def _object_checksum(obj: dict) -> str:
     """Return a 16-character SHA-256 hex digest for a single governance object dict."""
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _generate_discovery_functions() -> str:
+    """Generate the four governed discovery functions in __META__.
+
+    All functions scope to the latest build and enforce visibility based on
+    the calling role's grants and clearance level stored in __META__.
+
+    get_schemas()
+        Returns all schemas the calling role has USAGE on.
+
+    get_tables(schema text DEFAULT NULL)
+        Returns all tables the calling role has SELECT on and sufficient
+        clearance for, optionally filtered by schema.
+
+    get_columns(schema text DEFAULT NULL, tbl text DEFAULT NULL)
+        Returns all columns the calling role can see (clearance + sensitivity),
+        optionally filtered by schema and/or table.
+
+    get_roles()
+        Returns all roles if the calling role has can_admin, otherwise returns
+        only the calling role's own record.
+    """
+    return r"""
+
+CREATE OR REPLACE FUNCTION __META__.tarkin_latest_build_id()
+RETURNS bigint
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT MAX(build_id) FROM __META__.tarkin_builds;
+$$;
+
+CREATE OR REPLACE FUNCTION __META__.get_schemas()
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'name',          s.name,
+                'clearance',     s.clearance,
+                'audit_enabled', s.audit_enabled,
+                'description',   s.description
+            )
+            ORDER BY s.name
+        ),
+        json_build_object(
+            'message', 'No results found for get_schemas with parameters none'
+        )
+    )
+    FROM __META__.tarkin_schemas s
+    JOIN __META__.tarkin_role_schemas rs
+      ON rs.schema_name = s.name
+     AND rs.build_id    = s.build_id
+    WHERE s.build_id   = __META__.tarkin_latest_build_id()
+      AND rs.build_id  = __META__.tarkin_latest_build_id()
+      AND rs.role_name = current_user
+      AND rs.usage     = true;
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_schemas() TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION __META__.get_tables(p_schema text DEFAULT NULL)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'schema',        t.schema_name,
+                'name',          t.name,
+                'clearance',     t.clearance,
+                'audit_enabled', t.audit_enabled,
+                'description',   t.description
+            )
+            ORDER BY t.schema_name, t.name
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_tables with parameters schema=' || COALESCE(p_schema, 'null')
+        )
+    )
+    FROM __META__.tarkin_tables t
+    JOIN __META__.tarkin_role_tables rt
+      ON  rt.schema_name = t.schema_name
+     AND  rt.table_name  = t.name
+     AND  rt.build_id    = t.build_id
+    JOIN __META__.tarkin_roles r
+      ON  r.name     = current_user
+     AND  r.build_id = t.build_id
+    WHERE t.build_id   = __META__.tarkin_latest_build_id()
+      AND rt.role_name = current_user
+      AND rt.select    = true
+      AND t.clearance  <= r.clearance
+      AND (p_schema IS NULL OR t.schema_name = p_schema);
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_tables(text) TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION __META__.get_columns(
+    p_schema text DEFAULT NULL,
+    p_table  text DEFAULT NULL
+)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'schema',           c.schema_name,
+                'table',            c.table_name,
+                'name',             c.name,
+                'type',             c.type,
+                'clearance',        c.clearance,
+                'nullable',         c.nullable,
+                'sensitive',        c.sensitive,
+                'masking_strategy', c.masking_strategy,
+                'description',      c.description
+            )
+            ORDER BY c.schema_name, c.table_name, c.name
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_columns with parameters schema='
+                || COALESCE(p_schema, 'null')
+                || ' table='
+                || COALESCE(p_table, 'null')
+        )
+    )
+    FROM __META__.tarkin_columns c
+    JOIN __META__.tarkin_role_tables rt
+      ON  rt.schema_name = c.schema_name
+     AND  rt.table_name  = c.table_name
+     AND  rt.build_id    = c.build_id
+    JOIN __META__.tarkin_roles r
+      ON  r.name     = current_user
+     AND  r.build_id = c.build_id
+    WHERE c.build_id    = __META__.tarkin_latest_build_id()
+      AND rt.role_name  = current_user
+      AND rt.select     = true
+      AND c.clearance   <= r.clearance
+      AND (
+            c.sensitive = false
+            OR r.can_access_sensitive = true
+          )
+      AND (p_schema IS NULL OR c.schema_name = p_schema)
+      AND (p_table  IS NULL OR c.table_name  = p_table);
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_columns(text, text) TO PUBLIC;
+
+CREATE OR REPLACE FUNCTION __META__.get_roles()
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'name',                 r.name,
+                'clearance',            r.clearance,
+                'can_login',            r.can_login,
+                'can_admin',            r.can_admin,
+                'can_write',            r.can_write,
+                'can_maintain',         r.can_maintain,
+                'can_access_sensitive', r.can_access_sensitive,
+                'member_of',            r.member_of,
+                'description',          r.description
+            )
+            ORDER BY r.name
+        ),
+        json_build_object(
+            'message', 'No results found for get_roles with parameters none'
+        )
+    )
+    FROM __META__.tarkin_roles r
+    WHERE r.build_id = __META__.tarkin_latest_build_id()
+      AND (
+            EXISTS (
+                SELECT 1
+                FROM __META__.tarkin_roles self
+                WHERE self.build_id  = __META__.tarkin_latest_build_id()
+                  AND self.name      = current_user
+                  AND self.can_admin = true
+            )
+            OR r.name = current_user
+          );
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_roles() TO PUBLIC;
+""".strip()

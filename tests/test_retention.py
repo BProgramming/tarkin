@@ -18,7 +18,7 @@ from tarkin.codegen import (
 from tarkin.validate import SemanticValidator, ValidationError
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
-from tarkin.diff import diff_projects, ObjectType
+from tarkin.diff import diff, ObjectType
 
 from .fixtures import make_database, make_role, make_index, make_schema
 
@@ -369,7 +369,7 @@ class TestRetentionDiff:
         before = _project(retention_schedule="0 2 * * *")
         after  = before.model_copy(deep=True)
         after.schemas[0].tables[0].retention_days = 30
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         table_changes = [c for c in changes if c.object_type == ObjectType.TABLE]
         modified = [c for c in table_changes if c.field == "retention_days"]
         assert len(modified) == 1
@@ -380,7 +380,7 @@ class TestRetentionDiff:
         before = _empty_project()
         after  = before.model_copy(deep=True)
         after.schemas[0].tables[0].retention_days = 60
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         table_changes = [c for c in changes if c.object_type == ObjectType.TABLE]
         modified = [c for c in table_changes if c.field == "retention_days"]
         assert len(modified) == 1
@@ -391,7 +391,7 @@ class TestRetentionDiff:
         before = _project(retention_schedule="0 2 * * *")
         after  = before.model_copy(deep=True)
         after.database.retention_schedule = "0 4 * * 0"
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         db_changes = [c for c in changes if c.object_type == ObjectType.DATABASE]
         sched_changes = [c for c in db_changes if c.field == "retention_schedule"]
         assert len(sched_changes) == 1
@@ -404,7 +404,7 @@ class TestRetentionDiff:
         after.database.retention_schedule = "0 2 * * *"
         with warnings.catch_warnings(record=False):
             warnings.simplefilter("ignore", UserWarning)
-            changes = diff_projects(before, after)
+            changes = diff(before, after)
         db_changes = [c for c in changes if c.object_type == ObjectType.DATABASE]
         sched_changes = [c for c in db_changes if c.field == "retention_schedule"]
         assert len(sched_changes) == 1

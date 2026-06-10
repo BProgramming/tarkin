@@ -28,7 +28,7 @@ from tarkin.migrate import (
     _migration_metadata,
     _generate_migration_sql,
 )
-from tarkin.diff import diff_projects, Change, ChangeKind, ObjectType
+from tarkin.diff import diff, Change, ChangeKind, ObjectType
 from tarkin.build import _build_metadata
 from tarkin.serialize import project_checksum
 from .fixtures import make_database, make_role
@@ -383,7 +383,7 @@ class TestGenerateMigrationSql:
 
     def test_migration_sql_has_begin_and_commit(self) -> None:
         before, after = self._build_before_after()
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         prof = _fake_profile()
         sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "BEGIN;" in sql
@@ -391,21 +391,21 @@ class TestGenerateMigrationSql:
 
     def test_migration_sql_has_section_headers(self) -> None:
         before, after = self._build_before_after()
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         prof = _fake_profile()
         sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "TARKIN MIGRATION" in sql
 
     def test_migration_sql_updates_meta(self) -> None:
         before, after = self._build_before_after()
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         prof = _fake_profile()
         sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "tarkin_builds" in sql
 
     def test_migration_sql_contains_column_add(self) -> None:
         before, after = self._build_before_after()
-        changes = diff_projects(before, after)
+        changes = diff(before, after)
         prof = _fake_profile()
         sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert 'ADD COLUMN "email"' in sql

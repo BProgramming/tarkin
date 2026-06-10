@@ -19,7 +19,7 @@ from .codegen import (
 )
 from .credentials import ConnectionProfile
 from .diff import (
-    diff_projects,
+    diff,
     Change,
     ChangeKind,
     ObjectType,
@@ -60,7 +60,7 @@ def migrate(
     print("Reading current build from __META__... Done.")
 
     print("Assessing differences...", end="\r")
-    changes = diff_projects(before, after)
+    changes = diff(before, after)
     print(f"Assessing differences... Done. {len(changes)} change(s) detected.")
 
     if not changes:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from .credentials import ConnectionProfile
-from .inspect import inspect_database
+from .inspect import inspect
 from .model import (
     GovernanceProject,
     SchemaConfig,
@@ -22,7 +22,7 @@ def detach(
     """Remove a Tarkin governance model from a live database."""
     print("Inspecting current database state...", end="\r")
     try:
-        current = inspect_database(profile, include_tk=True)
+        current = inspect(profile, include_tk=True)
     except Exception as exc:
         raise DetachError(f"Failed to inspect database: {exc}") from exc
     print("Inspecting current database state... Done.")

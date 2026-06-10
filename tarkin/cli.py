@@ -29,7 +29,7 @@ from .detach import (
     DetachError,
 )
 from .diff import (
-    diff_projects,
+    diff,
     render_diff,
 )
 from .erase import (
@@ -37,10 +37,18 @@ from .erase import (
     erase_check,
     EraseError,
 )
-from .inspect import inspect_database
+from .inspect import inspect
 from .migrate import (
     migrate,
     MigrateError,
+)
+from .query import (
+    query,
+    QueryError,
+)
+from .update import (
+    update,
+    UpdateError,
 )
 from .model import GovernanceProject
 from .serialize import Serializer
@@ -161,7 +169,7 @@ def inspect_database_build_yaml(
 
     print("Inspecting database...", end="\r")
     try:
-        proj = inspect_database(prof)
+        proj = inspect(prof)
         print("Inspecting database... Done.")
     except Exception as exc:
         _die(f"Inspection failed: {exc}")
@@ -395,7 +403,7 @@ def diff_yaml(
     if not before_proj or not after_proj:
         return
 
-    changes = diff_projects(before_proj, after_proj)
+    changes = diff(before_proj, after_proj)
 
     if output_file is None:
         output_file = OUT_DIR / f"diff_{before.stem}_{after.stem}.md"
@@ -450,7 +458,7 @@ def migrate_data_model(
     print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
-        zip_path = migrate(proj, prof, output_directory=output_directory)
+        zip_path = migrate(proj, prof, output=output_directory)
         print(f"Migration artifact: {zip_path}")
         print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
     except MigrateError as exc:
@@ -573,6 +581,114 @@ def purge_output(
     shutil.rmtree(output)
     build_output_directory(output)
     print("Directory out/ purged.")
+
+
+@app.command(name="update")
+def update_meta_schema(
+    profile:     str            = _profile_option,
+    credentials: Optional[Path] = _credentials_option,
+) -> None:
+    """
+    Apply idempotent schema patches to an attached database's __META__ tables.
+
+    Safe to run against databases on any prior Tarkin version, as patches use
+    ADD COLUMN IF NOT EXISTS and will no-op if already applied.
+    """
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.")
+
+    try:
+        applied = update(prof)
+        if applied:
+            for desc in applied:
+                print(f"\t{desc}")
+            print(f"Update complete: {len(applied)} patch(es) applied.")
+        else:
+            print("Already up to date.")
+    except UpdateError as exc:
+        _die(str(exc))
+
+
+@app.command(name="query")
+def query_database(
+    profile:     str            = _profile_option,
+    credentials: Optional[Path] = _credentials_option,
+    build:       bool           = typer.Option(
+        False, "--build", "-b",
+        help="Print the generated SQL and exit."
+    ),
+    execute:     bool           = typer.Option(
+        False, "--execute", "--exec", "-e",
+        help="Execute the query and return an AI interpretation of the results."
+    ),
+) -> None:
+    """
+    Generate a SQL query from a natural language prompt using schema metadata.
+
+    Connects to the database, pulls schema context from __META__, and uses
+    the user's configured AI provider to generate a query. Optionally executes it
+    and returns an interpreted answer.
+
+    Requires that AI credentials are provided in the [ai] section of credentials.toml.
+    """
+    if build and execute:
+        _die("Specify at most one of --build or --execute.")
+        return
+
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    ai_profile = creds.ai
+    if not ai_profile:
+        _die(
+            "No [ai] section found in credentials file. "
+            "Add provider, api_key, and model to enable tarkin query."
+        )
+        return
+
+    print(f"Connecting to {prof.safe_repr()}...", end="\r")
+    result = check_connection(prof)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+    print(f"Connecting to {prof.safe_repr()}... Done.")
+
+    user_prompt = typer.prompt("\nWhat would you like to know?")
+
+    # If neither flag was passed, ask interactively
+    if not build and not execute:
+        execute = typer.prompt(
+            "\nThis operation will generate an SQL query based on your request. "
+            "Would you like to execute the query afterwards, and instead return "
+            "an interpretation of the result? [Y/N]"
+        ).strip().upper() == "Y"
+
+    try:
+        query(
+            db_profile = prof,
+            ai_profile = ai_profile,
+            prompt     = user_prompt,
+            do_execute = execute,
+        )
+    except QueryError as exc:
+        _die(str(exc))
 
 
 def _load_credentials(path: Optional[Path]) -> CredentialsFile | None:

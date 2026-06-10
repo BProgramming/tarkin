@@ -27,7 +27,7 @@ from .utils import (
 )
 
 
-def inspect_database(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
+def inspect(profile: ConnectionProfile, include_tk: bool = False) -> GovernanceProject:
     """Inspect a live PostgreSQL database and return a GovernanceProject."""
     engine = profile.engine()
     try:

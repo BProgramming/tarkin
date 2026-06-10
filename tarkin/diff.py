@@ -45,7 +45,7 @@ class Change:
     note:        Optional[str] = None
 
 
-def diff_projects(before: GovernanceProject,after:  GovernanceProject) -> list[Change]:
+def diff(before: GovernanceProject, after:  GovernanceProject) -> list[Change]:
     """Compare two governance projects and return all detected changes."""
     changes: list[Change] = []
     _diff_database(before, after, changes)

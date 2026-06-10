@@ -13,7 +13,7 @@ from tarkin.build import build, BuildError
 from tarkin.credentials import CredentialsFile, DEFAULT_CREDENTIALS_PATH, check_connection
 from tarkin.detach import _read_meta
 from tarkin.detach import detach, DetachError
-from tarkin.inspect import inspect_database
+from tarkin.inspect import inspect
 from tarkin.migrate import migrate, MigrateError
 from tarkin.model import ColumnConfig, GovernanceProject
 from tarkin.validate import SemanticValidator
@@ -75,7 +75,7 @@ def live_project() -> GovernanceProject:
     """Inspect the live database and return the current project state."""
     prof = _integration_profile()
     assert prof is not None
-    return inspect_database(prof)
+    return inspect(prof)
 
 
 class TestInspect:
@@ -85,7 +85,7 @@ class TestInspect:
         prof   = _integration_profile()
         assert prof is not None
         if prof:
-            proj   = inspect_database(prof)
+            proj   = inspect(prof)
             assert isinstance(proj, GovernanceProject)
             assert proj.database is not None
             assert len(proj.schemas) > 0
@@ -95,7 +95,7 @@ class TestInspect:
         prof = _integration_profile()
         assert prof is not None
         if prof:
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             assert len(proj.roles) > 0
 
     @requires_db
@@ -103,7 +103,7 @@ class TestInspect:
         prof = _integration_profile()
         assert prof is not None
         if prof:
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             try:
                 SemanticValidator.validate(proj)
             except Exception:
@@ -119,7 +119,7 @@ class TestBuild:
         prof = _integration_profile()
         assert prof is not None
         if prof:
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             proj.database.profile = prof.profile
 
             try:
@@ -137,7 +137,7 @@ class TestAttachDetach:
         """Full attach → inspect → detach cycle."""
         prof = _integration_profile()
         assert prof is not None
-        proj = inspect_database(prof)
+        proj = inspect(prof)
         proj.database.profile = prof.profile
 
         try:
@@ -150,7 +150,7 @@ class TestAttachDetach:
         except AttachError as exc:
             pytest.skip(f"Attach failed: {exc}")
 
-        post_attach = inspect_database(prof, include_tk=True)
+        post_attach = inspect(prof, include_tk=True)
         tk_schemas  = [s for s in post_attach.schemas if s.name.startswith("tk_")]
         assert len(tk_schemas) > 0, "Expected tk_ shadow schemas after attach"
 
@@ -160,7 +160,7 @@ class TestAttachDetach:
     def test_detach_removes_build(self, live_project: GovernanceProject, tmp_path: Path) -> None:
         prof = _integration_profile()
         assert prof is not None
-        proj = inspect_database(prof)
+        proj = inspect(prof)
         proj.database.profile = prof.profile
 
         try:
@@ -171,7 +171,7 @@ class TestAttachDetach:
 
         detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
 
-        post_detach = inspect_database(prof)
+        post_detach = inspect(prof)
         tk_schemas = [s for s in post_detach.schemas if s.name.startswith("tk_")]
         assert not tk_schemas, f"tk_ schemas still present after detach: {tk_schemas}"
 
@@ -180,7 +180,7 @@ class TestAttachDetach:
         """Attaching twice to the same database should raise AttachError."""
         prof = _integration_profile()
         assert prof is not None
-        proj = inspect_database(prof)
+        proj = inspect(prof)
         proj.database.profile = prof.profile
 
         try:
@@ -236,7 +236,7 @@ class TestPgauditSnapshot:
             finally:
                 setup_engine.dispose()
 
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             proj.database.profile       = prof.profile
             proj.database.audit_enabled = True
 
@@ -308,7 +308,7 @@ class TestColumnGrantRoundtrip:
                 ))
                 conn.commit()
 
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             proj.database.profile = prof.profile
 
             try:
@@ -361,7 +361,7 @@ class TestMigrateRoundtrip:
         assert prof is not None
 
         # --- Step 1: capture the pre-attach governance model. ---
-        before = inspect_database(prof)
+        before = inspect(prof)
         before.database.profile = prof.profile
 
         # Build the `after` model by mutating a deep copy of `before`
@@ -479,7 +479,7 @@ class TestPublicSchemaGrantRoundtrip:
                     conn.execute(text("GRANT USAGE ON SCHEMA public TO PUBLIC"))
                     conn.commit()
 
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             proj.database.profile = prof.profile
 
             try:
@@ -561,7 +561,7 @@ class TestOverloadedFunctionMeta:
                 """))
                 conn.commit()
 
-            proj = inspect_database(prof)
+            proj = inspect(prof)
             proj.database.profile = prof.profile
 
             try:

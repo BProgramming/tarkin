@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .codegen import generate_sql
 from .credentials import ConnectionProfile, check_pgcron_available
-from .inspect import inspect_database
+from .inspect import inspect
 from .model import GovernanceProject
 from .utils import (
     OUT_DIR,
@@ -30,7 +30,7 @@ def build(
 
     print("Inspecting current database state...", end="\r")
     try:
-        current = inspect_database(profile)
+        current = inspect(profile)
     except Exception as exc:
         raise BuildError(f"Failed to inspect database: {exc}") from exc
     print("Inspecting current database state... Done.")

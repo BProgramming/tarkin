@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from .credentials import ConnectionProfile
-from .inspect import inspect_database
+from .inspect import inspect
 from .utils import (
     OUT_DIR,
     find_latest_artifact,
@@ -29,7 +29,7 @@ def attach(profile: ConnectionProfile, build_path: Path | None = None) -> None:
 
     print("Inspecting current database state...", end="\r")
     try:
-        current = inspect_database(profile, include_tk=True)
+        current = inspect(profile, include_tk=True)
     except Exception as exc:
         raise AttachError(f"Failed to inspect database: {exc}") from exc
     tk_schemas = [s for s in current.schemas if s.name.startswith("tk_")]

@@ -5,12 +5,28 @@ import tomllib
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from typing import Optional
+from typing import Literal, Optional
 
 from .utils import (
     DEFAULT_CREDENTIALS_PATH,
     pg_version, sql_select_single_scalar,
 )
+
+
+class AIProfile(BaseModel):
+    """AI provider configuration from the [ai] section of credentials.toml.
+
+    Supported providers:
+        anthropic       — Anthropic Claude models
+        openai          — OpenAI models, and any OpenAI-compatible endpoint
+                          (Azure OpenAI, Mistral, Grok, Ollama, etc.) via base_url
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["anthropic", "openai"]
+    api_key:  SecretStr
+    model:    str
+    base_url: Optional[str] = None
 
 
 class ConnectionProfile(BaseModel):
@@ -59,6 +75,7 @@ class CredentialsFile(BaseModel):
 
     path:     Path
     profiles: dict[str, ConnectionProfile]
+    ai:       Optional[AIProfile] = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> CredentialsFile:
@@ -74,16 +91,24 @@ class CredentialsFile(BaseModel):
         with resolved.open("rb") as f:
             raw = tomllib.load(f)
 
-        profiles: dict[str, ConnectionProfile] = {}
+        ai_profile: Optional[AIProfile]          = None
+        profiles:   dict[str, ConnectionProfile] = {}
+
         for name, values in raw.items():
             if not isinstance(values, dict):
                 raise ValueError(f"Credentials file section [{name}] must be a table, got {type(values).__name__}.")
-            try:
-                profiles[name] = ConnectionProfile(profile=name, **values)
-            except Exception as exc:
-                raise ValueError(f"Invalid profile [{name}]: {exc}") from exc
+            if name == "ai":
+                try:
+                    ai_profile = AIProfile(**values)
+                except Exception as exc:
+                    raise ValueError(f"Invalid [ai] section: {exc}") from exc
+            else:
+                try:
+                    profiles[name] = ConnectionProfile(profile=name, **values)
+                except Exception as exc:
+                    raise ValueError(f"Invalid profile [{name}]: {exc}") from exc
 
-        return cls(path=resolved, profiles=profiles)
+        return cls(path=resolved, profiles=profiles, ai=ai_profile)
 
     def get(self, profile_name: str) -> ConnectionProfile:
         if profile_name not in self.profiles:
