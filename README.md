@@ -26,6 +26,7 @@ Tarkin is run through a Command Line Interface (CLI) tool built in Python with T
 
 ```bash
 pip install tarkin
+pip install tarkin[query] # optional extension as of v0.2.0
 ```
 
 Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security (RLS), or PostgreSQL 16+ for MAINTAIN privileges.
@@ -41,6 +42,13 @@ tarkin inspect --profile mydb
 # Compile and validate
 tarkin validate out/mydb_model.yaml
 tarkin build out/mydb_model.yaml --profile mydb
+
+# Update to the latest version (idempotent - it won't break if you run it unnecessarily)
+tarkin update
+
+# Get insights from your credentialed AI LLM
+# Requires the optional tarkin[query] extension installed
+tarkin query
 
 # Apply
 tarkin attach --profile mydb

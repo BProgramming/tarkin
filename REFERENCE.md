@@ -278,3 +278,44 @@ Options:
 What it does:
 - Prompts for confirmation (unless `--no-warn`)
 - Removes and recreates the `out/` directory
+
+## tarkin update
+Applies idempotent schema patches to an attached database's `__META__` tables.
+
+Arguments: none
+
+Options:
+- `--profile` | `-p` (required): credentials profile
+- `--credentials` | `-c`: path to credentials.toml
+
+What it does:
+- Connects to the live database
+- Applies any pending `__META__` patches using `ADD COLUMN IF NOT EXISTS` and equivalent safe DDL — patches are idempotent and no-op if already applied
+- Prints each patch description as it is applied
+- If nothing needed applying, prints "Already up to date"
+- Does not compare installed Tarkin versions; safe to run against databases on any prior Tarkin version
+
+## tarkin query
+Generates a SQL query from a natural language prompt using schema metadata from `__META__`, and optionally executes it.
+
+Arguments: none (prompt is collected interactively)
+
+Options:
+- `--profile` | `-p` (required): credentials profile
+- `--credentials` | `-c`: path to credentials.toml
+- `--build` | `-b`: print the generated SQL and exit without executing
+- `--execute` | `--exec` | `-e`: execute the query and return an AI interpretation of the results
+At most one of `--build` or `--execute` may be specified.
+
+What it does:
+- Connects to the live database
+- Reads schema context from `__META__` (only what the connected role can see — no direct data access)
+- Prompts the user for a natural language question interactively
+- If neither `--build` nor `--execute` is specified, prompts the user to choose whether to execute the query afterwards
+- Sends the schema context and question to the AI provider configured in the `[ai]` section of credentials.toml
+- Receives a generated SQL query in return
+- With `--build`: prints the generated SQL and exits
+- With `--execute` (or confirmed interactively): executes the query against the live database under the connected role's permissions, then sends the results back to the AI for interpretation and prints the answer
+- Without `--execute`: prints the generated SQL only
+
+Requires an `[ai]` section in credentials.toml with `provider`, `api_key`, and `model` fields.
