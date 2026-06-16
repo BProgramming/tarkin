@@ -635,7 +635,7 @@ def query_database(
     ),
 ) -> None:
     """
-    Generate a SQL query from a natural language prompt using schema metadata.
+    Generate an SQL query from a natural language prompt using schema metadata.
 
     Connects to the database, pulls schema context from __META__, and uses
     the user's configured AI provider to generate a query. Optionally executes it
