@@ -43,13 +43,6 @@ tarkin inspect --profile mydb
 tarkin validate out/mydb_model.yaml
 tarkin build out/mydb_model.yaml --profile mydb
 
-# Update to the latest version (idempotent - it won't break if you run it unnecessarily)
-tarkin update
-
-# Get insights from your credentialed AI LLM
-# Requires the optional tarkin[query] extension installed
-tarkin query
-
 # Apply
 tarkin attach --profile mydb
 
