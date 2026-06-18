@@ -215,7 +215,7 @@ class TestEmitDropIndexes:
         )]
         sql = _emit_drop_indexes(changes, before_map)
         assert "WARNING" in sql
-        assert "manual" in sql.lower()
+        assert "manual" in sql.casefold()
 
 
 class TestEmitColumnChanges:

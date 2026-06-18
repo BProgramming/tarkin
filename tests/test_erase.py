@@ -248,7 +248,7 @@ class TestEraseFunctions:
         schema = SchemaConfig(name="public", tables=[table])
         proj   = _make_project(schemas=[schema])
         sql    = _generate_erase_functions(proj)
-        assert "skipped" in sql.lower()
+        assert "skipped" in sql.casefold()
         assert "CREATE OR REPLACE FUNCTION" not in sql
 
     def test_erase_check_function_created(self) -> None:

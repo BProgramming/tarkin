@@ -314,7 +314,7 @@ class TestRenderer:
         assert output.exists()
         content = output.read_text()
         assert "audit_enabled" in content
-        assert "modified" in content.lower()
+        assert "modified" in content.casefold()
 
     def test_render_creates_parent_dirs(self, tmp_path: Path) -> None:
         output = tmp_path / "subdir" / "nested" / "diff.md"

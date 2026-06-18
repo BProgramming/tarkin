@@ -649,7 +649,7 @@ class TestGenerateAuditGrants:
         proj.database.audit_enabled = False
         sql  = _generate_audit_grants(proj)
         assert "GRANT" not in sql
-        assert "skipped" in sql.lower()
+        assert "skipped" in sql.casefold()
 
     def test_grants_on_audited_shadow_table(self) -> None:
         table  = TableConfig(
