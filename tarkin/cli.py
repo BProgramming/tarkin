@@ -21,6 +21,7 @@ from .build import (
 from .credentials import (
     ConnectionProfile,
     CredentialsFile,
+    authorize_connection,
     check_connection,
     test_all_connections,
 )
@@ -88,6 +89,11 @@ _output_directory_option = typer.Option(
     help="Output directory (artifacts/results are written inside it).",
 )
 
+_reauth_option = typer.Option(
+    False, "--reauth", "-r",
+    help="Prompt to re-authorize via AWS SSO if the connection fails. Only applies to iam_auth profiles.",
+)
+
 
 @app.command(name="help")
 def show_help() -> None:
@@ -101,13 +107,43 @@ def show_version() -> None:
     print(version("tarkin"))
 
 
+@app.command(name="auth")
+def authorize(
+    profile:     str            = _profile_option,
+    credentials: Optional[Path] = _credentials_option,
+) -> None:
+    """
+    Authorize an IAM-authenticated profile via AWS SSO login.
+
+    Opens a browser session to refresh AWS credentials, then verifies that
+    a valid RDS auth token can be generated. Only applicable to profiles
+    with iam_auth = true.
+    """
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    try:
+        authorize_connection(prof)
+        print(f"Authorization successful for profile {prof.profile!r}.")
+    except RuntimeError as exc:
+        _die(str(exc))
+
+app.command(name="authorize")(authorize)
+app.command(name="authorise")(authorize)
+
 @app.command(name="connect")
 def test_connections(
-    credentials: Optional[Path] = _credentials_option,
     profile:     Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Profile to test. Omit to test all profiles.",
     ),
+    credentials: Optional[Path] = _credentials_option,
+    reauth:      bool           = _reauth_option,
 ) -> None:
     """
     Test that one or more credentials profiles can connect to their databases.
@@ -119,13 +155,12 @@ def test_connections(
     if creds:
         if profile:
             try:
-                p      = creds.get(profile)
-                result = check_connection(p)
-                print(result)
+                prof   = creds.get(profile)
+                print(check_connection(prof, reauth=reauth))
             except KeyError as exc:
                 _die(str(exc))
         else:
-            results = test_all_connections(creds)
+            results = test_all_connections(creds, reauth=reauth)
             for r in results:
                 print(r)
 
@@ -133,8 +168,9 @@ def test_connections(
 @app.command(name="inspect")
 def inspect_database_build_yaml(
     profile:     str            = _profile_option,
-    output_file: Optional[Path] = _output_file_option,
     credentials: Optional[Path] = _credentials_option,
+    reauth:      bool           = _reauth_option,
+    output_file: Optional[Path] = _output_file_option,
     validate:    bool           = typer.Option(
         True, "--validate/--no-validate",
         help="Run semantic validation on the inspected model before writing.",
@@ -158,12 +194,10 @@ def inspect_database_build_yaml(
     if not prof:
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     db_user = result.db_user
 
@@ -214,12 +248,13 @@ def validate_data_model(
 
 @app.command(name="build")
 def build_data_model_from_yaml(
-    config:           Path           = typer.Argument(..., help="Path to governance YAML."),
     profile:          Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Override the credentials profile specified in the YAML.",
     ),
     credentials:      Optional[Path] = _credentials_option,
+    reauth:           bool           = _reauth_option,
+    config:           Path           = typer.Argument(..., help="Path to governance YAML."),
     output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
@@ -247,12 +282,10 @@ def build_data_model_from_yaml(
     if not prof:
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
         zip_path = build(proj, prof, output_directory=output_directory)
@@ -263,15 +296,16 @@ def build_data_model_from_yaml(
 
 @app.command(name="attach")
 def attach_to_database(
-    build_path:  Optional[Path] = typer.Option(
-        None, "--build", "-b",
-        help="Path to build artifact zip. Defaults to the latest artifact in out/.",
-    ),
     profile:     Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Override the credentials profile in the build artifact.",
     ),
     credentials: Optional[Path] = _credentials_option,
+    reauth:      bool           = _reauth_option,
+    build_path:  Optional[Path] = typer.Option(
+        None, "--build", "-b",
+        help="Path to build artifact zip. Defaults to the latest artifact in out/.",
+    ),
 ) -> None:
     """
     Apply a Tarkin build artifact to a live database.
@@ -309,12 +343,10 @@ def attach_to_database(
         _die("Invalid credentials.")
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
         attach(prof, build_path=build_path)
@@ -326,6 +358,7 @@ def attach_to_database(
 def detach_from_database(
     profile:            str            = _profile_option,
     credentials:        Optional[Path] = _credentials_option,
+    reauth:             bool           = _reauth_option,
     keep_versioning:    bool           = typer.Option(
         False, "--keep-versioning", "-k",
         help="Retain versioning columns and history when detaching.",
@@ -366,12 +399,10 @@ def detach_from_database(
     if not prof:
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
         detach(
@@ -418,12 +449,13 @@ def diff_yaml(
 
 @app.command(name="migrate")
 def migrate_data_model(
-    config:           Path           = typer.Argument(..., help="Path to the target governance YAML."),
     profile:          Optional[str]  = typer.Option(
         None, "--profile", "-p",
         help="Override the credentials profile specified in the YAML.",
     ),
     credentials:      Optional[Path] = _credentials_option,
+    reauth:           bool           = _reauth_option,
+    config:           Path           = typer.Argument(..., help="Path to the target governance YAML."),
     output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
@@ -450,12 +482,10 @@ def migrate_data_model(
     if not prof:
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.\nConnected on PostgreSQL {result.server_version}.")
 
     try:
         zip_path = migrate(proj, prof, output=output_directory)
@@ -469,6 +499,8 @@ def migrate_data_model(
 def erase_subject(
     profile:          str            = _profile_option,
     credentials:      Optional[Path] = _credentials_option,
+    reauth:           bool           = _reauth_option,
+    output_directory: Optional[Path] = _output_directory_option,
     column:           list[str]      = typer.Option(
         ..., "--column", "-col",
         help="Identifier column name to match on. Repeat for multiple columns.",
@@ -485,7 +517,6 @@ def erase_subject(
         False, "--apply",
         help="Execute the erasure and log the result to __META__.tarkin_erasures.",
     ),
-    output_directory: Optional[Path] = _output_directory_option,
 ) -> None:
     """
     Erase data subject records from a Tarkin-attached database.
@@ -519,12 +550,10 @@ def erase_subject(
 
     out_dir = output_directory or OUT_DIR
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.")
 
     try:
         if check:
@@ -587,6 +616,7 @@ def purge_output(
 def update_meta_schema(
     profile:     str            = _profile_option,
     credentials: Optional[Path] = _credentials_option,
+    reauth:      bool           = _reauth_option,
 ) -> None:
     """
     Apply idempotent schema patches to an attached database's __META__ tables.
@@ -602,12 +632,10 @@ def update_meta_schema(
     if not prof:
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.")
 
     try:
         applied = update(prof)
@@ -625,6 +653,7 @@ def update_meta_schema(
 def query_database(
     profile:     str            = _profile_option,
     credentials: Optional[Path] = _credentials_option,
+    reauth:      bool           = _reauth_option,
     build:       bool           = typer.Option(
         False, "--build", "-b",
         help="Print the generated SQL and exit."
@@ -663,12 +692,10 @@ def query_database(
         )
         return
 
-    print(f"Connecting to {prof.safe_repr()}...", end="\r")
-    result = check_connection(prof)
+    result = check_connection(prof, reauth=reauth)
     if not result.success:
         _die(f"Connection failed: {result.error}")
         return
-    print(f"Connecting to {prof.safe_repr()}... Done.")
 
     user_prompt = typer.prompt("\nWhat would you like to know?")
 

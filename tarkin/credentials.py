@@ -1,9 +1,12 @@
 """Load and validate database credentials."""
 from __future__ import annotations
+
+import subprocess
+
 import sqlalchemy
 import tomllib
 from pathlib import Path
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator, PrivateAttr
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from typing import Literal, Optional
 
@@ -34,14 +37,35 @@ class ConnectionProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile:  str
-    host:     str        = "localhost"
-    port:     int        = 5432
-    database: str        = "postgres"
-    username: str
-    password: SecretStr
-    sslmode:  str        = "prefer"
+    host:     str = "localhost"
+    port:     int = 5432
+    database: str = "postgres"
 
     hmac_key: Optional[SecretStr] = None
+
+    # Login
+    username: str
+    password: Optional[SecretStr] = None
+
+    # IAM / SSO auth
+    iam_auth:      bool          = False
+    aws_profile:   Optional[str] = None
+    aws_region:    Optional[str] = None
+    _cached_token: Optional[str] = PrivateAttr(default=None)
+
+    # SSL client cert
+    sslcert:     Optional[Path] = None
+    sslkey:      Optional[Path] = None
+    sslrootcert: Optional[Path] = None
+
+    sslmode: Literal[
+        "disable",
+        "allow",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify-full",
+    ] = "verify-full"
 
     @field_validator("port")
     @classmethod
@@ -51,9 +75,51 @@ class ConnectionProfile(BaseModel):
             raise ValueError(f"Port must be between 1 and 65535, got {v}.")
         return v
 
+    def fallback_ssl(self):
+        if self.sslmode == "verify-full" and self.password and not self.iam_auth and not self.sslcert:
+            self.sslmode = "prefer"
+
+    @model_validator(mode="after")
+    def validate_auth(self) -> "ConnectionProfile":
+        """Enforce auth consistency and set sslmode default."""
+        if not self.password and not self.iam_auth and not self.sslcert:
+            raise ValueError(
+                "Profile must specify either a password, iam_auth=true, or sslcert/sslkey "
+                "for certificate-based auth. For certificate-based auth, set username to "
+                "the Common Name (CN) from your client certificate."
+            )
+
+        # Downgrade sslmode default for plain password profiles with no cert fields
+        self.fallback_ssl()
+
+        return self
+
+    def token(self) -> str | None:
+        """Generate and cache a temporary IAM auth token via boto3."""
+        try:
+            import boto3
+        except ImportError:
+            raise RuntimeError(
+                "boto3 is a required dependency for IAM auth. Install it with: pip install tarkin[iam]"
+            )
+        session = boto3.Session(profile_name=self.aws_profile)
+        client = session.client("rds", region_name=self.aws_region)
+        self._cached_token = client.generate_db_auth_token(
+            DBHostname = self.host,
+            Port       = self.port,
+            DBUsername = self.username,
+        )
+        return self._cached_token
+
     def dsn(self) -> str:
-        """Build a postgresql+psycopg DSN. Password is injected from SecretStr."""
-        pw = self.password.get_secret_value()
+        """Build a postgresql+psycopg DSN."""
+        if self.iam_auth:
+            pw = self.token()
+        elif self.password:
+            pw = self.password.get_secret_value()
+        else:
+            pw = ""
+
         return (
             f"postgresql+psycopg://{self.username}:{pw}"
             f"@{self.host}:{self.port}/{self.database}"
@@ -62,11 +128,31 @@ class ConnectionProfile(BaseModel):
 
     def engine(self) -> sqlalchemy.Engine:
         """Return a SQLAlchemy engine for this profile."""
-        return sqlalchemy.create_engine(self.dsn(), pool_pre_ping=True)
+        connect_args: dict = {}
+        if self.sslcert and self.sslkey and self.sslrootcert:
+            connect_args["sslcert"]     = str(self.sslcert.expanduser())
+            connect_args["sslkey"]      = str(self.sslkey.expanduser())
+            connect_args["sslrootcert"] = str(self.sslrootcert.expanduser())
+
+        return sqlalchemy.create_engine(
+            self.dsn(),
+            pool_pre_ping = True,
+            connect_args  = connect_args,
+        )
 
     def safe_repr(self) -> str:
-        """Human-readable representation with password redacted."""
-        return f"{self.username}@{self.host}:{self.port}/{self.database} [profile={self.profile!r}]"
+        """Human-readable representation of the connection."""
+        if self.iam_auth:
+            auth = "IAM"
+        elif self.sslcert:
+            auth = "cert"
+        else:
+            auth = "pass"
+
+        return (
+            f"{self.username}@{self.host}:{self.port}/{self.database} "
+            f"[profile={self.profile!r}, auth={auth}]"
+        )
 
 
 class CredentialsFile(BaseModel):
@@ -136,44 +222,145 @@ class ConnectionResult(BaseModel):
         return f"FAIL: {self.profile!r}, {self.error}"
 
 
-def check_connection(profile: ConnectionProfile) -> ConnectionResult:
-    """Open a connection, run a minimal probe query, and return a ConnectionResult."""
+def authorize_connection(profile: ConnectionProfile) -> None:
+    """Run AWS SSO login for an IAM-authenticated profile."""
+    if not profile.iam_auth:
+        raise RuntimeError(
+            f"Profile {profile.profile!r} does not use IAM auth. "
+            f"'tarkin auth' is only applicable to iam_auth profiles."
+        )
+
+    cmd = ["aws", "sso", "login"]
+    if profile.aws_profile:
+        cmd += ["--profile", profile.aws_profile]
+
     try:
-        engine = profile.engine()
-        with engine.connect() as conn:
-            row = conn.execute(sqlalchemy.text(
-                "SELECT current_user, version()"
-            )).fetchone()
-            if row:
-                db_user        = row[0]
-                server_version = pg_version(row[1])
+        subprocess.run(cmd, check=True)
+    except FileNotFoundError:
+        raise RuntimeError(
+            "AWS CLI not found. Install it from https://aws.amazon.com/cli/ "
+            "and ensure it is on your PATH."
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"AWS SSO login failed with exit code {exc.returncode}."
+        )
+
+    try:
+        profile.token()
+    except Exception as exc:
+        raise RuntimeError(
+            f"AWS SSO login succeeded but token generation failed: {exc}"
+        ) from exc
+
+
+def check_connection(profile: ConnectionProfile, reauth: bool = False, print_progress: bool = True) -> ConnectionResult:
+    """Open a connection, run a minimal probe query, and return a ConnectionResult.
+
+    If reauth=True and the profile uses IAM auth, a failed connection will
+    prompt the user to re-authorize via authorize_connection before retrying.
+    """
+
+    def _attempt(p: ConnectionProfile) -> ConnectionResult:
+        try:
+            engine = p.engine()
+            with engine.connect() as conn:
+                row = conn.execute(sqlalchemy.text(
+                    "SELECT current_user, version()"
+                )).fetchone()
+                if row:
+                    db_user = row[0]
+                    server_version = pg_version(row[1])
+                else:
+                    db_user = None
+                    server_version = None
+            engine.dispose()
+            return ConnectionResult(
+                profile        = p.profile,
+                success        = True,
+                server_version = server_version,
+                db_user        = db_user,
+            )
+        except OperationalError as exc: # noqa
+            return ConnectionResult(
+                profile = p.profile,
+                success = False,
+                error   = _clean_error(str(exc)),
+            )
+        except SQLAlchemyError as exc: # noqa
+            return ConnectionResult(
+                profile = p.profile,
+                success = False,
+                error   = str(exc),
+            )
+
+    if print_progress:
+        print("Connecting to database", end="")
+        if profile.iam_auth:
+            print(" with IAM auth...", end="\r")
+        else:
+            print(" with username and password...", end="\r")
+
+    result = _attempt(profile)
+
+    if result.success:
+        if print_progress:
+            print("Connecting to database", end="")
+            if profile.iam_auth:
+                print(" with IAM auth... Succeeded.")
             else:
-                db_user = None
-                server_version = None
-        engine.dispose()
-        return ConnectionResult(
-            profile        = profile.profile,
-            success        = True,
-            server_version = server_version,
-            db_user        = db_user,
-        )
-    except OperationalError as exc:
-        return ConnectionResult(
-            profile = profile.profile,
-            success = False,
-            error   = _clean_error(str(exc)),
-        )
-    except SQLAlchemyError as exc:
-        return ConnectionResult(
-            profile = profile.profile,
-            success = False,
-            error   = str(exc),
-        )
+                print(" with username and password... Succeeded.")
+    else:
+        if print_progress:
+            print("Connecting to database", end="")
+            if profile.iam_auth:
+                print(" with IAM auth... Failed.")
+            else:
+                print(" with username and password... Failed.")
+            print(f"{result.error}")
+
+        if profile.iam_auth:
+            if not result.success and reauth:
+                refresh = bool(input(
+                    f"Your credentials for profile {profile.safe_repr()} may have expired, would you like to re-authorize? "
+                    "This will open a session in your default web browser. [Y/N] "
+                ).strip().casefold() == "y")
+                if refresh:
+                    try:
+                        authorize_connection(profile)
+                    except RuntimeError as exc:
+                        return ConnectionResult(
+                            profile = profile.profile,
+                            success = False,
+                            error   = str(exc),
+                        )
+                    print("Re-authorization complete. Retrying connection...", end="\r")
+                    result = _attempt(profile)
+                    if result.success:
+                        print("Re-authorization complete. Retrying connection... Succeeded.")
+                    else:
+                        print("Re-authorization complete. Retrying connection... Failed.")
+                        print(f"{result.error}")
+            if not result.success and profile.password:
+                profile.iam_auth = False
+                profile.fallback_ssl()
+                print("Falling back to stored username/password. Retrying connection...", end="\r")
+                result = _attempt(profile)
+                if result.success:
+                    print("Falling back to stored username/password. Retrying connection... Succeeded.")
+                else:
+                    print("Falling back to stored username/password. Retrying connection... Failed.")
+                    print(f"{result.error}")
+
+    if print_progress and result.success:
+        print(f"Connected as {profile.safe_repr()} on PostgreSQL {result.server_version}.")
+
+    return result
 
 
-def test_all_connections(creds: CredentialsFile) -> list[ConnectionResult]:
+def test_all_connections(creds: CredentialsFile, reauth: bool = False) -> list[ConnectionResult]:
     """Test all connections."""
-    return [check_connection(p) for p in creds.profiles.values()]
+    return [check_connection(p, reauth=reauth, print_progress=False) for p in creds.profiles.values()]
 
 
 def _clean_error(msg: str) -> str:
