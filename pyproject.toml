@@ -21,6 +21,7 @@ query = [
     "anthropic>=0.25,<1.0",
     "openai>=1.0,<2.0",
 ]
+iam   = ["boto3>=1.26"]
 
 [project.scripts]
 tarkin = "tarkin.cli:app"

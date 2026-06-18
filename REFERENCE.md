@@ -8,12 +8,31 @@ Alias for `tarkin --help`. Prints the top-level command list.
 ## tarkin version
 Prints the installed Tarkin version and exits.
 
+## tarkin auth
+Aliases: `tarkin authorize`, `tarkin authorise`
+
+Authenticates an IAM profile via AWS SSO login and verifies that a valid RDS auth token can be generated. Only applicable to profiles with `iam_auth = true`.
+
+Options:
+- `--profile` | `-p` (required): credentials profile to authorize
+- `--credentials` | `-c`: path to credentials.toml (defaults to `~/.tarkin/credentials.toml`)
+
+What it does:
+- Verifies the profile uses IAM auth
+- Invokes `aws sso login` (with `--profile` if `aws_profile` is set), opening a browser session
+- Verifies that boto3 can generate a valid RDS auth token with the refreshed session
+- Caches the token on the profile for the duration of the process
+
+Dependency requirement:
+- Requires that the AWS Command Line Interface (CLI) is installed on the user's PC (not included as part of Tarkin)
+
 ## tarkin connect
 Tests that one or more credential profiles can reach their configured databases.
 
 Options:
 - `--profile` | `-p`: test a specific profile (omit to test all profiles in the credentials file)
 - `--credentials` | `-c`: path to credentials.toml (defaults to `~/.tarkin/credentials.toml`)
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 
 What it does:
 - Opens a connection
@@ -26,6 +45,7 @@ Inspects a live PostgreSQL database and writes a Tarkin governance YAML describi
 Options:
 - `--profile` | `-p` (required): credentials profile to connect with
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--output` | `-o`: output path (defaults to `out/<database>_model.yaml`)
 - `--validate` | `--no-validate`: run semantic validation on the inspected model before writing (default: validate)
 
@@ -86,6 +106,7 @@ Arguments:
 Options:
 - `--profile` | `-p`: credentials profile (overrides the profile field in the YAML)
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--output` | `-o`: output directory (defaults to `out/`)
 
 What it does:
@@ -118,9 +139,10 @@ What it does:
 Applies a build or migration artifact to a live database.
 
 Options:
-- `--build` | `-b`: path to artifact zip (defaults to the most recent `tarkin_build_*.zip` or `tarkin_migrate_*.zip` in `out/`)
 - `--profile` | `-p`: credentials profile (read from the artifact metadata if omitted)
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
+- `--build` | `-b`: path to artifact zip (defaults to the most recent `tarkin_build_*.zip` or `tarkin_migrate_*.zip` in `out/`)
 
 What it does:
 - Reads `artifact_type` from the artifact metadata and routes accordingly:
@@ -142,6 +164,7 @@ Removes a Tarkin governance model from a live database, restoring the original s
 Options:
 - `--profile` | `-p` (required): credentials profile
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--keep-versioning` | `-k`: retain `__valid_from__` and `__valid_to__` columns, and all historical rows
 - `--drop-versioning` | `-d`: drop versioning columns, keeping only current rows (`__valid_to__ = 'infinity'`)
 - `--no-warn` | `-n`: suppress the confirmation prompt when dropping versioning data
@@ -211,6 +234,7 @@ Arguments:
 Options:
 - `--profile` | `-p`: credentials profile (overrides the YAML's profile field)
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--output` | `-o`: output directory (defaults to `out/`)
 
 What it does:
@@ -242,6 +266,7 @@ Erases data subject records from a Tarkin-attached database.
 Options:
 - `--profile` | `-p` (required): credentials profile
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--column` | `-col` (required, repeatable): identifier column name to match on
 - `--value` | `-val` (required, repeatable): value corresponding to each `--column`, in the same order
 - `--check`: preview which rows would be affected without modifying any data
@@ -287,6 +312,7 @@ Arguments: none
 Options:
 - `--profile` | `-p` (required): credentials profile
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 
 What it does:
 - Connects to the live database
@@ -303,6 +329,7 @@ Arguments: none (prompt is collected interactively)
 Options:
 - `--profile` | `-p` (required): credentials profile
 - `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--build` | `-b`: print the generated SQL and exit without executing
 - `--execute` | `--exec` | `-e`: execute the query and return an AI interpretation of the results
 At most one of `--build` or `--execute` may be specified.

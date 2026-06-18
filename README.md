@@ -26,7 +26,8 @@ Tarkin is run through a Command Line Interface (CLI) tool built in Python with T
 
 ```bash
 pip install tarkin
-pip install tarkin[query] # optional extension as of v0.2.0
+pip install tarkin[query] # optional extension as of v0.2.0, required for 'tarkin query'
+pip install tarkin[iam]   # optional extension as of v0.3.0, required for 'tarkin auth'
 ```
 
 Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security (RLS), or PostgreSQL 16+ for MAINTAIN privileges.
@@ -34,6 +35,9 @@ Requires Python 3.11+ and PostgreSQL 14+, PostgreSQL 15+ for Row-Level Security 
 ## Quick start
 
 ```bash
+# Authorize your database connection (for IAM credentials only)
+tarkin auth --profile mydb
+
 # Inspect a live database and generate a governance YAML
 tarkin inspect --profile mydb
 
@@ -54,8 +58,11 @@ Run `tarkin help` or `tarkin --help` for the full command reference.
 
 ## Credentials
 
-Tarkin uses a `credentials.toml` file (default: `~/.tarkin/credentials.toml`) to store connection profiles:
+Tarkin uses a `credentials.toml` file (default: `~/.tarkin/credentials.toml`) to store connection profiles. Three authentication methods are supported.
+Note that `sslmode` defaults to `verify-full` for IAM and certificate profiles, and `prefer` for username/password profiles. It can be overridden explicitly if needed.
 
+Supported methods:
+**Username and password:**
 ```toml
 [mydb]
 host     = "localhost"
@@ -63,9 +70,35 @@ port     = 5432
 database = "myapp"
 username = "postgres"
 password = "secret"
+hmac_key = "your-strong-secret-key"    # Optional: HMAC key for HMAC256 column hashing
+```
 
-# Optional: HMAC key for HMAC256 column hashing
-# hmac_key = "your-strong-secret-key"
+**AWS IAM / SSO:**
+```toml
+[mydb]
+host        = "mydb.xxxx.us-east-1.rds.amazonaws.com"
+port        = 5432
+database    = "myapp"
+username    = "db_user"
+iam_auth    = true
+aws_profile = "my-aws-profile"         # Optional: defaults to the AWS default profile
+aws_region  = "us-east-1"
+hmac_key    = "your-strong-secret-key" # Optional: HMAC key for HMAC256 column hashing
+```
+
+Run `tarkin auth --profile mydb` to authenticate before connecting. Use `--reauth` on any command to be prompted to re-authorize automatically if credentials have expired.
+
+**Certificate-based auth (e.g. Okta Privileged Access):**
+```toml
+[mydb]
+host        = "mydb.example.com"
+port        = 5432
+database    = "myapp"
+username    = "alice"                  # Must match the CN in your client certificate
+sslcert     = "~/.okta/client.crt"
+sslkey      = "~/.okta/client.key"
+sslrootcert = "~/.okta/ca.crt"
+hmac_key    = "your-strong-secret-key" # Optional: HMAC key for HMAC256 column hashing
 ```
 
 ## Versioning columns

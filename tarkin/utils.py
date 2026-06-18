@@ -115,7 +115,7 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
             f"    INSERT INTO __META__.tarkin_schemas "
             f"(build_id, name, shadow_name, clearance, audit_enabled, description) "
             f"VALUES ({b}, '{sn}', 'tk_{sn}', {schema.clearance}, "
-            f"{str(schema.audit_enabled).lower()}, {sd});"
+            f"{str(schema.audit_enabled).casefold()}, {sd});"
         )
     if project.schemas:
         lines.append("")
@@ -129,7 +129,7 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                 f"    INSERT INTO __META__.tarkin_tables "
                 f"(build_id, schema_name, name, clearance, audit_enabled, description) "
                 f"VALUES ({b}, '{sn}', '{tn}', {table.clearance}, "
-                f"{str(table.audit_enabled).lower()}, {td});"
+                f"{str(table.audit_enabled).casefold()}, {td});"
             )
     if any(s.tables for s in project.schemas):
         lines.append("")
@@ -152,9 +152,9 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                     f"immutable, versioned, sensitive, masking_strategy, "
                     f"default_value, generated_expression, generated_storage, description) "
                     f"VALUES ({b}, '{sn}', '{tn}', '{cn}', '{ct}', {col.clearance}, "
-                    f"{str(col.nullable).lower()}, {str(col.unique).lower()}, "
-                    f"{str(col.immutable).lower()}, {str(col.versioned).lower()}, "
-                    f"{str(col.sensitive).lower()}, '{ms}', {dv}, {ge}, '{gs}', {cd});"
+                    f"{str(col.nullable).casefold()}, {str(col.unique).casefold()}, "
+                    f"{str(col.immutable).casefold()}, {str(col.versioned).casefold()}, "
+                    f"{str(col.sensitive).casefold()}, '{ms}', {dv}, {ge}, '{gs}', {cd});"
                 )
     if any(t.columns for s in project.schemas for t in s.tables):
         lines.append("")
@@ -171,7 +171,7 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                     f"    INSERT INTO __META__.tarkin_indexes "
                     f"(build_id, schema_name, table_name, name, columns, index_type, \"unique\", primary_key, partial_filter) "
                     f"VALUES ({b}, '{sn}', '{tn}', '{idn}', {ca}, '{idx.index_type}', "
-                    f"{str(idx.unique).lower()}, {str(idx.primary_key).lower()}, {pf});"
+                    f"{str(idx.unique).casefold()}, {str(idx.primary_key).casefold()}, {pf});"
                 )
     if any(t.indexes for s in project.schemas for t in s.tables):
         lines.append("")
@@ -203,7 +203,7 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                 f"    INSERT INTO __META__.tarkin_role_schemas "
                 f"(build_id, role_name, schema_name, \"usage\", \"create\") "
                 f"VALUES ({b}, '{rn}', '{sn}', "
-                f"{str(sp.usage).lower()}, {str(sp.create).lower()});"
+                f"{str(sp.usage).casefold()}, {str(sp.create).casefold()});"
             )
     if any(r.on for r in project.roles):
         lines.append("")
@@ -219,10 +219,10 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
                     f"(build_id, role_name, schema_name, table_name, \"select\", "
                     f"\"insert\", \"update\", \"delete\", \"truncate\", \"references\", \"trigger\", \"maintain\") "
                     f"VALUES ({b}, '{rn}', '{sn}', '{tn}', "
-                    f"{str(tp.select).lower()}, {str(tp.insert).lower()}, "
-                    f"{str(tp.update).lower()}, {str(tp.delete).lower()}, "
-                    f"{str(tp.truncate).lower()}, {str(tp.references).lower()}, "
-                    f"{str(tp.trigger).lower()}, {str(tp.maintain).lower()});"
+                    f"{str(tp.select).casefold()}, {str(tp.insert).casefold()}, "
+                    f"{str(tp.update).casefold()}, {str(tp.delete).casefold()}, "
+                    f"{str(tp.truncate).casefold()}, {str(tp.references).casefold()}, "
+                    f"{str(tp.trigger).casefold()}, {str(tp.maintain).casefold()});"
                 )
     if any(sp.tables for r in project.roles for sp in r.on):
         lines.append("")

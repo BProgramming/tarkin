@@ -118,7 +118,7 @@ def _generate_build_record(project: GovernanceProject, needs_pgcrypto: bool) -> 
         f"'{database_name}'",
         f"'{checksum}'",
         f"{dq_open}{yaml_str}{dq_close}",
-        str(needs_pgcrypto).lower(),
+        str(needs_pgcrypto).casefold(),
     ]
 
     if project.database.audit_enabled:
@@ -1841,16 +1841,16 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
         rn = sql_safe_escape_string(role.name)
         moa = ("ARRAY[" + ", ".join(f"'{sql_safe_escape_string(m)}'" for m in role.member_of) + "]"
                if role.member_of else "ARRAY[]::text[]")
-        added = str(role.name not in existing_role_names).lower()
+        added = str(role.name not in existing_role_names).casefold()
         rd = f"'{sql_safe_escape_string(role.description)}'" if role.description else "NULL"
         lines.append(
             f"    INSERT INTO __META__.tarkin_roles "
             f"(build_id, name, clearance, can_login, can_admin, can_write, "
             f"can_maintain, can_access_sensitive, added_by_tarkin, member_of, description) "
             f"VALUES (v_build_id, '{rn}', {role.clearance}, "
-            f"{str(role.can_login).lower()}, {str(role.can_admin).lower()}, "
-            f"{str(role.can_write).lower()}, {str(role.can_maintain).lower()}, "
-            f"{str(role.can_access_sensitive).lower()}, {added}, "
+            f"{str(role.can_login).casefold()}, {str(role.can_admin).casefold()}, "
+            f"{str(role.can_write).casefold()}, {str(role.can_maintain).casefold()}, "
+            f"{str(role.can_access_sensitive).casefold()}, {added}, "
             f"{moa}, {rd});"
         )
     lines.append("")

@@ -225,9 +225,9 @@ def _pg_type_string(sa_col: dict | ReflectedColumn) -> str:
         return "text"
     elif hasattr(type_obj, 'compile'):
         compiled = type_obj.compile(dialect=pg_dialect.dialect())
-        return str(compiled).lower()
+        return str(compiled).casefold()
     else:
-        return str(type_obj).lower()
+        return str(type_obj).casefold()
 
 
 _INDEX_TYPE_MAP = {
@@ -658,7 +658,7 @@ def _build_rls(
     policies: list[RLSPolicyConfig] = []
     for row in policy_rows:
         _, roles_arr, using_expr, check_expr = row
-        roles = ["PUBLIC" if r2.lower() == "public" else r2 for r2 in [r.strip('"') for r in (roles_arr or [])]]
+        roles = ["PUBLIC" if r2.casefold() == "public" else r2 for r2 in [r.strip('"') for r in (roles_arr or [])]]
         if using_expr:
             policies.append(RLSPolicyConfig(
                 roles      = roles,

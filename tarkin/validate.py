@@ -537,5 +537,5 @@ class SemanticValidator:
 
 def _is_text_compatible(pg_type: str) -> bool:
     """Return True if the PostgreSQL type can store a SHA-256 hex string without casting issues."""
-    t = pg_type.lower().strip()
+    t = pg_type.strip().casefold()
     return any(t.startswith(p) for p in ("text", "varchar", "char", "character varying"))
