@@ -11,6 +11,8 @@ from sqlalchemy import text
 from typing import cast
 
 from .codegen import (
+    _generate_comments,
+    _generate_discovery_functions,
     _generate_rls,
     _generate_triggers,
     _generate_views,
@@ -49,9 +51,18 @@ from .utils import (
 def migrate(
     after:    GovernanceProject,
     profile:  ConnectionProfile,
-    output: Path | None = None,
+    output:   Path | None = None,
+    force:    bool = False,
 ) -> Path:
-    """Generate a migration artifact from the current live build to *after*."""
+    """Generate a migration artifact from the current live build to *after*.
+
+    With force, an empty changeset produces an artifact instead of raising.
+    Some parts of a migration are regenerated wholesale rather than diffed
+    (the __META__ update, the discovery functions, and the object comments) so
+    a database whose model has not changed can still be behind the codegen of
+    the installed Tarkin version. Forcing is how that database catches up
+    without a detach and rebuild.
+    """
     output = (output or OUT_DIR)
     build_output_directory(output)
 
@@ -63,11 +74,16 @@ def migrate(
     changes = diff(before, after)
     print(f"Assessing differences... Done. {len(changes)} change(s) detected.")
 
-    if not changes:
+    if not changes and not force:
         raise MigrateError(
             "No differences detected between the current build and the target YAML. "
-            "Nothing to migrate."
+            "Nothing to migrate. Use --force to regenerate the artifact anyway, "
+            "which reapplies the __META__ update, the discovery functions, and "
+            "the object comments for the installed Tarkin version."
         )
+
+    if not changes:
+        print("No model differences found. Regenerating for the installed Tarkin version.")
 
     print("Generating migration SQL...", end="\r")
     yaml_str  = Serializer.to_yaml_string(after)
@@ -180,6 +196,10 @@ def _generate_migration_sql(
     add_rls      = _emit_add_rls(changes, after_table_map, after)
     role_ops     = _emit_role_changes(changes, before, after)
     meta_update  = _emit_migrate_meta_update(after, changes, profile, checksum, yaml_str)
+    # Re-emitted wholesale rather than diffed. COMMENT ON is a set operation, so
+    # replaying every description converges the database on the YAML, and
+    # clear_missing turns a removed description into COMMENT ON ... IS NULL.
+    comments     = _generate_comments(after, clear_missing=True)
 
     for title, sql_block in [
         ("DROP FK CONSTRAINTS",       drop_fks),
@@ -194,8 +214,10 @@ def _generate_migration_sql(
         ("ADD INDEXES",               add_indexes),
         ("ADD FK CONSTRAINTS",        add_fks),
         ("ADD RLS POLICIES",          add_rls),
+        ("COMMENTS",                  comments),
         ("ROLE & PERMISSION CHANGES", role_ops),
         ("UPDATE META",               meta_update),
+        ("DISCOVERY FUNCTIONS",       _generate_discovery_functions()),
     ]:
         if sql_block.strip():
             sections.append(sql_comment_block_section(title))
@@ -779,6 +801,9 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
             elif c.field in ("masking_strategy", "mask_config", "sensitive",
                              "clearance", "is_subject_identifier", "versioned"):
                 # View-layer changes — handled by view recreation.
+                pass
+            elif c.field == "description":
+                # Carried by the COMMENTS section, which replays every description.
                 pass
 
     return "\n".join(lines) + "\n" if lines else ""

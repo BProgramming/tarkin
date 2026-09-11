@@ -22,6 +22,31 @@ By design, Tarkin is an open book: open source, fully accessible code, fully hum
 
 Tarkin is run through a Command Line Interface (CLI) tool built in Python with Typer. Some commands generate YAMLs for you to view and modify, or SQL scripts for you to validate, and others apply those scripts once you've decided they're ready. Nothing happens without your direct approval. And don't just take my word for it — check [the GitHub repo](https://github.com/BProgramming/tarkin) yourself.
 
+## Reading the governance model
+
+Once a database is attached, its governance model is readable through a set of `SECURITY DEFINER` functions in `__META__`, granted to `PUBLIC`. Authorization is enforced inside PostgreSQL against the calling role's grants and clearance — a client only ever receives what that role is entitled to, and Tarkin is not in a position to get that wrong.
+
+```bash
+tarkin discover --profile mydb                             # everything visible to your role
+tarkin discover --profile mydb -obj retention -obj rls     # just the governance stuff
+tarkin discover --profile mydb -obj columns -s analytics
+tarkin discover --profile mydb -obj erasure_counts --since 2026-01-01
+```
+
+The same functions are callable over any PostgreSQL connection, and a view flattens them into one row per column:
+
+```sql
+SELECT * FROM __META__.tarkin_governance;
+SELECT __META__.get_columns('analytics');
+SELECT __META__.get_rls_policies('analytics', 'events');
+```
+
+This is how third-party tooling reads a Tarkin-governed database. An AI agent connected as a governed role can build a query against the model without Tarkin brokering the connection, without a service to deploy, and without a second set of credentials. `tarkin query` is one consumer of a surface that is already open to any client.
+
+Descriptions written in the governance YAML are also applied to the database as `COMMENT ON` statements, so they show up in `\d+`, in ORMs, and in any tool that reads `pg_description`, not only through Tarkin. `tarkin inspect` reads existing comments back into the YAML, so an already-documented database keeps its documentation.
+
+See [REFERENCE.md](REFERENCE.md) for the full function list and each one's visibility rule.
+
 ## Installation
 
 ```bash
@@ -52,6 +77,9 @@ tarkin attach --profile mydb
 
 # Remove
 tarkin detach --profile mydb --keep-versioning
+
+# Read the governance model back
+tarkin discover --profile mydb
 ```
 
 Run `tarkin help` or `tarkin --help` for the full command reference.
@@ -134,6 +162,7 @@ Unlike versioning, there is no keep/drop flag — retention columns are always r
 
 See [SECURITY.md](SECURITY.md) for:
 - Release integrity and SBOM verification
+- The discovery function surface and what it deliberately withholds
 - HMAC key management and rotation
 - Shadow schema model and detach guarantees
 - Column masking security notes (xxhash vs SHA vs HMAC)

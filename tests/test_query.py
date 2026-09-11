@@ -13,6 +13,7 @@ from tarkin.query import (
     _extract_sql,
     _fetch_schema_context,
     _execute_read_only,
+    _SYSTEM_PROMPT,
     query,
 )
 
@@ -41,6 +42,13 @@ def _make_db_profile() -> ConnectionProfile:
 
 
 _FAKE_CONTEXT = {
+    "build": {
+        "build_id":       7,
+        "built_at":       "2026-05-01T12:00:00+00:00",
+        "tarkin_version": "0.4.0",
+        "database_name":  "testdb",
+        "checksum":       "abc123def4567890",
+    },
     "schemas": [{"name": "analytics", "clearance": 0, "description": "Analytics schema"}],
     "tables":  [{"schema": "analytics", "name": "events", "description": "Raw event log"}],
     "columns": [
@@ -49,7 +57,44 @@ _FAKE_CONTEXT = {
         {"schema": "analytics", "table": "events", "name": "created_at", "type": "timestamptz", "description": "When it happened"},
     ],
     "roles": [{"name": "analyst", "clearance": 0, "can_admin": False}],
+    "retention": [
+        {"schema": "analytics", "table": "events", "erase_strategy": "delete", "retention_days": 90},
+    ],
+    "erasures": [
+        {
+            "schema":        "analytics",
+            "table":         "events",
+            "strategy":      "delete",
+            "operations":    3,
+            "rows_affected": 41,
+            "first_erasure": "2026-02-01T00:00:00+00:00",
+            "last_erasure":  "2026-04-30T00:00:00+00:00",
+        },
+    ],
+    "rls_policies": [
+        {
+            "schema":     "analytics",
+            "table":      "events",
+            "policy":     "tarkin_rls_events_0",
+            "permissive": "PERMISSIVE",
+            "command":    "ALL",
+            "roles":      ["analyst"],
+            "using_expr": "tenant_id = current_setting('app.tenant')::bigint",
+            "check_expr": None,
+        },
+    ],
 }
+
+# Order matters: it must match the call order in _fetch_schema_context.
+_CONTEXT_KEYS = [
+    "build", "schemas", "tables", "columns",
+    "roles", "retention", "erasures", "rls_policies",
+]
+
+_CONTEXT_FUNCTIONS = [
+    "get_build", "get_schemas", "get_tables", "get_columns",
+    "get_roles", "get_retention", "get_erasure_counts", "get_rls_policies",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -81,31 +126,71 @@ class TestExtractSql:
 
 class TestFetchSchemaContext:
 
-    def test_calls_all_four_functions(self) -> None:
-        """_fetch_schema_context calls get_schemas, get_tables, get_columns, get_roles."""
+    def test_calls_every_discovery_function(self) -> None:
+        """_fetch_schema_context calls each discovery function exactly once."""
         mock_conn = MagicMock()
 
         # Each call to conn.execute().fetchone() returns a row with the context value
         mock_conn.execute.return_value.fetchone.side_effect = [
-            (_FAKE_CONTEXT["schemas"],),
-            (_FAKE_CONTEXT["tables"],),
-            (_FAKE_CONTEXT["columns"],),
-            (_FAKE_CONTEXT["roles"],),
+            (_FAKE_CONTEXT[key],) for key in _CONTEXT_KEYS
         ]
 
         result = _fetch_schema_context(mock_conn)
 
-        assert result["schemas"] == _FAKE_CONTEXT["schemas"]
-        assert result["tables"]  == _FAKE_CONTEXT["tables"]
-        assert result["columns"] == _FAKE_CONTEXT["columns"]
-        assert result["roles"]   == _FAKE_CONTEXT["roles"]
+        for key in _CONTEXT_KEYS:
+            assert result[key] == _FAKE_CONTEXT[key]
+        assert set(result) == set(_CONTEXT_KEYS)
 
-        # Verify all four function names were called
         executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
-        assert any("get_schemas" in s for s in executed_sql)
-        assert any("get_tables"  in s for s in executed_sql)
-        assert any("get_columns" in s for s in executed_sql)
-        assert any("get_roles"   in s for s in executed_sql)
+        for fn in _CONTEXT_FUNCTIONS:
+            assert sum(1 for s in executed_sql if f"__META__.{fn}(" in s) == 1
+
+    def test_identifier_bearing_erasure_log_is_never_fetched(self) -> None:
+        """The erasures key holds counts; get_erasures carries identifiers and stays in __META__."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.side_effect = [
+            (_FAKE_CONTEXT[key],) for key in _CONTEXT_KEYS
+        ]
+
+        _fetch_schema_context(mock_conn)
+
+        executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+        assert not any("__META__.get_erasures(" in s for s in executed_sql)
+        assert any("__META__.get_erasure_counts(" in s for s in executed_sql)
+
+    def test_falsy_payload_becomes_empty_list(self) -> None:
+        """A role with nothing visible gets [] rather than None."""
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.side_effect = [
+            (None,) for _ in _CONTEXT_KEYS
+        ]
+
+        result = _fetch_schema_context(mock_conn)
+
+        assert all(result[key] == [] for key in _CONTEXT_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+class TestSystemPrompt:
+
+    def test_documents_every_context_key(self) -> None:
+        for key in _CONTEXT_KEYS:
+            assert key in _SYSTEM_PROMPT
+
+    def test_explains_the_not_found_message_fallback(self) -> None:
+        assert "'message'" in _SYSTEM_PROMPT
+
+    def test_constrains_output_to_select(self) -> None:
+        assert "must be a SELECT statement" in _SYSTEM_PROMPT
+
+    def test_warns_against_broadening_on_rls_filtered_results(self) -> None:
+        assert "using_expr" in _SYSTEM_PROMPT
+
+    def test_warns_against_assuming_historical_completeness(self) -> None:
+        assert "historical completeness" in _SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

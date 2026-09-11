@@ -69,6 +69,8 @@ def generate_sql(project: GovernanceProject, current: GovernanceProject, profile
         _generate_new_foreign_keys(project, current),
         sql_comment_block_section("VIEWS"),
         _generate_views(project),
+        sql_comment_block_section("COMMENTS"),
+        _generate_comments(project),
         sql_comment_block_section("TRIGGERS"),
         _generate_triggers(project),
         sql_comment_block_section("ROLES"),
@@ -151,6 +153,22 @@ def _generate_meta_schema() -> str:
 CREATE SCHEMA IF NOT EXISTS __META__;
 REVOKE ALL ON SCHEMA __META__ FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA __META__ FROM PUBLIC;
+
+-- USAGE permits name resolution only. Without it, GRANT EXECUTE on the
+-- discovery functions is unusable: PostgreSQL requires schema USAGE to
+-- reference any object inside the schema, so the call fails before the
+-- function's own privileges are ever checked. The table-level REVOKE above
+-- keeps __META__ itself unreadable, and _generate_discovery_functions()
+-- revokes EXECUTE from PUBLIC on every function before granting it back on
+-- the discovery surface alone.
+GRANT USAGE ON SCHEMA __META__ TO PUBLIC;
+
+COMMENT ON SCHEMA __META__ IS
+    'Tarkin governance metadata. Tables are not readable directly. Read the '
+    'governance model through the discovery functions in this schema: '
+    'get_build, get_schemas, get_tables, get_columns, get_roles, get_retention, '
+    'get_erasures, get_erasure_counts, get_rls_policies. Each returns json '
+    'filtered to what the calling role is cleared to see.';
 
 CREATE TABLE IF NOT EXISTS __META__.tarkin_builds (
     build_id                    bigserial PRIMARY KEY,
@@ -696,6 +714,60 @@ def _generate_views(project: GovernanceProject) -> str:
                 )
 
             lines.append("")
+
+    return "\n".join(lines)
+
+
+def _generate_comments(project: GovernanceProject, clear_missing: bool = False) -> str:
+    """Generate COMMENT ON statements carrying governance YAML descriptions.
+
+    Comments land on the Tarkin-created schema, views, and view columns, never
+    on the shadow tables. That keeps the detach guarantee intact: the view
+    layer is dropped on detach and takes its comments with it, while the
+    original objects' own comments are never overwritten.
+
+    Descriptions are also stored in __META__ and returned by the discovery
+    functions. The comments exist so that clients which never call those
+    functions (e.g. psql, ORMs, BI tools, generic database agents) can see the
+    governance descriptions via reading pg_description.
+
+    With clear_missing, objects lacking a description emit ``IS NULL`` so that
+    removing a description from the YAML converges on the database. The build
+    path leaves it off, since the views it comments are new.
+    """
+    lines: list[str] = []
+
+    def emit(target: str, description: str | None) -> None:
+        if description:
+            lines.append(f"COMMENT ON {target} IS '{sql_safe_escape_string(description)}';")
+        elif clear_missing:
+            lines.append(f"COMMENT ON {target} IS NULL;")
+
+    for schema in project.schemas:
+        schema_q = sql_safe_double_quote(schema.name)
+        emit(f"SCHEMA {schema_q}", schema.description)
+
+        for table in schema.tables:
+            # A versioned table also has a _current view over the same columns.
+            view_names = [table.name]
+            if any(c.versioned for c in table.columns):
+                view_names.append(f"{table.name}_current")
+
+            for view_name in view_names:
+                view_q = f"{schema_q}.{sql_safe_double_quote(view_name)}"
+                emit(f"VIEW {view_q}", table.description)
+
+                for col in table.columns:
+                    # VIRTUAL generated columns are not in the view.
+                    if col.is_generated and col.generated_storage != GeneratedColumnStorage.STORED:
+                        continue
+                    emit(f"COLUMN {view_q}.{sql_safe_double_quote(col.name)}", col.description)
+
+        if lines and lines[-1] != "":
+            lines.append("")
+
+    if not lines:
+        return "-- No descriptions to apply.\n"
 
     return "\n".join(lines)
 
@@ -2223,11 +2295,128 @@ def _object_checksum(obj: dict) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _generate_discovery_functions() -> str:
-    """Generate the four governed discovery functions in __META__.
+def _generate_governance_view() -> str:
+    """Generate __META__.tarkin_governance, one row per visible column.
 
-    All functions scope to the latest build and enforce visibility based on
-    the calling role's grants and clearance level stored in __META__.
+    A flattening of the discovery functions into a single relation, so a client
+    that enumerates tables finds the governance model without having to know
+    that the functions exist or how to call them. The functions take no
+    arguments here, so the view spans every schema the caller can see and
+    carries schema_name as a column.
+
+    Filtering still happens inside the functions against session_user, which is
+    immune to both view-owner and definer context. The view therefore needs no
+    security_invoker and is correct regardless of who owns it.
+
+    ON DROP before CREATE: replacing a view cannot change its column
+    list, so a future column addition would fail against an existing install.
+    By DROPing first, we keep it idempotent.
+    """
+    return r"""
+
+DROP VIEW IF EXISTS __META__.tarkin_governance;
+CREATE OR REPLACE VIEW __META__.tarkin_governance AS
+WITH raw AS (
+    SELECT __META__.get_build()        AS bld,
+           __META__.get_columns()      AS cols,
+           __META__.get_tables()       AS tbls,
+           __META__.get_retention()    AS ret,
+           __META__.get_rls_policies() AS rls
+),
+-- Every discovery function returns a message object rather than an array when
+-- the calling role can see nothing, and json_to_recordset rejects a non-array.
+c AS (
+    SELECT x.* FROM raw, json_to_recordset(
+        CASE WHEN json_typeof(raw.cols) = 'array' THEN raw.cols ELSE '[]'::json END
+    ) AS x(
+        "schema"         text,
+        "table"          text,
+        name             text,
+        type             text,
+        clearance        int,
+        nullable         bool,
+        sensitive        bool,
+        masking_strategy text,
+        description      text
+    )
+),
+t AS (
+    SELECT x.* FROM raw, json_to_recordset(
+        CASE WHEN json_typeof(raw.tbls) = 'array' THEN raw.tbls ELSE '[]'::json END
+    ) AS x(
+        "schema"      text,
+        name          text,
+        clearance     int,
+        audit_enabled bool,
+        description   text
+    )
+),
+r AS (
+    SELECT x.* FROM raw, json_to_recordset(
+        CASE WHEN json_typeof(raw.ret) = 'array' THEN raw.ret ELSE '[]'::json END
+    ) AS x(
+        "schema"       text,
+        "table"        text,
+        erase_strategy text,
+        retention_days int
+    )
+),
+p AS (
+    SELECT x."schema"                    AS schema_name,
+           x."table"                     AS table_name,
+           count(*)                      AS policy_count,
+           string_agg(x.using_expr, ' AND ' ORDER BY x.policy) AS predicates
+    FROM raw, json_to_recordset(
+        CASE WHEN json_typeof(raw.rls) = 'array' THEN raw.rls ELSE '[]'::json END
+    ) AS x(
+        "schema"   text,
+        "table"    text,
+        policy     text,
+        using_expr text
+    )
+    GROUP BY x."schema", x."table"
+)
+SELECT
+    ((SELECT raw.bld FROM raw) ->> 'build_id')::bigint AS build_id,
+    c."schema"                  AS schema_name,
+    c."table"                   AS table_name,
+    c.name                      AS column_name,
+    c.type                      AS data_type,
+    c.nullable                  AS nullable,
+    c.sensitive                 AS sensitive,
+    c.masking_strategy          AS masking_strategy,
+    c.clearance                 AS column_clearance,
+    t.clearance                 AS table_clearance,
+    c.description               AS column_description,
+    t.description               AS table_description,
+    t.audit_enabled             AS audit_enabled,
+    r.retention_days            AS retention_days,
+    r.erase_strategy            AS erase_strategy,
+    COALESCE(p.policy_count, 0) AS rls_policy_count,
+    p.predicates                AS rls_predicates
+FROM c
+LEFT JOIN t ON t."schema"    = c."schema" AND t.name       = c."table"
+LEFT JOIN r ON r."schema"    = c."schema" AND r."table"    = c."table"
+LEFT JOIN p ON p.schema_name = c."schema" AND p.table_name = c."table"
+ORDER BY c."schema", c."table", c.name;
+GRANT SELECT ON __META__.tarkin_governance TO PUBLIC;
+COMMENT ON VIEW __META__.tarkin_governance IS
+    'The governance model, one row per column, filtered to what your role is '
+    'cleared to see. masking_strategy other than none means the value you read '
+    'through the view layer is transformed rather than stored. sensitive marks '
+    'columns restricted to roles with can_access_sensitive. rls_policy_count '
+    'above zero means a query against that table returns a filtered subset of '
+    'rows. retention_days means rows older than that may already have been '
+    'erased. build_id identifies the governance build these rows describe.';
+""".strip()
+
+
+def _generate_discovery_functions() -> str:
+    """Generate the governed discovery functions in __META__.
+
+    All functions except get_erasures and get_erasure_counts scope to the
+    latest build, and all enforce visibility based on the calling role's
+    grants and clearance level stored in __META__.
 
     get_schemas()
         Returns all schemas the calling role has USAGE on.
@@ -2243,8 +2432,52 @@ def _generate_discovery_functions() -> str:
     get_roles()
         Returns all roles if the calling role has can_admin, otherwise returns
         only the calling role's own record.
+
+    get_build()
+        Returns identifying metadata for the latest build. Returns the
+        not-found message to roles absent from the build. Never returns the
+        stored governance YAML or the profile name.
+
+    get_retention(schema text DEFAULT NULL, tbl text DEFAULT NULL)
+        Returns retention configuration for tables the calling role can see,
+        under the same clearance and SELECT rules as get_tables.
+
+    get_erasures(since timestamptz DEFAULT NULL)
+        Returns the erasure audit log, optionally bounded below by timestamp.
+        Restricted to can_admin roles. Never returns column_values.
+
+    get_erasure_counts(since timestamptz DEFAULT NULL)
+        Returns per-table erasure activity as counts, under the same clearance
+        and SELECT rules as get_tables. Carries no identifiers, no erased
+        values, and no actor names.
+
+    get_rls_policies(schema text DEFAULT NULL, tbl text DEFAULT NULL)
+        Returns row-level security policies in effect on shadow tables the
+        calling role can see, with shadow schema names mapped back to their
+        public-facing equivalents.
+
+    The block also carries __META__.tarkin_governance, a view flattening the
+    functions into one row per visible column. Keeping it here means the build,
+    migrate, and update paths all pick it up without separate wiring.
     """
     return r"""
+
+-- Every function below filters on session_user, not current_user. Inside a
+-- SECURITY DEFINER function current_user resolves to the function owner, so
+-- filtering on it would evaluate every caller's visibility as the owner's and
+-- return the full model to any role that can call it. session_user is the
+-- authenticated login role and is unaffected by the definer context.
+--
+-- Consequence: SET ROLE does not change what these functions return. They
+-- report what the login role is cleared for, while the view layer, grants, and
+-- RLS respond to the active role. Connect as the role you want to inspect.
+--
+-- PostgreSQL grants EXECUTE to PUBLIC on every new function by default. With
+-- USAGE on __META__ now granted, that default would expose the erase
+-- functions by name. Revoke everything first, then grant back only the
+-- discovery surface. This runs after all other __META__ functions are created,
+-- which is why DISCOVERY FUNCTIONS is the last section of the build.
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA __META__ FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION __META__.tarkin_latest_build_id()
 RETURNS bigint
@@ -2254,6 +2487,7 @@ SECURITY DEFINER
 AS $$
     SELECT MAX(build_id) FROM __META__.tarkin_builds;
 $$;
+REVOKE ALL ON FUNCTION __META__.tarkin_latest_build_id() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION __META__.get_schemas()
 RETURNS json
@@ -2281,10 +2515,12 @@ AS $$
      AND rs.build_id    = s.build_id
     WHERE s.build_id   = __META__.tarkin_latest_build_id()
       AND rs.build_id  = __META__.tarkin_latest_build_id()
-      AND rs.role_name = current_user
+      AND rs.role_name = session_user
       AND rs.usage     = true;
 $$;
 GRANT EXECUTE ON FUNCTION __META__.get_schemas() TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_schemas() IS
+    'Returns the schemas the calling role holds USAGE on, as json: name, clearance, audit_enabled, description.';
 
 CREATE OR REPLACE FUNCTION __META__.get_tables(p_schema text DEFAULT NULL)
 RETURNS json
@@ -2314,15 +2550,17 @@ AS $$
      AND  rt.table_name  = t.name
      AND  rt.build_id    = t.build_id
     JOIN __META__.tarkin_roles r
-      ON  r.name     = current_user
+      ON  r.name     = session_user
      AND  r.build_id = t.build_id
     WHERE t.build_id   = __META__.tarkin_latest_build_id()
-      AND rt.role_name = current_user
+      AND rt.role_name = session_user
       AND rt.select    = true
       AND t.clearance  <= r.clearance
       AND (p_schema IS NULL OR t.schema_name = p_schema);
 $$;
 GRANT EXECUTE ON FUNCTION __META__.get_tables(text) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_tables(text) IS
+    'Returns the tables the calling role holds SELECT on at or below its clearance, as json: schema, name, clearance, audit_enabled, description. Optional argument filters by schema.';
 
 CREATE OR REPLACE FUNCTION __META__.get_columns(
     p_schema text DEFAULT NULL,
@@ -2362,10 +2600,10 @@ AS $$
      AND  rt.table_name  = c.table_name
      AND  rt.build_id    = c.build_id
     JOIN __META__.tarkin_roles r
-      ON  r.name     = current_user
+      ON  r.name     = session_user
      AND  r.build_id = c.build_id
     WHERE c.build_id    = __META__.tarkin_latest_build_id()
-      AND rt.role_name  = current_user
+      AND rt.role_name  = session_user
       AND rt.select     = true
       AND c.clearance   <= r.clearance
       AND (
@@ -2376,6 +2614,8 @@ AS $$
       AND (p_table  IS NULL OR c.table_name  = p_table);
 $$;
 GRANT EXECUTE ON FUNCTION __META__.get_columns(text, text) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_columns(text, text) IS
+    'Returns the columns the calling role can see, as json: schema, table, name, type, clearance, nullable, sensitive, masking_strategy, description. Sensitive columns appear only for roles with can_access_sensitive. A masking_strategy other than none means the value read through the view is masked, not the stored value. Optional arguments filter by schema and table.';
 
 CREATE OR REPLACE FUNCTION __META__.get_roles()
 RETURNS json
@@ -2409,11 +2649,251 @@ AS $$
                 SELECT 1
                 FROM __META__.tarkin_roles self
                 WHERE self.build_id  = __META__.tarkin_latest_build_id()
-                  AND self.name      = current_user
+                  AND self.name      = session_user
                   AND self.can_admin = true
             )
-            OR r.name = current_user
+            OR r.name = session_user
           );
 $$;
 GRANT EXECUTE ON FUNCTION __META__.get_roles() TO PUBLIC;
-""".strip()
+COMMENT ON FUNCTION __META__.get_roles() IS
+    'Returns role definitions as json: name, clearance, capability flags, member_of, description. Roles with can_admin see every role, while everyone else sees only their own record.';
+
+CREATE OR REPLACE FUNCTION __META__.get_build()
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        (
+            SELECT json_build_object(
+                'build_id',       b.build_id,
+                'built_at',       b.built_at,
+                'tarkin_version', b.tarkin_version,
+                'database_name',  b.database_name,
+                'checksum',       b.checksum
+            )
+            FROM __META__.tarkin_builds b
+            WHERE b.build_id = __META__.tarkin_latest_build_id()
+              AND EXISTS (
+                    SELECT 1
+                    FROM __META__.tarkin_roles self
+                    WHERE self.build_id = __META__.tarkin_latest_build_id()
+                      AND self.name     = session_user
+                  )
+        ),
+        json_build_object(
+            'message', 'No results found for get_build with parameters none'
+        )
+    );
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_build() TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_build() IS
+    'Returns the governance build in effect, as json: build_id, built_at, tarkin_version, database_name, checksum. Call this to detect that the model changed under you. The governance YAML is never returned.';
+
+CREATE OR REPLACE FUNCTION __META__.get_retention(
+    p_schema text DEFAULT NULL,
+    p_table  text DEFAULT NULL
+)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'schema',         ret.schema_name,
+                'table',          ret.table_name,
+                'erase_strategy', ret.erase_strategy,
+                'retention_days', ret.retention_days
+            )
+            ORDER BY ret.schema_name, ret.table_name
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_retention with parameters schema='
+                || COALESCE(p_schema, 'null')
+                || ' table='
+                || COALESCE(p_table, 'null')
+        )
+    )
+    FROM __META__.tarkin_retention ret
+    JOIN __META__.tarkin_tables t
+      ON  t.schema_name = ret.schema_name
+     AND  t.name        = ret.table_name
+     AND  t.build_id    = ret.build_id
+    JOIN __META__.tarkin_role_tables rt
+      ON  rt.schema_name = ret.schema_name
+     AND  rt.table_name  = ret.table_name
+     AND  rt.build_id    = ret.build_id
+    JOIN __META__.tarkin_roles r
+      ON  r.name     = session_user
+     AND  r.build_id = ret.build_id
+    WHERE ret.build_id = __META__.tarkin_latest_build_id()
+      AND rt.role_name = session_user
+      AND rt.select    = true
+      AND t.clearance  <= r.clearance
+      AND (p_schema IS NULL OR ret.schema_name = p_schema)
+      AND (p_table  IS NULL OR ret.table_name  = p_table);
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_retention(text, text) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_retention(text, text) IS
+    'Returns retention configuration, as json: schema, table, erase_strategy, retention_days. Rows older than retention_days may already have been erased, so do not assume historical completeness. Only tables enrolled in retention management appear.';
+
+CREATE OR REPLACE FUNCTION __META__.get_erasures(
+    p_since timestamptz DEFAULT NULL
+)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'erasure_id',    e.erasure_id,
+                'erased_at',     e.erased_at,
+                'erased_by',     e.erased_by,
+                'schema',        e.schema_name,
+                'table',         e.table_name,
+                'column_names',  e.column_names,
+                'strategy',      e.strategy,
+                'rows_affected', e.rows_affected,
+                'was_scheduled', e.was_scheduled
+            )
+            ORDER BY e.erased_at DESC, e.erasure_id DESC
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_erasures with parameters since='
+                || COALESCE(p_since::text, 'null')
+        )
+    )
+    FROM __META__.tarkin_erasures e
+    WHERE (p_since IS NULL OR e.erased_at >= p_since)
+      AND EXISTS (
+            SELECT 1
+            FROM __META__.tarkin_roles self
+            WHERE self.build_id  = __META__.tarkin_latest_build_id()
+              AND self.name      = session_user
+              AND self.can_admin = true
+          );
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_erasures(timestamptz) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_erasures(timestamptz) IS
+    'Returns the erasure audit log, restricted to roles with can_admin, as json. The identifier values used to erase a subject are never returned. Optional argument bounds the log by timestamp.';
+
+CREATE OR REPLACE FUNCTION __META__.get_erasure_counts(
+    p_since timestamptz DEFAULT NULL
+)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'schema',        x.schema_name,
+                'table',         x.table_name,
+                'strategy',      x.strategy,
+                'operations',    x.operations,
+                'rows_affected', x.rows_affected,
+                'first_erasure', x.first_erasure,
+                'last_erasure',  x.last_erasure
+            )
+            ORDER BY x.schema_name, x.table_name, x.strategy
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_erasure_counts with parameters since='
+                || COALESCE(p_since::text, 'null')
+        )
+    )
+    FROM (
+        SELECT e.schema_name, e.table_name, e.strategy,
+               count(*)             AS operations,
+               sum(e.rows_affected) AS rows_affected,
+               min(e.erased_at)     AS first_erasure,
+               max(e.erased_at)     AS last_erasure
+        FROM __META__.tarkin_erasures e
+        JOIN __META__.tarkin_role_tables rt
+          ON  rt.schema_name = e.schema_name
+         AND  rt.table_name  = e.table_name
+         AND  rt.build_id    = __META__.tarkin_latest_build_id()
+        JOIN __META__.tarkin_tables t
+          ON  t.schema_name = e.schema_name
+         AND  t.name        = e.table_name
+         AND  t.build_id    = rt.build_id
+        JOIN __META__.tarkin_roles r
+          ON  r.name     = session_user
+         AND  r.build_id = rt.build_id
+        WHERE (p_since IS NULL OR e.erased_at >= p_since)
+          AND rt.role_name = session_user
+          AND rt.select    = true
+          AND t.clearance  <= r.clearance
+        GROUP BY e.schema_name, e.table_name, e.strategy
+    ) x;
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_erasure_counts(timestamptz) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_erasure_counts(timestamptz) IS
+    'Returns per-table erasure activity counts, as json: schema, table, strategy, operations, rows_affected, first_erasure, last_erasure. A table listed here is missing rows that once existed. Carries no identifiers, erased values, or actor names.';
+
+CREATE OR REPLACE FUNCTION __META__.get_rls_policies(
+    p_schema text DEFAULT NULL,
+    p_table  text DEFAULT NULL
+)
+RETURNS json
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+AS $$
+    SELECT COALESCE(
+        json_agg(
+            json_build_object(
+                'schema',     s.name,
+                'table',      p.tablename,
+                'policy',     p.policyname,
+                'permissive', p.permissive,
+                'command',    p.cmd,
+                'roles',      p.roles,
+                'using_expr', p.qual,
+                'check_expr', p.with_check
+            )
+            ORDER BY s.name, p.tablename, p.policyname
+        ),
+        json_build_object(
+            'message',
+            'No results found for get_rls_policies with parameters schema='
+                || COALESCE(p_schema, 'null')
+                || ' table='
+                || COALESCE(p_table, 'null')
+        )
+    )
+    FROM pg_policies p
+    JOIN __META__.tarkin_schemas s
+      ON  s.shadow_name = p.schemaname
+     AND  s.build_id    = __META__.tarkin_latest_build_id()
+    JOIN __META__.tarkin_tables t
+      ON  t.schema_name = s.name
+     AND  t.name        = p.tablename
+     AND  t.build_id    = s.build_id
+    JOIN __META__.tarkin_role_tables rt
+      ON  rt.schema_name = s.name
+     AND  rt.table_name  = p.tablename
+     AND  rt.build_id    = s.build_id
+    JOIN __META__.tarkin_roles r
+      ON  r.name     = session_user
+     AND  r.build_id = s.build_id
+    WHERE rt.role_name = session_user
+      AND rt.select    = true
+      AND t.clearance  <= r.clearance
+      AND (p_schema IS NULL OR s.name      = p_schema)
+      AND (p_table  IS NULL OR p.tablename = p_table);
+$$;
+GRANT EXECUTE ON FUNCTION __META__.get_rls_policies(text, text) TO PUBLIC;
+COMMENT ON FUNCTION __META__.get_rls_policies(text, text) IS
+    'Returns the row-level security policies in effect, as json: schema, table, policy, permissive, command, roles, using_expr, check_expr. Where a policy applies, a query returns only the rows its using_expr admits; a partial result is expected, not an error.';
+""".strip() + "\n\n" + _generate_governance_view()

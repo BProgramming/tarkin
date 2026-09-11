@@ -3,6 +3,10 @@ from __future__ import annotations
 import pytest
 
 from tarkin.codegen import (
+    _generate_comments,
+    _generate_discovery_functions,
+    _generate_governance_view,
+    _generate_meta_schema,
     _generate_grants,
     _generate_audit,
     _generate_audit_grants,
@@ -836,3 +840,323 @@ class TestDescriptionPersistence:
         role = RoleConfig(name="reader", description="Read-only analytics role", can_login=True)
         assert role.description == "Read-only analytics role"
 
+
+# ---------------------------------------------------------------------------
+# Discovery functions
+# ---------------------------------------------------------------------------
+
+_DISCOVERY_FUNCTIONS = (
+    "get_schemas", "get_tables", "get_columns", "get_roles",
+    "get_build", "get_retention", "get_erasures",
+    "get_erasure_counts", "get_rls_policies",
+)
+
+
+def _function_body(fn: str) -> str:
+    """Return the SQL between a function's CREATE and its closing $$."""
+    sql   = _generate_discovery_functions()
+    start = sql.index(f"CREATE OR REPLACE FUNCTION __META__.{fn}(")
+    return sql[start:sql.index("$$;", start)]
+
+
+class TestGenerateDiscoveryFunctions:
+
+    def test_all_functions_are_created(self) -> None:
+        sql = _generate_discovery_functions()
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert f"CREATE OR REPLACE FUNCTION __META__.{fn}(" in sql
+
+    def test_all_functions_are_granted_to_public(self) -> None:
+        sql = _generate_discovery_functions()
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert f"GRANT EXECUTE ON FUNCTION __META__.{fn}(" in sql
+
+    def test_all_functions_are_security_definer_and_stable(self) -> None:
+        for fn in _DISCOVERY_FUNCTIONS:
+            body = _function_body(fn)
+            assert "SECURITY DEFINER" in body
+            assert "STABLE" in body
+
+    def test_all_functions_return_json(self) -> None:
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert "RETURNS json" in _function_body(fn)
+
+    def test_all_functions_emit_a_not_found_message(self) -> None:
+        sql = _generate_discovery_functions()
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert f"No results found for {fn} with parameters" in sql
+
+    def test_latest_build_id_helper_is_created(self) -> None:
+        sql = _generate_discovery_functions()
+        assert "CREATE OR REPLACE FUNCTION __META__.tarkin_latest_build_id()" in sql
+
+    def test_build_scoped_functions_use_the_helper(self) -> None:
+        """The erasure log spans builds and carries no build_id, so it is exempt."""
+        for fn in _DISCOVERY_FUNCTIONS:
+            if fn in ("get_erasures",):
+                continue
+            assert "tarkin_latest_build_id()" in _function_body(fn)
+
+
+class TestDiscoveryVisibilityRules:
+
+    def test_table_scoped_functions_enforce_select_and_clearance(self) -> None:
+        for fn in ("get_tables", "get_columns", "get_retention",
+                   "get_erasure_counts", "get_rls_policies"):
+            body = _function_body(fn)
+            assert "rt.role_name = current_user" in body
+            assert "rt.select    = true" in body
+            assert "clearance" in body
+
+    def test_get_columns_gates_sensitive_columns(self) -> None:
+        body = _function_body("get_columns")
+        assert "r.can_access_sensitive = true" in body
+
+    def test_get_roles_is_admin_or_self(self) -> None:
+        body = _function_body("get_roles")
+        assert "self.can_admin = true" in body
+        assert "OR r.name = current_user" in body
+
+    def test_get_erasures_requires_can_admin(self) -> None:
+        body = _function_body("get_erasures")
+        assert "self.can_admin = true" in body
+
+    def test_get_erasure_counts_does_not_require_can_admin(self) -> None:
+        """Counts carry no identifiers, so they follow the get_tables rule instead."""
+        assert "can_admin" not in _function_body("get_erasure_counts")
+
+
+class TestDiscoveryDisclosureLimits:
+
+    def test_get_build_withholds_the_governance_yaml(self) -> None:
+        body = _function_body("get_build")
+        assert "yaml" not in body
+        assert "b.profile" not in body
+        assert "'checksum'" in body
+
+    def test_get_build_requires_the_caller_to_be_in_the_build(self) -> None:
+        body = _function_body("get_build")
+        assert "self.name     = current_user" in body
+
+    def test_get_erasures_withholds_erased_values(self) -> None:
+        body = _function_body("get_erasures")
+        assert "column_values" not in body
+        assert "e.column_names" in body
+
+    def test_get_erasure_counts_withholds_identifiers_and_actors(self) -> None:
+        body = _function_body("get_erasure_counts")
+        for leak in ("column_values", "column_names", "erased_by"):
+            assert leak not in body
+
+
+class TestDiscoveryRlsPolicies:
+
+    def test_reads_live_policies_from_the_catalog(self) -> None:
+        """Policies are emitted by _generate_rls but never persisted to __META__."""
+        body = _function_body("get_rls_policies")
+        assert "FROM pg_policies p" in body
+
+    def test_maps_shadow_schema_back_to_public_name(self) -> None:
+        body = _function_body("get_rls_policies")
+        assert "s.shadow_name = p.schemaname" in body
+        assert "'schema',     s.name" in body
+
+    def test_exposes_both_policy_expressions(self) -> None:
+        body = _function_body("get_rls_policies")
+        assert "'using_expr', p.qual" in body
+        assert "'check_expr', p.with_check" in body
+
+
+# ---------------------------------------------------------------------------
+# __META__ privileges
+# ---------------------------------------------------------------------------
+
+class TestMetaSchemaPrivileges:
+
+    def test_meta_tables_are_revoked_from_public(self) -> None:
+        sql = _generate_meta_schema()
+        assert "REVOKE ALL ON SCHEMA __META__ FROM PUBLIC;" in sql
+        assert "REVOKE ALL ON ALL TABLES IN SCHEMA __META__ FROM PUBLIC;" in sql
+
+    def test_usage_is_granted_so_the_functions_are_reachable(self) -> None:
+        """GRANT EXECUTE is unusable without schema USAGE — the name cannot resolve."""
+        sql = _generate_meta_schema()
+        assert "GRANT USAGE ON SCHEMA __META__ TO PUBLIC;" in sql
+
+    def test_usage_grant_follows_the_revokes(self) -> None:
+        sql = _generate_meta_schema()
+        assert sql.index("REVOKE ALL ON SCHEMA __META__ FROM PUBLIC;") < \
+               sql.index("GRANT USAGE ON SCHEMA __META__ TO PUBLIC;")
+
+    def test_meta_schema_is_commented(self) -> None:
+        sql = _generate_meta_schema()
+        assert "COMMENT ON SCHEMA __META__ IS" in sql
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert fn in sql
+
+
+class TestDiscoveryFunctionPrivileges:
+
+    def test_execute_is_revoked_from_public_before_being_granted(self) -> None:
+        """USAGE on __META__ would otherwise expose the erase functions by name."""
+        sql = _generate_discovery_functions()
+        assert sql.index("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA __META__ FROM PUBLIC;") < \
+               sql.index("GRANT EXECUTE ON FUNCTION")
+
+    def test_latest_build_id_helper_is_not_granted(self) -> None:
+        """Callers reach it through the definer-owned functions, never directly."""
+        sql = _generate_discovery_functions()
+        assert "REVOKE ALL ON FUNCTION __META__.tarkin_latest_build_id() FROM PUBLIC;" in sql
+        assert "GRANT EXECUTE ON FUNCTION __META__.tarkin_latest_build_id()" not in sql
+
+    def test_every_granted_function_is_commented(self) -> None:
+        import re
+        sql      = _generate_discovery_functions()
+        granted  = set(re.findall(r"GRANT EXECUTE ON FUNCTION (__META__\.\w+)\(", sql))
+        commented = set(re.findall(r"COMMENT ON FUNCTION (__META__\.\w+)\(", sql))
+        assert granted == commented
+
+    def test_comments_describe_the_governance_semantics(self) -> None:
+        sql = _generate_discovery_functions()
+        assert "can_access_sensitive" in sql
+        assert "masked" in sql
+        assert "partial result is expected" in sql
+
+
+# ---------------------------------------------------------------------------
+# COMMENT ON generation
+# ---------------------------------------------------------------------------
+
+def _described_project() -> GovernanceProject:
+    col = ColumnConfig(name="id", type="bigint", nullable=False, description="Primary key")
+    eml = ColumnConfig(name="email", type="text", description="Contact address")
+    tbl = TableConfig(
+        name        = "users",
+        description = "Registered accounts",
+        columns     = [col, eml],
+        indexes     = [_make_pk_index()],
+    )
+    schema = SchemaConfig(name="app", description="Application schema", tables=[tbl])
+    return _make_project(schemas=[schema])
+
+
+class TestGenerateComments:
+
+    def test_schema_description_is_emitted(self) -> None:
+        sql = _generate_comments(_described_project())
+        assert """COMMENT ON SCHEMA "app" IS 'Application schema';""" in sql
+
+    def test_table_description_lands_on_the_view(self) -> None:
+        """Comments go on the Tarkin-created view, never the shadow table."""
+        sql = _generate_comments(_described_project())
+        assert """COMMENT ON VIEW "app"."users" IS 'Registered accounts';""" in sql
+        assert "tk_app" not in sql
+
+    def test_column_descriptions_are_emitted(self) -> None:
+        sql = _generate_comments(_described_project())
+        assert """COMMENT ON COLUMN "app"."users"."id" IS 'Primary key';""" in sql
+        assert """COMMENT ON COLUMN "app"."users"."email" IS 'Contact address';""" in sql
+
+    def test_single_quotes_are_escaped(self) -> None:
+        tbl = TableConfig(
+            name        = "users",
+            description = "User's accounts",
+            columns     = [_make_pk_column()],
+            indexes     = [_make_pk_index()],
+        )
+        proj = _make_project(schemas=[SchemaConfig(name="app", tables=[tbl])])
+        assert "User''s accounts" in _generate_comments(proj)
+
+    def test_missing_descriptions_are_skipped_by_default(self) -> None:
+        proj = _make_project(schemas=[SchemaConfig(name="app", tables=[_make_table_with_pk()])])
+        assert "IS NULL" not in _generate_comments(proj)
+
+    def test_missing_descriptions_are_cleared_when_requested(self) -> None:
+        """Migration replays comments, so a removed description must converge."""
+        proj = _make_project(schemas=[SchemaConfig(name="app", tables=[_make_table_with_pk()])])
+        sql  = _generate_comments(proj, clear_missing=True)
+        assert """COMMENT ON VIEW "app"."users" IS NULL;""" in sql
+        assert """COMMENT ON COLUMN "app"."users"."id" IS NULL;""" in sql
+
+    def test_versioned_table_current_view_is_commented(self) -> None:
+        versioned = ColumnConfig(name="value", type="text", versioned=True, description="Payload")
+        table  = _make_table_with_pk("events", extra_cols=[versioned])
+        table  = table.model_copy(update={"description": "Event log"})
+        proj   = _make_project(schemas=[SchemaConfig(name="app", tables=[table])])
+        sql    = _generate_comments(proj)
+        assert """COMMENT ON VIEW "app"."events" IS 'Event log';""" in sql
+        assert """COMMENT ON VIEW "app"."events_current" IS 'Event log';""" in sql
+        assert """COMMENT ON COLUMN "app"."events_current"."value" IS 'Payload';""" in sql
+
+    def test_project_without_descriptions_emits_a_placeholder(self) -> None:
+        proj = _make_project(schemas=[SchemaConfig(name="app", tables=[_make_table_with_pk()])])
+        assert _generate_comments(proj).startswith("-- No descriptions")
+
+
+# ---------------------------------------------------------------------------
+# __META__.tarkin_governance
+# ---------------------------------------------------------------------------
+
+class TestGovernanceView:
+
+    def test_view_is_created_and_granted(self) -> None:
+        sql = _generate_governance_view()
+        assert "CREATE OR REPLACE VIEW __META__.tarkin_governance AS" in sql
+        assert "GRANT SELECT ON __META__.tarkin_governance TO PUBLIC;" in sql
+
+    def test_view_is_dropped_before_replacement(self) -> None:
+        """Replacing a view cannot change its column list, so a future column
+        addition would fail against an existing install."""
+        sql = _generate_governance_view()
+        assert sql.index("DROP VIEW IF EXISTS __META__.tarkin_governance;") < \
+               sql.index("CREATE OR REPLACE VIEW __META__.tarkin_governance")
+
+    def test_view_reads_the_discovery_functions_unfiltered(self) -> None:
+        """No schema argument, so the view spans everything the caller can see."""
+        sql = _generate_governance_view()
+        for fn in ("get_build", "get_columns", "get_tables",
+                   "get_retention", "get_rls_policies"):
+            assert f"__META__.{fn}()" in sql
+
+    def test_every_json_source_is_guarded(self) -> None:
+        """Discovery functions return a message object, not an array, when the
+        role can see nothing; json_to_recordset rejects a non-array."""
+        sql = _generate_governance_view()
+        assert sql.count("json_typeof") == sql.count("json_to_recordset")
+
+    def test_view_exposes_the_governance_attributes(self) -> None:
+        sql = _generate_governance_view()
+        for col in ("build_id", "schema_name", "table_name", "column_name",
+                    "data_type", "sensitive", "masking_strategy",
+                    "column_clearance", "table_clearance", "audit_enabled",
+                    "retention_days", "erase_strategy", "rls_policy_count",
+                    "rls_predicates"):
+            assert f"AS {col}" in sql, f"{col} missing from the view"
+
+    def test_rls_is_aggregated_not_joined_per_policy(self) -> None:
+        """A table with three policies must not produce three rows per column."""
+        sql = _generate_governance_view()
+        assert "count(*)" in sql
+        assert "string_agg(" in sql
+        assert "GROUP BY" in sql
+
+    def test_table_attributes_are_left_joined(self) -> None:
+        """A column whose table row is not visible must still appear."""
+        sql = _generate_governance_view()
+        assert sql.count("LEFT JOIN") == 3
+
+    def test_view_needs_no_security_invoker(self) -> None:
+        """Filtering is on session_user, immune to both view-owner and definer context."""
+        sql = _generate_governance_view()
+        assert "security_invoker" not in sql
+
+    def test_view_is_commented(self) -> None:
+        sql = _generate_governance_view()
+        assert "COMMENT ON VIEW __META__.tarkin_governance IS" in sql
+        assert "masking_strategy" in sql
+        assert "rls_policy_count" in sql
+
+    def test_view_ships_with_the_discovery_functions(self) -> None:
+        """Folding it into that block gives build, migrate, and update coverage
+        without separate wiring."""
+        assert "CREATE OR REPLACE VIEW __META__.tarkin_governance" in _generate_discovery_functions()

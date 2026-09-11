@@ -396,6 +396,43 @@ class TestGenerateMigrationSql:
         sql = _generate_migration_sql(before, after, changes, prof, '', '')
         assert "TARKIN MIGRATION" in sql
 
+    def test_migration_sql_emits_comments(self) -> None:
+        """COMMENT ON is a set operation, so migrate replays every description."""
+        before, after = self._build_before_after()
+        changes = diff(before, after)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
+        assert "COMMENTS" in sql
+
+    def test_migration_comments_clear_removed_descriptions(self) -> None:
+        """Without IS NULL a description deleted from the YAML would persist in the database."""
+        before, after = self._build_before_after()
+        changes = diff(before, after)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
+        assert "COMMENT ON" in sql
+        assert "IS NULL;" in sql
+
+    def test_migration_sql_emits_discovery_functions(self) -> None:
+        """Without this, a migrated database keeps whatever functions its build installed."""
+        before, after = self._build_before_after()
+        changes = diff(before, after)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
+        assert "DISCOVERY FUNCTIONS" in sql
+        for fn in ("get_schemas", "get_build", "get_retention",
+                   "get_erasures", "get_erasure_counts", "get_rls_policies"):
+            assert f"CREATE OR REPLACE FUNCTION __META__.{fn}(" in sql
+        assert "CREATE OR REPLACE VIEW __META__.tarkin_governance" in sql
+
+    def test_migration_discovery_functions_are_idempotent(self) -> None:
+        """Re-emitting on every migration is safe only because they are CREATE OR REPLACE."""
+        before, after = self._build_before_after()
+        changes = diff(before, after)
+        prof = _fake_profile()
+        sql = _generate_migration_sql(before, after, changes, prof, '', '')
+        assert "CREATE FUNCTION __META__." not in sql
+
     def test_migration_sql_updates_meta(self) -> None:
         before, after = self._build_before_after()
         changes = diff(before, after)
@@ -448,6 +485,87 @@ class TestMigrateFunction:
             mock_read.return_value = (proj, checksum, "testdb")
             with pytest.raises(MigrateError, match="No differences"):
                 migrate(proj, prof, output=tmp_path)
+
+    def test_force_produces_an_artifact_with_no_changes(self, tmp_path: Path) -> None:
+        """Comments and discovery functions are regenerated, not diffed, so an
+        unchanged model can still be behind the installed version's codegen."""
+        proj     = _simple_project()
+        checksum = project_checksum(proj)
+        prof     = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            zip_path = migrate(proj, prof, output=tmp_path, force=True)
+
+        assert zip_path.exists()
+
+    def test_forced_artifact_carries_the_regenerated_sections(self, tmp_path: Path) -> None:
+        proj     = _simple_project()
+        checksum = project_checksum(proj)
+        prof     = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            zip_path = migrate(proj, prof, output=tmp_path, force=True)
+
+        with zipfile.ZipFile(zip_path) as zf:
+            sql = zf.read("tarkin_build.sql").decode()
+
+        assert "COMMENTS" in sql
+        assert "DISCOVERY FUNCTIONS" in sql
+        assert "tarkin_builds" in sql
+        assert "BEGIN;" in sql and "COMMIT;" in sql
+
+    def test_forced_artifact_records_a_zero_changeset(self, tmp_path: Path) -> None:
+        proj     = _simple_project()
+        checksum = project_checksum(proj)
+        prof     = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            zip_path = migrate(proj, prof, output=tmp_path, force=True)
+
+        with zipfile.ZipFile(zip_path) as zf:
+            metadata = json.loads(zf.read("tarkin_build.json").decode())
+
+        assert metadata["change_count"] == 0
+        assert metadata["changes"] == []
+        assert metadata["source_checksum"] == metadata["target_checksum"]
+
+    def test_without_force_an_empty_changeset_still_raises(self, tmp_path: Path) -> None:
+        proj     = _simple_project()
+        checksum = project_checksum(proj)
+        prof     = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            with pytest.raises(MigrateError, match="--force"):
+                migrate(proj, prof, output=tmp_path, force=False)
+
+    def test_forced_artifact_passes_migration_validation(self, tmp_path: Path) -> None:
+        """source_checksum is read from __META__, not recomputed, so it matches the
+        live build even when the model is unchanged."""
+        proj     = _simple_project()
+        checksum = project_checksum(proj)
+        prof     = _fake_profile()
+
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (proj, checksum, "testdb")
+            zip_path = migrate(proj, prof, output=tmp_path, force=True)
+
+        metadata, _ = _read_artifact(zip_path)
+
+        mock_row = MagicMock()
+        mock_row.__getitem__ = lambda self, i: [checksum, "testdb"][i]
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = mock_row
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__  = MagicMock(return_value=False)
+
+        with patch("tarkin.credentials.ConnectionProfile.engine", return_value=mock_engine):
+            # tk_schemas non-empty: a migration requires an attached build.
+            _validate_for_migration(prof, metadata, tk_schemas=["tk_public"])
 
     def test_migrate_produces_artifact(self, tmp_path: Path) -> None:
         before   = _simple_project()

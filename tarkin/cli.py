@@ -29,6 +29,11 @@ from .detach import (
     detach,
     DetachError,
 )
+from .discover import (
+    discover,
+    DiscoverError,
+    OBJECTS,
+)
 from .diff import (
     diff,
     render_diff,
@@ -457,6 +462,10 @@ def migrate_data_model(
     reauth:           bool           = _reauth_option,
     config:           Path           = typer.Argument(..., help="Path to the target governance YAML."),
     output_directory: Optional[Path] = _output_directory_option,
+    force:            bool           = typer.Option(
+        False, "--force", "-f",
+        help="Generate an artifact even when the model has not changed.",
+    ),
 ) -> None:
     """
     Generate a migration artifact from the current live build to a new governance YAML.
@@ -464,6 +473,12 @@ def migrate_data_model(
     Reads the current build's stored YAML from __META__, diffs it against the
     target YAML, generates the SQL needed to apply the differences, and writes
     a tarkin_migrate_<timestamp>.zip artifact to 'out/' (or --output).
+
+    Parts of a migration are regenerated rather than diffed: the __META__
+    update, the discovery functions, and the object comments carrying the
+    YAML descriptions. Use --force after upgrading Tarkin to bring a database
+    up to the installed version's codegen when its governance model is
+    unchanged.
     """
     proj = _load_and_validate(config)
     if not proj:
@@ -488,7 +503,7 @@ def migrate_data_model(
         return
 
     try:
-        zip_path = migrate(proj, prof, output=output_directory)
+        zip_path = migrate(proj, prof, output=output_directory, force=force)
         print(f"Migration artifact: {zip_path}")
         print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
     except MigrateError as exc:
@@ -621,8 +636,10 @@ def update_meta_schema(
     """
     Apply idempotent schema patches to an attached database's __META__ tables.
 
-    Safe to run against databases on any prior Tarkin version, as patches use
-    ADD COLUMN IF NOT EXISTS and will no-op if already applied.
+    Every patch is idempotent by contract, so this converges a database to the
+    schema the installed Tarkin version expects regardless of the version it
+    was attached under. Patches always run, and the command reports what it
+    applied rather than what changed.
     """
     creds = _load_credentials(credentials)
     if not creds:
@@ -639,14 +656,79 @@ def update_meta_schema(
 
     try:
         applied = update(prof)
-        if applied:
-            for desc in applied:
-                print(f"\t{desc}")
-            print(f"Update complete: {len(applied)} patch(es) applied.")
-        else:
-            print("Already up to date.")
+        for desc in applied:
+            print(f"\t{desc}")
+        print(f"Update complete: {len(applied)} patch(es) applied.")
     except UpdateError as exc:
         _die(str(exc))
+
+
+@app.command(name="discover")
+def discover_metadata(
+    profile:          str            = _profile_option,
+    credentials:      Optional[Path] = _credentials_option,
+    reauth:           bool           = _reauth_option,
+    output_directory: Optional[Path] = _output_directory_option,
+    objects:          list[str]      = typer.Option(
+        [], "--object", "-obj",
+        help=f"Object to discover. Repeat for multiple. Omit for all. Values: {', '.join(OBJECTS)}.",
+    ),
+    schema:           Optional[str]  = typer.Option(
+        None, "--schema", "-s",
+        help="Restrict to a single schema. Applies to tables, columns, retention, rls.",
+    ),
+    table:            Optional[str]  = typer.Option(
+        None, "--table", "-t",
+        help="Restrict to a single table. Applies to columns, retention, rls.",
+    ),
+    since:            Optional[str]  = typer.Option(
+        None, "--since",
+        help="Lower-bound timestamp for erasures and erasure_counts, written as YYYY-MM-DD (e.g. 2026-01-01).",
+    ),
+) -> None:
+    """
+    Read governed metadata from __META__ via the discovery functions.
+
+    Returns only what the connected role is cleared to see. Filtering happens
+    inside the SECURITY DEFINER functions against current_user, not in Tarkin,
+    so the same results come back regardless of which client calls them — which
+    is how third-party tooling, including AI agents, reads the governance model.
+
+    Results are printed as JSON. Pass --output to also write them to a
+    timestamped file in that directory.
+
+    Omit --object to return everything visible to the role.
+    """
+    creds = _load_credentials(credentials)
+    if not creds:
+        return
+
+    prof = _resolve_profile(creds, profile)
+    if not prof:
+        return
+
+    result = check_connection(prof, reauth=reauth)
+    if not result.success:
+        _die(f"Connection failed: {result.error}")
+        return
+
+    try:
+        payload, written = discover(
+            profile          = prof,
+            objects          = list(objects) if objects else list(OBJECTS),
+            schema           = schema,
+            table            = table,
+            since            = since,
+            output_directory = output_directory,
+        )
+    except DiscoverError as exc:
+        _die(str(exc))
+        return
+
+    print(json.dumps(payload, indent=2, default=str))
+
+    if written:
+        print(f"\nWritten to {written}")
 
 
 @app.command(name="query")

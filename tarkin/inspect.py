@@ -109,6 +109,7 @@ def _build_schema(conn: Connection, engine: Engine, schema_name: str) -> SchemaC
 
     return SchemaConfig(
         name               = schema_name,
+        description        = _get_schema_description(conn, schema_name),
         tables             = tables,
         views              = views,
         materialized_views = mat_views,
@@ -144,6 +145,7 @@ def _build_table(conn: Connection, inspector: Inspector, schema_name: str, table
 
     return TableConfig(
         name         = table_name,
+        description  = _get_table_description(conn, schema_name, table_name),
         columns      = columns,
         indexes      = indexes,
         foreign_keys = foreign_keys,
@@ -170,23 +172,59 @@ def _build_columns(conn: Connection, inspector: Inspector, schema_name: str, tab
         nullable = sa_col.get("nullable", True)
         unique   = bool(pg_extra.get("is_unique", False))
 
+        description = pg_extra.get("description")
+
         cols.append(ColumnConfig(
-            name     = name,
-            type     = col_type,
-            nullable = nullable,
-            unique   = unique,
-            default  = default,
+            name        = name,
+            type        = col_type,
+            nullable    = nullable,
+            unique      = unique,
+            default     = default,
+            description = str(description) if description else None,
         ))
 
     return cols
 
 
+def _get_schema_description(conn: Connection, schema_name: str) -> str | None:
+    """Return the COMMENT ON SCHEMA text, or None if the schema has no comment."""
+    row = conn.execute(text("""
+        SELECT obj_description(n.oid, 'pg_namespace')
+        FROM pg_namespace n
+        WHERE n.nspname = :schema
+    """), {"schema": schema_name}).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _get_table_description(conn: Connection, schema_name: str, table_name: str) -> str | None:
+    """Return the COMMENT ON TABLE text, or None if the table has no comment."""
+    row = conn.execute(text("""
+        SELECT obj_description(c.oid, 'pg_class')
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = :schema
+          AND c.relname = :table
+    """), {"schema": schema_name, "table": table_name}).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
 def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) -> dict[str, dict[str, str | bool | None]]:
-    """Pull column-level details from information_schema."""
+    """Pull column-level details from information_schema, plus column comments."""
     rows = conn.execute(text("""
         SELECT
             c.column_name,
             c.column_default,
+            (
+                SELECT col_description(a.attrelid, a.attnum)
+                FROM pg_attribute a
+                JOIN pg_class cl    ON cl.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid  = cl.relnamespace
+                WHERE n.nspname  = c.table_schema
+                  AND cl.relname = c.table_name
+                  AND a.attname  = c.column_name
+                  AND a.attnum   > 0
+                  AND NOT a.attisdropped
+            ) AS description,
             COALESCE(
                 (
                     SELECT true
@@ -212,7 +250,8 @@ def _get_pg_column_details(conn: Connection, schema_name: str, table_name: str) 
     return {
         r[0]: {
             "column_default": str(r[1]) if r[1] is not None else None,
-            "is_unique":      bool(r[2]),
+            "description":    str(r[2]) if r[2] is not None else None,
+            "is_unique":      bool(r[3]),
         }
         for r in rows
     }

@@ -20,9 +20,26 @@ class QueryError(Exception):
 _SYSTEM_PROMPT = """\
 You are a PostgreSQL query generator. You will be given a JSON document
 describing the database schema that the calling role can access, including
-table and column descriptions, data types, clearance levels, and masking
-strategies. Using only that schema context, generate a single valid
-PostgreSQL SELECT query that answers the user's request.
+table and column descriptions, data types, clearance levels, masking
+strategies, retention configuration, row-level security policies, and the
+identity of the governance build in effect. Using only that schema context,
+generate a single valid PostgreSQL SELECT query that answers the user's
+request.
+
+The context document contains these keys:
+- build: the governance build the context was read from
+- schemas, tables, columns, roles: the objects the calling role can see
+- retention: per-table retention_days and erase_strategy, present only for
+  tables enrolled in retention management
+- erasures: per-table erasure activity as counts - a table appearing here has
+  had rows deleted, nullified, or obfuscated, so it may be missing records
+  that once existed
+- rls_policies: row-level security policies in effect, with using_expr and
+  check_expr
+
+Any key may instead hold an object with a 'message' field, which means the
+calling role has no visible objects of that kind. Treat that as an empty
+result, not an error.
 
 Rules:
 - Return ONLY the raw SQL query. No explanation, no markdown, no code fences.
@@ -30,11 +47,23 @@ Rules:
 - Do not reference tables, columns, or schemas not present in the schema context.
 - Respect masking strategies: if a column has a masking strategy other than
   'none', note that the value returned may be masked.
+- Where an rls_policies entry applies to a table you are querying, assume its
+  using_expr filters the rows the caller will receive, and do not treat a
+  partial result as a reason to broaden the query.
+- Where a retention or erasures entry applies, rows may already have been
+  erased or obfuscated, so do not assume historical completeness and do not
+  present a count as a complete population.
 """
 
 
 def _fetch_schema_context(conn) -> dict[str, Any]:
-    """Call all four discovery functions and return a combined dict."""
+    """Call the discovery functions and return a combined dict.
+
+    get_erasures is deliberately absent. It is admin-only and carries the
+    identifiers used to erase a subject; the 'erasures' key holds
+    get_erasure_counts instead, which gives the same signal that rows are
+    missing without the identifiers.
+    """
     def call(fn: str) -> Any:
         row = conn.execute(text(f"SELECT __META__.{fn}()")).fetchone()
         if row and row[0]:
@@ -42,10 +71,14 @@ def _fetch_schema_context(conn) -> dict[str, Any]:
         return []
 
     return {
-        "schemas": call("get_schemas"),
-        "tables":  call("get_tables"),
-        "columns": call("get_columns"),
-        "roles":   call("get_roles"),
+        "build":        call("get_build"),
+        "schemas":      call("get_schemas"),
+        "tables":       call("get_tables"),
+        "columns":      call("get_columns"),
+        "roles":        call("get_roles"),
+        "retention":    call("get_retention"),
+        "erasures":     call("get_erasure_counts"),
+        "rls_policies": call("get_rls_policies"),
     }
 
 

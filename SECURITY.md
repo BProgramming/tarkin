@@ -105,9 +105,53 @@ Sensitive columns that also have `masking_strategy: none` will emit a build-time
 
 When `audit_enabled: true` is set in the governance YAML, Tarkin configures pgaudit additively: existing audit settings are merged rather than overwritten. On attach, Tarkin captures the pre-existing `pgaudit.log`, `pgaudit.log_catalog`, and `pgaudit.log_relation` values and stores them in `__META__`. These are restored on detach.
 
+## Discovery function surface
+
+Tarkin creates a set of read-only functions in `__META__` (`get_schemas`, `get_tables`, `get_columns`, `get_roles`, `get_build`, `get_retention`, `get_erasures`, `get_erasure_counts`, `get_rls_policies`). They are `SECURITY DEFINER` with `EXECUTE` granted to `PUBLIC`, and they exist so that third-party tooling (including AI agents) can read the governance model without Tarkin brokering the connection.
+
+`EXECUTE ... TO PUBLIC` is deliberate and is not a widening of access. The functions run as the definer only so they can read `__META__`, which is revoked from `PUBLIC`, and each function filters its result set against `session_user` using the grants and clearance already recorded in `__META__.tarkin_roles`, `tarkin_role_schemas`, and `tarkin_role_tables`. A role sees the same objects through these functions that it can see through the governed view layer, and nothing more. The authorization boundary is the database role itself, rather than the client.
+
+### `__META__.tarkin_governance`
+
+A view over the discovery functions, with `SELECT` granted to `PUBLIC`. It adds no access: it reads the same functions, which filter on `session_user`, so a role sees exactly the rows it would get by calling them directly. It exists for reach, such that a client listing tables can find it without knowing the functions exist.
+
+Because filtering happens inside the definer-owned functions on `session_user`, the view needs no `security_invoker` and is correct regardless of which role owns it. It returns metadata only; no row from a governed table passes through it.
+
+### Caller identity
+
+The functions filter on `session_user`, not `current_user`. Inside a `SECURITY DEFINER` function `current_user` resolves to the function owner, so filtering on it would evaluate every caller's visibility as the owner's and return the full governance model to any role able to call it.
+
+`session_user` is the authenticated login role and is unaffected by the definer context. One consequence is worth knowing: `SET ROLE` does not change what the discovery functions return. Grants, the view layer, and RLS all respond to the active role, while the discovery functions report what the login role is cleared for. To inspect the model as a particular role, connect as that role.
+
+### Privileges on `__META__`
+
+Three statements define the surface:
+
+```sql
+REVOKE ALL ON ALL TABLES IN SCHEMA __META__ FROM PUBLIC;  -- tables stay unreadable
+GRANT USAGE ON SCHEMA __META__ TO PUBLIC;                 -- names can resolve
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA __META__ FROM PUBLIC;
+```
+
+`USAGE` grants name resolution only, so the table-level `REVOKE` continues to keep `__META__` unreadable. It is required because PostgreSQL checks schema `USAGE` before object privileges: without it, `GRANT EXECUTE` on a discovery function is unusable, because the caller cannot resolve the function name in the first place.
+
+The function-level `REVOKE` matters because PostgreSQL grants `EXECUTE` to `PUBLIC` on every new function by default. Once `USAGE` is granted, that default would expose `tarkin_erase_check`, `tarkin_erase_apply`, and `tarkin_erase_expired_records` by name - although those three are scoped to `SECURITY INVOKER`, so a low-privilege caller would still be refused by the shadow-schema revocation. `EXECUTE` is revoked from every `__META__` function and then granted back on the nine discovery functions alone. `tarkin_latest_build_id` is not granted: callers reach it only through the definer-owned functions that call it internally.
+
+Each function is `STABLE`, so none can write. `tarkin discover` additionally wraps its calls in `SET TRANSACTION READ ONLY` with an unconditional `ROLLBACK`, matching the guard used by `tarkin query`.
+
+### What the functions deliberately withhold
+
+- **`get_build` never returns the governance YAML.** `__META__.tarkin_builds` stores the full YAML, which contains clearance levels, role definitions, masking strategies, and the complete schema topology (i.e. the one column whose exposure would undermine the clearance model). `get_build` returns only `build_id`, `built_at`, `tarkin_version`, `database_name`, and `checksum`, and returns nothing at all to a role absent from the build. The profile name is also withheld.
+- **`get_erasures` never returns `column_values`.** The erasure log records the identifier values passed to `tarkin_erase_apply`. The function is restricted to `can_admin` roles, though even for those roles the values are not returned.
+- **`get_erasure_counts` returns no identifiers, values, or actor names.** It exists so a non-admin role can learn that rows were removed from a table it can already read, without learning which specific records. Aggregate counts remain a disclosure channel on very small populations (e.g. on a table holding one subject, where a single operation identifies that subject) which is why it aggregates rather than lists, and why its visibility follows the `get_tables` rule rather than being open.
+- **`get_retention` does not count rows past expiry.** Producing that count would mean reading shadow tables as the definer, which bypasses any RLS policy constraining the caller's own view of those rows; the resulting integer would aggregate across tenants the caller cannot see. The function reports declared configuration only.
+
+`tarkin query` sends `get_erasure_counts` to the configured AI provider, never `get_erasures`. The identifiers used to erase a subject do not leave `__META__`.
+
 ## Known limitations
 
-- The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions.
+- The `__META__` schema is protected from PUBLIC access but is readable by the database owner. It contains the full governance YAML, including masking strategies and role definitions. The discovery functions do not expose it (see *Discovery function surface* above), but a role with direct read access to `__META__.tarkin_builds` can retrieve it.
+- `get_erasure_counts` joins to the latest build's grants, so erasures against a table since removed from the governance model are not reported. Treat the counts as a signal, not a complete audit history; `__META__.tarkin_erasures` remains the record of last resort.
 - The shadow-schema boundary depends on the governance YAML enumerating every role with access to the governed schemas (see *Shadow Schema Model* above).
 
 ## Out of scope

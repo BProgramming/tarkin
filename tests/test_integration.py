@@ -620,3 +620,522 @@ class TestOverloadedFunctionMeta:
             except DetachError:
                 pass
             engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Discovery functions — the surface third-party tooling reads
+# ---------------------------------------------------------------------------
+
+DISCOVERY_FUNCTIONS = (
+    "get_build", "get_schemas", "get_tables", "get_columns", "get_roles",
+    "get_retention", "get_erasures", "get_erasure_counts", "get_rls_policies",
+)
+
+_ANALYST_ROLE = "tarkin_it_analyst"
+_ANALYST_PASS = "tarkin_it_analyst_pw"
+
+
+def _owner_engine():
+    prof = _integration_profile()
+    assert prof is not None
+    return prof.engine()
+
+
+def _analyst_profile():
+    """A ConnectionProfile that logs in as the non-owner analyst role."""
+    from tarkin.credentials import ConnectionProfile
+    base = _integration_profile()
+    assert base is not None
+    return ConnectionProfile(
+        profile  = "test_analyst",
+        host     = base.host,
+        port     = base.port,
+        database = base.database,
+        username = _ANALYST_ROLE,
+        password = SecretStr(_ANALYST_PASS),
+        sslmode  = "prefer",
+    )
+
+
+@pytest.fixture
+def analyst_role():
+    """Create a non-owner LOGIN role with SELECT on the fixture table.
+
+    The discovery functions exist to be called by roles that are not the
+    database owner. Testing them as the owner proves nothing: the owner can
+    read __META__ directly.
+    """
+    engine = _owner_engine()
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP ROLE IF EXISTS {_ANALYST_ROLE}"))
+        conn.execute(text(
+            f"CREATE ROLE {_ANALYST_ROLE} LOGIN PASSWORD '{_ANALYST_PASS}'"
+        ))
+        conn.execute(text(f"GRANT USAGE ON SCHEMA public TO {_ANALYST_ROLE}"))
+        conn.execute(text(f"GRANT SELECT ON public.test_table TO {_ANALYST_ROLE}"))
+    engine.dispose()
+
+    yield _ANALYST_ROLE
+
+    engine = _owner_engine()
+    with engine.begin() as conn:
+        conn.execute(text(f"REVOKE ALL ON public.test_table FROM {_ANALYST_ROLE}"))
+        conn.execute(text(f"REVOKE ALL ON SCHEMA public FROM {_ANALYST_ROLE}"))
+        conn.execute(text(f"DROP ROLE IF EXISTS {_ANALYST_ROLE}"))
+    engine.dispose()
+
+
+@pytest.fixture
+def attached_with_analyst(analyst_role, tmp_path: Path):
+    """Attach the live database with the analyst role present in the model."""
+    prof = _integration_profile()
+    assert prof is not None
+
+    proj = inspect(prof)
+    proj.database.profile = prof.profile
+
+    try:
+        zip_path = build(proj, prof, output_directory=tmp_path)
+        attach(prof, build_path=zip_path)
+    except (BuildError, AttachError) as exc:
+        pytest.skip(f"Could not attach for discovery test: {exc}")
+
+    try:
+        yield prof
+    finally:
+        try:
+            detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+        except DetachError:
+            pass
+
+
+class TestDiscoveryFunctionsAsNonOwner:
+
+    @requires_db
+    def test_analyst_can_call_every_discovery_function(self, attached_with_analyst) -> None:
+        """Regression: __META__ had no GRANT USAGE, so name resolution failed for
+        every role but the owner and GRANT EXECUTE was unusable."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                for fn in DISCOVERY_FUNCTIONS:
+                    row = conn.execute(text(f"SELECT __META__.{fn}()")).fetchone()
+                    assert row is not None, f"{fn} returned no row"
+                    assert row[0] is not None, f"{fn} returned NULL"
+        finally:
+            engine.dispose()
+
+    @requires_db
+    def test_analyst_cannot_read_meta_tables_directly(self, attached_with_analyst) -> None:
+        """USAGE grants name resolution only; the tables stay revoked."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                with pytest.raises(Exception) as exc:
+                    conn.execute(text("SELECT * FROM __META__.tarkin_builds"))
+                assert "permission denied" in str(exc.value).casefold()
+        finally:
+            engine.dispose()
+
+    @requires_db
+    def test_analyst_cannot_execute_the_erase_functions(self, attached_with_analyst) -> None:
+        """EXECUTE is revoked from PUBLIC on every __META__ function, then granted
+        back on the discovery surface alone."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                with pytest.raises(Exception) as exc:
+                    conn.execute(text(
+                        "SELECT * FROM __META__.tarkin_erase_check("
+                        "ARRAY['id']::text[], ARRAY['1']::text[])"
+                    ))
+                assert "permission denied" in str(exc.value).casefold()
+        finally:
+            engine.dispose()
+
+    @requires_db
+    def test_analyst_sees_only_its_own_role_record(self, attached_with_analyst) -> None:
+        """Regression: filtering used current_user, which inside a SECURITY DEFINER
+        function resolves to the function owner rather than the caller."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                roles = conn.execute(text("SELECT __META__.get_roles()")).fetchone()[0]
+        finally:
+            engine.dispose()
+
+        assert isinstance(roles, list), f"expected a role list, got {roles!r}"
+        names = {r["name"] for r in roles}
+        assert names == {_ANALYST_ROLE}, (
+            f"non-admin role saw {names}; filtering is evaluating as the owner"
+        )
+
+    @requires_db
+    def test_owner_sees_more_roles_than_the_analyst(self, attached_with_analyst) -> None:
+        """The two callers must get different answers, or nothing is being filtered."""
+        owner_engine = _owner_engine()
+        try:
+            with owner_engine.connect() as conn:
+                owner_roles = conn.execute(text("SELECT __META__.get_roles()")).fetchone()[0]
+        finally:
+            owner_engine.dispose()
+
+        analyst_engine = _analyst_profile().engine()
+        try:
+            with analyst_engine.connect() as conn:
+                analyst_roles = conn.execute(text("SELECT __META__.get_roles()")).fetchone()[0]
+        finally:
+            analyst_engine.dispose()
+
+        if not isinstance(owner_roles, list):
+            pytest.skip("owner is not present in the governance model")
+        assert isinstance(analyst_roles, list)
+        assert len(owner_roles) > len(analyst_roles)
+
+    @requires_db
+    def test_erasure_log_is_admin_only(self, attached_with_analyst) -> None:
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text("SELECT __META__.get_erasures()")).fetchone()[0]
+        finally:
+            engine.dispose()
+
+        # A non-admin gets the not-found message object, never a list of entries.
+        assert isinstance(result, dict), f"non-admin received {result!r}"
+        assert "message" in result
+
+    @requires_db
+    def test_columns_are_scoped_to_granted_tables(self, attached_with_analyst) -> None:
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                cols = conn.execute(text("SELECT __META__.get_columns()")).fetchone()[0]
+        finally:
+            engine.dispose()
+
+        if isinstance(cols, dict):
+            pytest.skip("analyst has no visible columns in this fixture")
+        tables = {(c["schema"], c["table"]) for c in cols}
+        assert tables <= {("public", "test_table")}, f"analyst saw {tables}"
+
+    @requires_db
+    def test_analyst_can_read_the_governance_view(self, attached_with_analyst) -> None:
+        """The view is the reach mechanism: a client enumerating tables finds the
+        governance model without knowing the discovery functions exist."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT schema_name, table_name, column_name, masking_strategy, "
+                    "sensitive, rls_policy_count FROM __META__.tarkin_governance"
+                )).fetchall()
+        finally:
+            engine.dispose()
+
+        tables = {(r[0], r[1]) for r in rows}
+        assert tables <= {("public", "test_table")}, f"analyst saw {tables}"
+
+    @requires_db
+    def test_governance_view_survives_a_role_with_no_visible_columns(
+        self, attached_with_analyst
+    ) -> None:
+        """Discovery functions return a message object rather than an array when
+        nothing is visible; json_to_recordset would reject it unguarded."""
+        engine = _owner_engine()
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"REVOKE ALL ON public.test_table FROM {_ANALYST_ROLE}"))
+        finally:
+            engine.dispose()
+
+        analyst = _analyst_profile().engine()
+        try:
+            with analyst.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT count(*) FROM __META__.tarkin_governance"
+                )).fetchone()
+            assert rows[0] == 0
+        finally:
+            analyst.dispose()
+            engine = _owner_engine()
+            with engine.begin() as conn:
+                conn.execute(text(f"GRANT SELECT ON public.test_table TO {_ANALYST_ROLE}"))
+            engine.dispose()
+
+    @requires_db
+    def test_governance_view_and_discovery_functions_agree(self, attached_with_analyst) -> None:
+        """The view is a flattening of the functions, not a second source of truth."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                view_rows = conn.execute(text(
+                    "SELECT schema_name, table_name, column_name "
+                    "FROM __META__.tarkin_governance"
+                )).fetchall()
+                fn_cols = conn.execute(text("SELECT __META__.get_columns()")).fetchone()[0]
+        finally:
+            engine.dispose()
+
+        if isinstance(fn_cols, dict):
+            assert view_rows == []
+        else:
+            assert {(r[0], r[1], r[2]) for r in view_rows} == \
+                   {(c["schema"], c["table"], c["name"]) for c in fn_cols}
+
+    @requires_db
+    def test_build_identity_is_readable_without_the_yaml(self, attached_with_analyst) -> None:
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                build_row = conn.execute(text("SELECT __META__.get_build()")).fetchone()[0]
+        finally:
+            engine.dispose()
+
+        assert isinstance(build_row, dict)
+        if "message" in build_row:
+            pytest.skip("analyst is not present in the governance model")
+        assert "checksum" in build_row
+        assert "yaml" not in build_row
+        assert "profile" not in build_row
+
+
+# ---------------------------------------------------------------------------
+# Object comments
+# ---------------------------------------------------------------------------
+
+class TestCommentRoundtrip:
+
+    @requires_db
+    def test_inspect_reads_existing_comments_into_the_yaml(self) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = _owner_engine()
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("COMMENT ON TABLE public.test_table IS 'Fixture table'"))
+                conn.execute(text("COMMENT ON COLUMN public.test_table.name IS 'Display name'"))
+        finally:
+            engine.dispose()
+
+        try:
+            proj   = inspect(prof)
+            schema = next(s for s in proj.schemas if s.name == "public")
+            table  = next(t for t in schema.tables if t.name == "test_table")
+            column = next(c for c in table.columns if c.name == "name")
+
+            assert table.description  == "Fixture table"
+            assert column.description == "Display name"
+        finally:
+            engine = _owner_engine()
+            with engine.begin() as conn:
+                conn.execute(text("COMMENT ON TABLE public.test_table IS NULL"))
+                conn.execute(text("COMMENT ON COLUMN public.test_table.name IS NULL"))
+            engine.dispose()
+
+    @requires_db
+    def test_undocumented_objects_have_no_description(self) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = _owner_engine()
+        with engine.begin() as conn:
+            conn.execute(text("COMMENT ON TABLE public.test_table IS NULL"))
+        engine.dispose()
+
+        proj   = inspect(prof)
+        schema = next(s for s in proj.schemas if s.name == "public")
+        table  = next(t for t in schema.tables if t.name == "test_table")
+        assert table.description is None
+
+    @requires_db
+    def test_descriptions_land_on_the_view_after_attach(self, tmp_path: Path) -> None:
+        """Comments go on the Tarkin-created view, never the shadow table."""
+        prof = _integration_profile()
+        assert prof is not None
+
+        engine = _owner_engine()
+        with engine.begin() as conn:
+            conn.execute(text("COMMENT ON TABLE public.test_table IS 'Fixture table'"))
+            conn.execute(text("COMMENT ON COLUMN public.test_table.name IS 'Display name'"))
+        engine.dispose()
+
+        proj = inspect(prof)
+        proj.database.profile = prof.profile
+
+        try:
+            zip_path = build(proj, prof, output_directory=tmp_path)
+            attach(prof, build_path=zip_path)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach for comment test: {exc}")
+
+        try:
+            engine = _owner_engine()
+            with engine.connect() as conn:
+                view_comment = conn.execute(text("""
+                    SELECT obj_description(c.oid, 'pg_class')
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relname = 'test_table'
+                """)).fetchone()[0]
+                col_comment = conn.execute(text("""
+                    SELECT col_description(a.attrelid, a.attnum)
+                    FROM pg_attribute a
+                    JOIN pg_class c     ON c.oid = a.attrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'test_table'
+                      AND a.attname = 'name'
+                """)).fetchone()[0]
+            engine.dispose()
+
+            assert view_comment == "Fixture table"
+            assert col_comment  == "Display name"
+        finally:
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass
+            engine = _owner_engine()
+            with engine.begin() as conn:
+                conn.execute(text("COMMENT ON TABLE public.test_table IS NULL"))
+                conn.execute(text("COMMENT ON COLUMN public.test_table.name IS NULL"))
+            engine.dispose()
+
+    @requires_db
+    def test_meta_schema_and_functions_are_commented(self, attached_with_analyst) -> None:
+        """The comments are the bootstrap: a client reading pg_catalog finds the
+        discovery surface without knowing Tarkin exists."""
+        engine = _analyst_profile().engine()
+        try:
+            with engine.connect() as conn:
+                schema_comment = conn.execute(text("""
+                    SELECT obj_description(n.oid, 'pg_namespace')
+                    FROM pg_namespace n WHERE n.nspname = '__META__'
+                """)).fetchone()[0]
+
+                fn_comments = conn.execute(text("""
+                    SELECT p.proname, obj_description(p.oid, 'pg_proc')
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE n.nspname = '__META__'
+                """)).fetchall()
+        finally:
+            engine.dispose()
+
+        assert schema_comment and "discovery functions" in schema_comment
+        described = {name: doc for name, doc in fn_comments if doc}
+        for fn in DISCOVERY_FUNCTIONS:
+            assert fn in described, f"{fn} has no COMMENT ON FUNCTION"
+
+
+# ---------------------------------------------------------------------------
+# Forced migration — bringing an attached database up to the installed codegen
+# ---------------------------------------------------------------------------
+
+class TestForcedMigration:
+
+    @requires_db
+    def test_unchanged_model_refuses_without_force(self, tmp_path: Path) -> None:
+        prof = _integration_profile()
+        assert prof is not None
+
+        proj = inspect(prof)
+        proj.database.profile = prof.profile
+
+        try:
+            zip_path = build(proj, prof, output_directory=tmp_path)
+            attach(prof, build_path=zip_path)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach for forced-migration test: {exc}")
+
+        try:
+            with pytest.raises(MigrateError, match="force"):
+                migrate(proj, prof, output=tmp_path)
+        finally:
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass
+
+    @requires_db
+    def test_force_applies_comments_to_an_attached_database(self, tmp_path: Path) -> None:
+        """The upgrade path: attach, add a description, force-migrate, see the comment.
+
+        Stands in for `upgrade Tarkin, run update, run migrate --force`, which
+        cannot be reproduced here because the installed version is the one under
+        test. The mechanism is the same: the model is identical on both sides of
+        the diff and the comments arrive because they are regenerated, not diffed.
+        """
+        prof = _integration_profile()
+        assert prof is not None
+
+        proj = inspect(prof)
+        proj.database.profile = prof.profile
+
+        try:
+            zip_path = build(proj, prof, output_directory=tmp_path)
+            attach(prof, build_path=zip_path)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach for forced-migration test: {exc}")
+
+        try:
+            forced = migrate(proj, prof, output=tmp_path, force=True)
+            attach(prof, build_path=forced)
+
+            engine = _owner_engine()
+            try:
+                with engine.connect() as conn:
+                    fn_comment = conn.execute(text("""
+                        SELECT obj_description(p.oid, 'pg_proc')
+                        FROM pg_proc p
+                        JOIN pg_namespace n ON n.oid = p.pronamespace
+                        WHERE n.nspname = '__META__' AND p.proname = 'get_columns'
+                    """)).fetchone()[0]
+            finally:
+                engine.dispose()
+
+            assert fn_comment, "forced migration did not reapply the function comments"
+        finally:
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass
+
+    @requires_db
+    def test_force_advances_the_build_id(self, tmp_path: Path) -> None:
+        """A forced migration writes a new tarkin_builds row even with no changes,
+        so a client caching get_build() correctly sees the model move."""
+        prof = _integration_profile()
+        assert prof is not None
+
+        proj = inspect(prof)
+        proj.database.profile = prof.profile
+
+        try:
+            zip_path = build(proj, prof, output_directory=tmp_path)
+            attach(prof, build_path=zip_path)
+        except (BuildError, AttachError) as exc:
+            pytest.skip(f"Could not attach for forced-migration test: {exc}")
+
+        def _build_id() -> int:
+            engine = _owner_engine()
+            try:
+                with engine.connect() as conn:
+                    return conn.execute(text(
+                        "SELECT max(build_id) FROM __META__.tarkin_builds"
+                    )).fetchone()[0]
+            finally:
+                engine.dispose()
+
+        try:
+            before_id = _build_id()
+            forced    = migrate(proj, prof, output=tmp_path, force=True)
+            attach(prof, build_path=forced)
+            assert _build_id() > before_id
+        finally:
+            try:
+                detach(prof, keep_versioning=True, drop_versioning=False, no_warn=True)
+            except DetachError:
+                pass

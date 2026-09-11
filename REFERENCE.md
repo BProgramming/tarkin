@@ -236,6 +236,7 @@ Options:
 - `--credentials` | `-c`: path to credentials.toml
 - `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--output` | `-o`: output directory (defaults to `out/`)
+- `--force` | `-f`: generate an artifact even when the model has not changed
 
 What it does:
 - Validates the target YAML
@@ -259,6 +260,10 @@ What it does:
   - Insert a new `__META__.tarkin_builds` row with the after-YAML and target checksum
 - Writes `out/tarkin_migrate_<timestamp>.zip` with `tarkin_build.json` (metadata including `artifact_type: "migrate"`, `source_checksum`, `target_checksum`, `change_count`, and the full serialised change list) and `tarkin_build.sql`
 - Prints the artifact path and the exact `tarkin attach` command to apply it (the artifact is identical in structure to a build artifact and is applied with `tarkin attach`)
+
+Without `--force`, an empty changeset is an error. Parts of a migration are regenerated wholesale rather than diffed (the `__META__` update, the discovery functions, and the object comments carrying the YAML descriptions) so a database whose governance model is unchanged can still lag behind the codegen of the installed Tarkin version. `--force` is how it catches up without a detach and rebuild. The artifact is written for review and applied with `tarkin attach` like any other.
+
+A forced migration writes a new `tarkin_builds` row, so `build_id` advances and `__META__.get_build()` reports the change even though the checksum is unchanged.
 
 ## tarkin erase
 Erases data subject records from a Tarkin-attached database.
@@ -316,10 +321,13 @@ Options:
 
 What it does:
 - Connects to the live database
-- Applies any pending `__META__` patches using `ADD COLUMN IF NOT EXISTS` and equivalent safe DDL — patches are idempotent and no-op if already applied
+- Applies every `__META__` patch for the installed Tarkin version, in order, within a single transaction
 - Prints each patch description as it is applied
-- If nothing needed applying, prints "Already up to date"
-- Does not compare installed Tarkin versions; safe to run against databases on any prior Tarkin version
+- Does not compare installed Tarkin versions and does not track which patches have run before
+
+Every patch is idempotent by contract, so `tarkin update` converges a database to the schema that the installed version expects regardless of the version it was attached under, and re-running it has no further effect. It reports the patches it applied, not the ones that changed something.
+
+Patches run in list order, because some are preconditions for others: the `__META__` tables must exist before the discovery functions that read them can be created, as PostgreSQL validates `LANGUAGE sql` function bodies at creation time.
 
 ## tarkin query
 Generates a SQL query from a natural language prompt using schema metadata from `__META__`, and optionally executes it.
@@ -336,7 +344,7 @@ At most one of `--build` or `--execute` may be specified.
 
 What it does:
 - Connects to the live database
-- Reads schema context from `__META__` (only what the connected role can see — no direct data access)
+- Reads governance context from `__META__` (build identity, schemas, tables, columns, roles, retention configuration, erasure counts, and row-level security policies) limited to what the connected role can see, with no direct data access
 - Prompts the user for a natural language question interactively
 - If neither `--build` nor `--execute` is specified, prompts the user to choose whether to execute the query afterwards
 - Sends the schema context and question to the AI provider configured in the `[ai]` section of credentials.toml
@@ -346,3 +354,95 @@ What it does:
 - Without `--execute`: prints the generated SQL only
 
 Requires an `[ai]` section in credentials.toml with `provider`, `api_key`, and `model` fields.
+
+The identifier-bearing erasure log is not included in query context. The `erasures` key holds `__META__.get_erasure_counts()` output, which reports only the count of rows that were removed without reporting which ones.
+
+## tarkin discover
+Reads governed metadata from `__META__` through the discovery functions and prints it as JSON.
+
+Arguments: none
+
+Options:
+- `--profile` | `-p` (required): credentials profile
+- `--credentials` | `-c`: path to credentials.toml
+- `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
+- `--object` | `-obj`: object to discover, repeatable (or omit to return everything), values are `build`, `schemas`, `tables`, `columns`, `roles`, `retention`, `erasures`, `erasure_counts`, `rls`
+- `--schema` | `-s`: restrict to a single schema, applies to `tables`, `columns`, `retention`, `rls`
+- `--table` | `-t`: restrict to a single table, applies to `columns`, `retention`, `rls`
+- `--since`: lower-bound timestamp for `erasures` and `erasure_counts`
+- `--output` | `-o`: directory to also write the result into as `tarkin_discover_<timestamp>.json`, omit to print only to the console
+
+What it does:
+- Connects to the live database
+- Opens a read-only transaction, calls the requested `__META__` discovery functions, and rolls back
+- Prints the combined result as JSON, keyed by object name
+- Writes the same JSON to `--output` when specified
+
+Every function returns only what the connected role is cleared to see. Filtering happens inside the function body against `session_user`, not in Tarkin, so the same results come back regardless of which client calls them. `SET ROLE` does not change the result: connect as the role you want to inspect.
+
+## Discovery functions
+These are `SECURITY DEFINER` functions in `__META__` with `EXECUTE` granted to `PUBLIC`. They are the supported read interface for third-party tooling, including AI agents: any client with a PostgreSQL connection can call them directly and receives exactly what its role is entitled to.
+
+All return `json`. When there is nothing visible, they return an object with a single `message` field naming the function and the parameters it was called with, rather than an empty array or NULL.
+
+| Function | Returns | Visibility rule                                                                                                                          |
+|---|---|------------------------------------------------------------------------------------------------------------------------------------------|
+| `get_build()` | `build_id`, `built_at`, `tarkin_version`, `database_name`, `checksum` for the latest build | Any role present in the latest build. The stored governance YAML and profile name are never returned.                                    |
+| `get_schemas()` | name, clearance, audit_enabled, description | Schemas the role holds USAGE on.                                                                                                         |
+| `get_tables(schema)` | schema, name, clearance, audit_enabled, description | Tables the role holds SELECT on, at or below its clearance.                                                                              |
+| `get_columns(schema, table)` | schema, table, name, type, clearance, nullable, sensitive, masking_strategy, description | As `get_tables`, and sensitive columns only when the role has `can_access_sensitive`.                                                    |
+| `get_roles()` | name, clearance, capability flags, member_of, description | All roles when the caller has `can_admin`, otherwise only the caller's own record.                                                       |
+| `get_retention(schema, table)` | schema, table, erase_strategy, retention_days | As `get_tables`. Only tables enrolled in retention management appear.                                                                    |
+| `get_erasures(since)` | erasure_id, erased_at, erased_by, schema, table, column_names, strategy, rows_affected, was_scheduled | `can_admin` only. `column_values` is never returned.                                                                                     |
+| `get_erasure_counts(since)` | schema, table, strategy, operations, rows_affected, first_erasure, last_erasure | As `get_tables`. No identifiers, erased values, or actor names .                                                                         |
+| `get_rls_policies(schema, table)` | schema, table, policy, permissive, command, roles, using_expr, check_expr | As `get_tables`. Read from `pg_policies` against shadow tables, with shadow schema names mapped back to their public-facing equivalents. |
+
+Notes:
+- All functions except `get_erasures` scope to `__META__.tarkin_latest_build_id()`. The erasure log is an append-only audit record spanning builds and carries no `build_id`.
+- `get_erasure_counts` joins to the latest build's grants, so erasures on a table since removed from the governance model do not appear. The counts are a compliance signal, not a complete history.
+- `get_retention` reports declared configuration only. It does not count rows currently past `__expires_at__`: doing so would require reading shadow tables as the definer, bypassing any RLS policy that constrains the caller's own view of those rows.
+- `get_rls_policies` reports live policies from the catalog rather than declared intent from the YAML, so a policy altered outside Tarkin appears as it actually exists.
+- These functions are created by `tarkin attach` (as part of every build artifact), refreshed by `tarkin migrate`, and re-applied by `tarkin update`. A database attached under an earlier Tarkin version gains new discovery functions by running `tarkin update`, without a rebuild.
+- Each function carries a `COMMENT ON FUNCTION` describing what it returns and how visibility is filtered, so a client listing `pg_catalog.pg_proc` finds a self-describing surface without knowing Tarkin exists.
+
+## __META__.tarkin_governance
+
+A view flattening the discovery functions into one row per visible column, so a client that enumerates tables finds the governance model without knowing the functions exist or how to call them. `SELECT` is granted to `PUBLIC`; the rows are whatever the calling role is cleared to see, because the view reads the same `session_user`-filtered functions.
+
+| Column | Meaning |
+|---|---|
+| `build_id` | the governance build these rows describe |
+| `schema_name`, `table_name`, `column_name` | the column being described |
+| `data_type`, `nullable` | declared type and nullability |
+| `sensitive` | restricted to roles with `can_access_sensitive` |
+| `masking_strategy` | anything other than `none` means the value read through the view layer is transformed, not stored |
+| `column_clearance`, `table_clearance` | clearance required |
+| `column_description`, `table_description` | the governance YAML descriptions |
+| `audit_enabled` | whether pgaudit covers the table |
+| `retention_days`, `erase_strategy` | null unless the table is enrolled in retention management |
+| `rls_policy_count` | above zero means a query returns a filtered subset of rows |
+| `rls_predicates` | the `using_expr` of each policy, joined with `AND` |
+
+```sql
+SELECT * FROM __META__.tarkin_governance WHERE sensitive OR masking_strategy <> 'none';
+```
+
+The view is created alongside the discovery functions, so `tarkin attach`, `tarkin migrate`, and `tarkin update` all install and refresh it. It carries a `COMMENT ON VIEW` explaining what the masking, sensitivity, and RLS columns mean, so a client reading `pg_description` gets the interpretation with the data.
+
+It is dropped and recreated rather than replaced in place, because replacing a view cannot change its column list and a future column addition would otherwise fail against an existing install.
+
+## Object comments
+
+Descriptions from the governance YAML are written to the database as `COMMENT ON` statements as well as being stored in `__META__`:
+
+- `COMMENT ON SCHEMA` for each schema description
+- `COMMENT ON VIEW` for each table description, including the `_current` view of a versioned table
+- `COMMENT ON COLUMN` for each column description
+
+Comments land on the Tarkin-created schema and views, never on the shadow tables. The view layer is dropped by `tarkin detach`, so the comments go with it and the original objects' own comments are never overwritten.
+
+`tarkin migrate` replays every comment rather than diffing them, since `COMMENT ON` is a set operation. Descriptions removed from the YAML are emitted as `COMMENT ON ... IS NULL` so that the database converges.
+
+`tarkin update` does not apply object comments, as it has no governance YAML to read them from. It does apply the `__META__` schema comment and the discovery function comments.
+
+To get object comments onto a database attached under an earlier version, run `tarkin migrate --force` with the current YAML. A version upgrade changes no part of the governance model, so an ordinary migrate finds no differences and refuses; `--force` generates the artifact anyway, carrying the sections that are regenerated rather than diffed.
