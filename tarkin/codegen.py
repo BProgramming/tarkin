@@ -150,6 +150,12 @@ def _tarkin_view_names_for_schema(schema: SchemaConfig) -> set[str]:
 def _generate_meta_schema() -> str:
     """Generate DDL for the ``__META__`` schema and all governance tables."""
     return r"""
+-- __META__ is written unquoted everywhere, so PostgreSQL folds it to __meta__
+-- and every reference resolves consistently. The uppercase spelling is a
+-- reading convention, not the stored identifier. Quoting it anywhere (e.g. in
+-- generated SQL, in a test, in a catalog lookup) produces a second, distinct
+-- schema that silently shadows nothing and matches nothing.
+
 CREATE SCHEMA IF NOT EXISTS __META__;
 REVOKE ALL ON SCHEMA __META__ FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA __META__ FROM PUBLIC;

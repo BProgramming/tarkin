@@ -1,4 +1,4 @@
-"""Idempotent schema patches applied by the 'tarkin update' command.
+"""Applies idempotent schema patches to the Tarkin installation.
 
 Every patch in PATCHES must be safe to apply any number of times against any
 database that has ever had Tarkin attached, including one already at the

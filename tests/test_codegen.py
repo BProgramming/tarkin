@@ -859,6 +859,27 @@ def _function_body(fn: str) -> str:
     return sql[start:sql.index("$$;", start)]
 
 
+def _squash(sql: str) -> str:
+    """Collapse runs of intra-line whitespace.
+
+    The generated SQL is column-aligned for readability. Asserting against the
+    aligned form couples these tests to the alignment, so a predicate assertion
+    breaks the next time a longer identifier shifts a column.
+    """
+    return "\n".join(" ".join(line.split()) for line in sql.splitlines())
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Drop whole-line ``--`` comments.
+
+    Counting keyword occurrences across the raw string counts the comments that
+    describe those keywords as well as the calls that use them.
+    """
+    return "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+
+
 class TestGenerateDiscoveryFunctions:
 
     def test_all_functions_are_created(self) -> None:
@@ -903,9 +924,9 @@ class TestDiscoveryVisibilityRules:
     def test_table_scoped_functions_enforce_select_and_clearance(self) -> None:
         for fn in ("get_tables", "get_columns", "get_retention",
                    "get_erasure_counts", "get_rls_policies"):
-            body = _function_body(fn)
-            assert "rt.role_name = current_user" in body
-            assert "rt.select    = true" in body
+            body = _squash(_function_body(fn))
+            assert "rt.role_name = session_user" in body
+            assert "rt.select = true" in body
             assert "clearance" in body
 
     def test_get_columns_gates_sensitive_columns(self) -> None:
@@ -913,9 +934,24 @@ class TestDiscoveryVisibilityRules:
         assert "r.can_access_sensitive = true" in body
 
     def test_get_roles_is_admin_or_self(self) -> None:
-        body = _function_body("get_roles")
+        body = _squash(_function_body("get_roles"))
         assert "self.can_admin = true" in body
-        assert "OR r.name = current_user" in body
+        assert "OR r.name = session_user" in body
+
+    def test_no_discovery_function_filters_on_current_user(self) -> None:
+        """Regression: inside a SECURITY DEFINER function current_user resolves
+        to the function owner, so every caller receives the owner's view of the
+        model. session_user is the authenticated login role and is unaffected
+        by the definer context.
+
+        This is the assertion that has teeth. The per-function checks above
+        confirm the right predicate is present; this one confirms the wrong one
+        is absent everywhere, including in functions added later.
+        """
+        for fn in _DISCOVERY_FUNCTIONS:
+            assert "current_user" not in _function_body(fn), (
+                f"{fn} filters on current_user"
+            )
 
     def test_get_erasures_requires_can_admin(self) -> None:
         body = _function_body("get_erasures")
@@ -935,8 +971,8 @@ class TestDiscoveryDisclosureLimits:
         assert "'checksum'" in body
 
     def test_get_build_requires_the_caller_to_be_in_the_build(self) -> None:
-        body = _function_body("get_build")
-        assert "self.name     = current_user" in body
+        body = _squash(_function_body("get_build"))
+        assert "self.name = session_user" in body
 
     def test_get_erasures_withholds_erased_values(self) -> None:
         body = _function_body("get_erasures")
@@ -1121,8 +1157,9 @@ class TestGovernanceView:
     def test_every_json_source_is_guarded(self) -> None:
         """Discovery functions return a message object, not an array, when the
         role can see nothing; json_to_recordset rejects a non-array."""
-        sql = _generate_governance_view()
-        assert sql.count("json_typeof") == sql.count("json_to_recordset")
+        sql = _strip_sql_comments(_generate_governance_view())
+        assert sql.count("json_to_recordset(") == sql.count("json_typeof(")
+        assert sql.count("json_to_recordset(") == 4
 
     def test_view_exposes_the_governance_attributes(self) -> None:
         sql = _generate_governance_view()

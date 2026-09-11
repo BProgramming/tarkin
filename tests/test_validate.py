@@ -2,7 +2,10 @@
 from __future__ import annotations
 import pytest
 
-from tarkin.validate import SemanticValidator, ValidationError
+from tarkin.validate import (
+    SemanticValidator,
+    ValidationError,
+)
 from tarkin.model import (
     GovernanceProject,
     DatabaseConfig,

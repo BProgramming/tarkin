@@ -5,7 +5,10 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 from .codegen import generate_sql
-from .credentials import ConnectionProfile, check_pgcron_available
+from .credentials import (
+    ConnectionProfile,
+    check_pgcron_available,
+)
 from .inspect import inspect
 from .model import GovernanceProject
 from .utils import (

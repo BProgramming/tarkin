@@ -21,10 +21,17 @@ from tarkin.codegen import (
     _generate_views,
     _needs_pgcrypto,
 )
-from tarkin.validate import SemanticValidator, ValidationError
+from tarkin.validate import (
+    SemanticValidator,
+    ValidationError,
+)
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
-from .fixtures import make_database, make_role, make_index
+from .fixtures import (
+    make_database,
+    make_role,
+    make_index,
+)
 
 
 def _make_subject_table(

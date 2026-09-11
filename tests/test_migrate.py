@@ -14,7 +14,12 @@ from tarkin.model import (
     IndexConfig,
     ForeignKeyConfig,
 )
-from tarkin.attach import _validate_for_build, _validate_for_migration, _read_artifact, AttachError
+from tarkin.attach import (
+    _validate_for_build,
+    _validate_for_migration,
+    _read_artifact,
+    AttachError,
+)
 from tarkin.migrate import (
     migrate,
     MigrateError,
@@ -28,10 +33,18 @@ from tarkin.migrate import (
     _migration_metadata,
     _generate_migration_sql,
 )
-from tarkin.diff import diff, Change, ChangeKind, ObjectType
+from tarkin.diff import (
+    diff,
+    Change,
+    ChangeKind,
+    ObjectType,
+)
 from tarkin.build import _build_metadata
 from tarkin.serialize import project_checksum
-from .fixtures import make_database, make_role
+from .fixtures import (
+    make_database,
+    make_role,
+)
 
 
 def _col(name: str, type: str = "text", nullable: bool = True, **kw) -> ColumnConfig:
@@ -563,9 +576,14 @@ class TestMigrateFunction:
         mock_engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__  = MagicMock(return_value=False)
 
-        with patch("tarkin.credentials.ConnectionProfile.engine", return_value=mock_engine):
-            # tk_schemas non-empty: a migration requires an attached build.
-            _validate_for_migration(prof, metadata, tk_schemas=["tk_public"])
+        # prof is a MagicMock, so patching ConnectionProfile.engine patches a
+        # class it is not an instance of. Stub the attribute on the mock itself
+        # or profile.engine() returns an auto-generated child and row[1] is a
+        # MagicMock rather than the database name.
+        prof.engine.return_value = mock_engine
+
+        # tk_schemas non-empty: a migration requires an attached build.
+        _validate_for_migration(prof, metadata, tk_schemas=["tk_public"])
 
     def test_migrate_produces_artifact(self, tmp_path: Path) -> None:
         before   = _simple_project()

@@ -15,12 +15,23 @@ from tarkin.codegen import (
     _generate_retention_columns,
     _generate_retention,
 )
-from tarkin.validate import SemanticValidator, ValidationError
+from tarkin.validate import (
+    SemanticValidator,
+    ValidationError,
+)
 from tarkin.serialize import Serializer
 from tarkin.yaml import YamlLoader
-from tarkin.diff import diff, ObjectType
+from tarkin.diff import (
+    diff,
+    ObjectType,
+)
 
-from .fixtures import make_database, make_role, make_index, make_schema
+from .fixtures import (
+    make_database,
+    make_role,
+    make_index,
+    make_schema,
+)
 
 def _retained_table(
     name: str = "events",

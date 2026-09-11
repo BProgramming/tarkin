@@ -8,14 +8,34 @@ from pathlib import Path
 from pydantic import SecretStr
 from sqlalchemy import text
 
-from tarkin.attach import attach, AttachError
-from tarkin.build import build, BuildError
-from tarkin.credentials import CredentialsFile, DEFAULT_CREDENTIALS_PATH, check_connection
+from tarkin.attach import (
+    attach,
+    AttachError,
+)
+from tarkin.build import (
+    build,
+    BuildError,
+)
+from tarkin.credentials import (
+    CredentialsFile,
+    DEFAULT_CREDENTIALS_PATH,
+    check_connection,
+)
 from tarkin.detach import _read_meta
-from tarkin.detach import detach, DetachError
+from tarkin.detach import (
+    detach,
+    DetachError,
+)
 from tarkin.inspect import inspect
-from tarkin.migrate import migrate, MigrateError
-from tarkin.model import ColumnConfig, GovernanceProject
+from tarkin.migrate import (
+    migrate,
+    MigrateError,
+)
+from tarkin.model import (
+    ColumnConfig,
+    ErasureStrategy,
+    GovernanceProject,
+)
 from tarkin.validate import SemanticValidator
 
 
@@ -634,6 +654,11 @@ DISCOVERY_FUNCTIONS = (
 _ANALYST_ROLE = "tarkin_it_analyst"
 _ANALYST_PASS = "tarkin_it_analyst_pw"
 
+# A LOGIN role deliberately absent from the governance build, used to exercise
+# the empty-result path through the discovery functions and the view.
+_OUTSIDER_ROLE = "tarkin_it_outsider"
+_OUTSIDER_PASS = "tarkin_it_outsider_pw"
+
 
 def _owner_engine():
     prof = _integration_profile()
@@ -641,20 +666,30 @@ def _owner_engine():
     return prof.engine()
 
 
-def _analyst_profile():
-    """A ConnectionProfile that logs in as the non-owner analyst role."""
+def _role_profile(username: str, password: str, label: str | None = None):
+    """A ConnectionProfile that logs in as an arbitrary role.
+
+    The discovery functions filter on session_user, so the only way to test
+    them from another role's perspective is to actually log in as that role.
+    SET ROLE would not change the answer.
+    """
     from tarkin.credentials import ConnectionProfile
     base = _integration_profile()
     assert base is not None
     return ConnectionProfile(
-        profile  = "test_analyst",
+        profile  = label or f"test_{username}",
         host     = base.host,
         port     = base.port,
         database = base.database,
-        username = _ANALYST_ROLE,
-        password = SecretStr(_ANALYST_PASS),
+        username = username,
+        password = SecretStr(password),
         sslmode  = "prefer",
     )
+
+
+def _analyst_profile():
+    """A ConnectionProfile that logs in as the non-owner analyst role."""
+    return _role_profile(_ANALYST_ROLE, _ANALYST_PASS, label="test_analyst")
 
 
 @pytest.fixture
@@ -685,6 +720,23 @@ def analyst_role():
     engine.dispose()
 
 
+def _add_erasure_config(proj: GovernanceProject) -> None:
+    """Mark public.test_table as subject-identified.
+
+    _generate_erase_functions() emits nothing unless some table carries both an
+    erase_strategy and an is_subject_identifier column, so a model reflected
+    straight off the fixture database produces no tarkin_erase_check at all.
+    Without this, any test asserting that the erasure surface is locked down
+    passes against a database where the surface does not exist.
+    """
+    schema = next(s for s in proj.schemas if s.name == "public")
+    table  = next(t for t in schema.tables if t.name == "test_table")
+    table.erase_strategy = ErasureStrategy.DELETE
+    for col in table.columns:
+        if col.name == "id":
+            col.is_subject_identifier = True
+
+
 @pytest.fixture
 def attached_with_analyst(analyst_role, tmp_path: Path):
     """Attach the live database with the analyst role present in the model."""
@@ -693,6 +745,7 @@ def attached_with_analyst(analyst_role, tmp_path: Path):
 
     proj = inspect(prof)
     proj.database.profile = prof.profile
+    _add_erasure_config(proj)
 
     try:
         zip_path = build(proj, prof, output_directory=tmp_path)
@@ -741,6 +794,20 @@ class TestDiscoveryFunctionsAsNonOwner:
     def test_analyst_cannot_execute_the_erase_functions(self, attached_with_analyst) -> None:
         """EXECUTE is revoked from PUBLIC on every __META__ function, then granted
         back on the discovery surface alone."""
+        # Confirm the function exists before asserting it is unreachable. An
+        # UndefinedFunction error also raises, and would let this test pass
+        # against a build that never generated the erasure surface.
+        owner = _owner_engine()
+        try:
+            with owner.connect() as conn:
+                exists = conn.execute(text(
+                    "SELECT to_regprocedure("
+                    "'__META__.tarkin_erase_check(text[], text[])') IS NOT NULL"
+                )).fetchone()[0]
+        finally:
+            owner.dispose()
+        assert exists, "tarkin_erase_check was not generated; check the fixture model"
+
         engine = _analyst_profile().engine()
         try:
             with engine.connect() as conn:
@@ -841,26 +908,50 @@ class TestDiscoveryFunctionsAsNonOwner:
         self, attached_with_analyst
     ) -> None:
         """Discovery functions return a message object rather than an array when
-        nothing is visible; json_to_recordset would reject it unguarded."""
+        nothing is visible; json_to_recordset would reject it unguarded.
+
+        The role has to be absent from the build, not merely stripped of live
+        grants. get_columns filters on __META__.tarkin_role_tables, which is the
+        build snapshot, so revoking a PostgreSQL grant after attach does not
+        change what the function returns and would not reach the guard.
+
+        The outsider is created here rather than in a fixture precisely so that
+        the inspect() call that produced the build could not have seen it.
+        PUBLIC carries USAGE on __META__, EXECUTE on the discovery surface, and
+        SELECT on the view, so the stranger can reach all of it and see none of
+        it -- which is the case the guard exists for.
+        """
         engine = _owner_engine()
         try:
             with engine.begin() as conn:
-                conn.execute(text(f"REVOKE ALL ON public.test_table FROM {_ANALYST_ROLE}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {_OUTSIDER_ROLE}"))
+                conn.execute(text(
+                    f"CREATE ROLE {_OUTSIDER_ROLE} LOGIN PASSWORD '{_OUTSIDER_PASS}'"
+                ))
         finally:
             engine.dispose()
 
-        analyst = _analyst_profile().engine()
         try:
-            with analyst.connect() as conn:
-                rows = conn.execute(text(
-                    "SELECT count(*) FROM __META__.tarkin_governance"
-                )).fetchone()
-            assert rows[0] == 0
+            outsider = _role_profile(_OUTSIDER_ROLE, _OUTSIDER_PASS).engine()
+            try:
+                with outsider.connect() as conn:
+                    count = conn.execute(text(
+                        "SELECT count(*) FROM __META__.tarkin_governance"
+                    )).fetchone()[0]
+                    cols = conn.execute(text(
+                        "SELECT __META__.get_columns()"
+                    )).fetchone()[0]
+            finally:
+                outsider.dispose()
+
+            # The precondition: the function really did return the message
+            # object, so the view was reading a non-array.
+            assert isinstance(cols, dict), f"expected a message object, got {cols!r}"
+            assert count == 0
         finally:
-            analyst.dispose()
             engine = _owner_engine()
             with engine.begin() as conn:
-                conn.execute(text(f"GRANT SELECT ON public.test_table TO {_ANALYST_ROLE}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {_OUTSIDER_ROLE}"))
             engine.dispose()
 
     @requires_db
@@ -1010,16 +1101,18 @@ class TestCommentRoundtrip:
         engine = _analyst_profile().engine()
         try:
             with engine.connect() as conn:
+                # ::regnamespace goes through the identifier parser, so it
+                # folds the way CREATE SCHEMA __META__ did. Comparing nspname
+                # against the literal '__META__' matches nothing: the schema is
+                # stored as __meta__, and fetchone() then returns None.
                 schema_comment = conn.execute(text("""
-                    SELECT obj_description(n.oid, 'pg_namespace')
-                    FROM pg_namespace n WHERE n.nspname = '__META__'
+                    SELECT obj_description('__META__'::regnamespace, 'pg_namespace')
                 """)).fetchone()[0]
 
                 fn_comments = conn.execute(text("""
                     SELECT p.proname, obj_description(p.oid, 'pg_proc')
                     FROM pg_proc p
-                    JOIN pg_namespace n ON n.oid = p.pronamespace
-                    WHERE n.nspname = '__META__'
+                    WHERE p.pronamespace = '__META__'::regnamespace
                 """)).fetchall()
         finally:
             engine.dispose()
@@ -1090,8 +1183,8 @@ class TestForcedMigration:
                     fn_comment = conn.execute(text("""
                         SELECT obj_description(p.oid, 'pg_proc')
                         FROM pg_proc p
-                        JOIN pg_namespace n ON n.oid = p.pronamespace
-                        WHERE n.nspname = '__META__' AND p.proname = 'get_columns'
+                        WHERE p.pronamespace = '__META__'::regnamespace
+                          AND p.proname     = 'get_columns'
                     """)).fetchone()[0]
             finally:
                 engine.dispose()

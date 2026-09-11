@@ -13,7 +13,12 @@ from pydantic import SecretStr
 
 from tarkin.codegen import _generate_discovery_functions
 from tarkin.credentials import ConnectionProfile
-from tarkin.discover import OBJECTS, DiscoverError, _call, discover
+from tarkin.discover import (
+    OBJECTS,
+    DiscoverError,
+    _call,
+    discover,
+)
 
 
 ALL_FUNCTIONS = (

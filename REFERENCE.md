@@ -431,6 +431,8 @@ The view is created alongside the discovery functions, so `tarkin attach`, `tark
 
 It is dropped and recreated rather than replaced in place, because replacing a view cannot change its column list and a future column addition would otherwise fail against an existing install.
 
+Note that `__META__.tarkin_governance` and the discovery functions report the governance model as of the attached build, not the live state of the PostgreSQL catalog. Visibility is filtered against `__META__.tarkin_role_tables`, which is written at build time. If a grant is changed outside Tarkin after attach, the discovery surface will continue to describe the model as declared, and an agent reading it may believe it has access it no longer has or miss access that it has gained. Run `tarkin inspect` and `tarkin migrate` to bring the two back into agreement.
+
 ## Object comments
 
 Descriptions from the governance YAML are written to the database as `COMMENT ON` statements as well as being stored in `__META__`:

@@ -8,7 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from tarkin.credentials import AIProfile, ConnectionProfile
+from tarkin.credentials import (
+    AIProfile,
+    ConnectionProfile,
+)
 from tarkin.query import (
     _extract_sql,
     _fetch_schema_context,
