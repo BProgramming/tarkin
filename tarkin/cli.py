@@ -690,7 +690,7 @@ def discover_metadata(
     Read governed metadata from __META__ via the discovery functions.
 
     Returns only what the connected role is cleared to see. Filtering happens
-    inside the SECURITY DEFINER functions against current_user, not in Tarkin,
+    inside the SECURITY DEFINER functions against session_user, not in Tarkin,
     so the same results come back regardless of which client calls them — which
     is how third-party tooling, including AI agents, reads the governance model.
 

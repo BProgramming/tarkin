@@ -36,6 +36,10 @@ class UpdateError(Exception):
 PATCHES: list[tuple[str, str]] = [
     # (description, sql)
     (
+        "Ensure __META__ tables exist",
+        _generate_meta_schema(),
+    ),
+    (
         "Add description column to tarkin_schemas",
         "ALTER TABLE __META__.tarkin_schemas ADD COLUMN IF NOT EXISTS description text;",
     ),
@@ -52,10 +56,6 @@ PATCHES: list[tuple[str, str]] = [
         "ALTER TABLE __META__.tarkin_roles ADD COLUMN IF NOT EXISTS description text;",
     ),
     (
-        "Ensure __META__ tables exist",
-        _generate_meta_schema(),
-    ),
-    (
         "Refresh __META__ discovery functions",
         _generate_discovery_functions(),
     ),
@@ -68,7 +68,17 @@ def update(profile: ConnectionProfile) -> list[str]:
 
     try:
         engine = profile.engine()
-        with engine.begin() as conn:  # begin() auto-commits on success
+        with engine.begin() as conn:
+            attached = conn.execute(text(
+                "SELECT to_regclass('__META__.tarkin_builds') IS NOT NULL"
+            )).scalar()
+            if not attached:
+                raise UpdateError(
+                    "No Tarkin build found in this database. 'tarkin update' converges "
+                    "an attached database on the installed version's schema; it does not "
+                    "create one. Run 'tarkin build' and 'tarkin attach' first."
+                )
+
             for description, sql in PATCHES:
                 try:
                     conn.execute(text(sql))
