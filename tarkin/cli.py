@@ -466,6 +466,14 @@ def migrate_data_model(
         False, "--force", "-f",
         help="Generate an artifact even when the model has not changed.",
     ),
+    keep_versioning:  bool           = typer.Option(
+        False, "--keep-versioning", "-k",
+        help="When a table loses its last versioned column, archive its history to tk_<schema>.<table>__history_<timestamp>.",
+    ),
+    drop_versioning:  bool           = typer.Option(
+        False, "--drop-versioning", "-d",
+        help="When a table loses its last versioned column, delete its history, keeping only current records.",
+    ),
 ) -> None:
     """
     Generate a migration artifact from the current live build to a new governance YAML.
@@ -479,7 +487,14 @@ def migrate_data_model(
     YAML descriptions. Use --force after upgrading Tarkin to bring a database
     up to the installed version's codegen when its governance model is
     unchanged.
+
+    If a table loses its last versioned column, one of --keep-versioning or
+    --drop-versioning must be specified.
     """
+    if keep_versioning and drop_versioning:
+        _die("Cannot specify both --keep-versioning and --drop-versioning.")
+        return
+
     proj = _load_and_validate(config)
     if not proj:
         return
@@ -503,7 +518,13 @@ def migrate_data_model(
         return
 
     try:
-        zip_path = migrate(proj, prof, output=output_directory, force=force)
+        zip_path = migrate(
+            proj, prof,
+            output          = output_directory,
+            force           = force,
+            keep_versioning = keep_versioning,
+            drop_versioning = drop_versioning,
+        )
         print(f"Migration artifact: {zip_path}")
         print("Apply with: tarkin attach -b " + str(zip_path) + f" -p {profile_name}")
     except MigrateError as exc:

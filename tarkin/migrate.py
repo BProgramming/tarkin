@@ -8,7 +8,7 @@ from datetime import datetime, UTC
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from sqlalchemy import text
-from typing import cast
+from typing import Literal, cast
 
 from .codegen import (
     _generate_comments,
@@ -18,6 +18,7 @@ from .codegen import (
     _generate_views,
     _generate_roles,
     _generate_grants,
+    _versioning_setup_lines,
 )
 from .credentials import ConnectionProfile
 from .diff import (
@@ -51,11 +52,16 @@ from .utils import (
 )
 
 
+VersioningTeardown = Literal["keep", "drop"]
+
+
 def migrate(
-    after:    GovernanceProject,
-    profile:  ConnectionProfile,
-    output:   Path | None = None,
-    force:    bool = False,
+    after:           GovernanceProject,
+    profile:         ConnectionProfile,
+    output:          Path | None = None,
+    force:           bool = False,
+    keep_versioning: bool = False,
+    drop_versioning: bool = False,
 ) -> Path:
     """Generate a migration artifact from the current live build to *after*.
 
@@ -65,7 +71,25 @@ def migrate(
     a database whose model has not changed can still be behind the codegen of
     the installed Tarkin version. Forcing is how that database catches up
     without a detach and rebuild.
+
+    A table that loses its last versioned column needs keep_versioning or
+    drop_versioning. A migration can't prompt, so the choice is required up
+    front rather than defaulted:
+      keep  archives the full versioned table (current and historical rows,
+            with __valid_from__/__valid_to__) to tk_<schema>.<table>__history_<ts>
+            before stripping versioning from the live shadow table.
+      drop  discards historical rows, the same as detach --drop-versioning.
+    Either way the live table ends up with only current rows, no versioning
+    columns, and its primary key restored. Leaving history in place isn't an
+    option: the unversioned trigger updates and deletes by primary key, so it
+    would rewrite every historical row of the record it touched.
     """
+    if keep_versioning and drop_versioning:
+        raise MigrateError("Cannot specify both --keep-versioning and --drop-versioning.")
+    teardown_mode: VersioningTeardown | None = (
+        "keep" if keep_versioning else "drop" if drop_versioning else None
+    )
+
     output = (output or OUT_DIR)
     build_output_directory(output)
 
@@ -88,15 +112,41 @@ def migrate(
     if not changes:
         print("No model differences found. Regenerating for the installed Tarkin version.")
 
+    _, disabled = _versioning_transitions(before, after)
+    if disabled and teardown_mode is None:
+        raise MigrateError(_versioning_teardown_required_message(disabled))
+    if teardown_mode is not None and not disabled:
+        print(
+            f"Warning: --{teardown_mode}-versioning specified but no table loses "
+            f"its last versioned column. Proceeding without versioning teardown."
+        )
+        teardown_mode = None
+    if teardown_mode == "drop":
+        print(
+            "Warning: --drop-versioning will permanently delete historical rows from:\n"
+            + "\n".join(f"  {s}.{t.name}" for s, t in disabled)
+            + "\nReview the artifact before attaching."
+        )
+
+    now       = datetime.now(UTC)
+    timestamp = now.strftime("%Y_%m_%d_%H_%M_%S")
+
     print("Generating migration SQL...", end="\r")
     yaml_str  = Serializer.to_yaml_string(after)
     checksum  = project_checksum(after)
-    sql       = _generate_migration_sql(before, after, changes, profile, checksum, yaml_str)
+    sql       = _generate_migration_sql(
+        before, after, changes, profile, checksum, yaml_str,
+        versioning_teardown = teardown_mode,
+        archive_suffix      = now.strftime("%Y%m%d%H%M%S"),
+    )
     print("Generating migration SQL... Done.")
 
-    timestamp = datetime.now(UTC).strftime("%Y_%m_%d_%H_%M_%S")
     zip_path  = output / f"tarkin_migrate_{timestamp}.zip"
-    metadata  = _migration_metadata(after, profile, build_checksum, db_name, changes)
+    metadata  = _migration_metadata(
+        after, profile, build_checksum, db_name, changes,
+        versioning_teardown = teardown_mode,
+        teardown_tables     = [f"{s}.{t.name}" for s, t in disabled],
+    )
     write_artifact(zip_path, sql, metadata)
     print(f"Migration artifact written to {zip_path}.")
 
@@ -137,13 +187,55 @@ def _read_current_build(profile: ConnectionProfile) -> tuple[GovernanceProject, 
     return project, checksum, db_name
 
 
+def _versioning_transitions(
+    before: GovernanceProject,
+    after:  GovernanceProject,
+) -> tuple[list[tuple[str, TableConfig]], list[tuple[str, TableConfig]]]:
+    """Find tables present in both builds whose versioned status flips.
+
+    Returns (enabled, disabled) as lists of (schema_name, after_table). This
+    is decided at table level, not per column change, because a table's
+    storage is versioned when any column is: a flip on one column, an added
+    versioned column, and a removed one all reach the same transition.
+    Tables added or removed outright are handled by the table-level paths.
+    """
+    before_map = {(s.name, t.name): t for s in before.schemas for t in s.tables}
+    enabled:  list[tuple[str, TableConfig]] = []
+    disabled: list[tuple[str, TableConfig]] = []
+    for schema in after.schemas:
+        for table in schema.tables:
+            prior = before_map.get((schema.name, table.name))
+            if prior is None:
+                continue
+            was = any(c.versioned for c in prior.columns)
+            now = any(c.versioned for c in table.columns)
+            if now and not was:
+                enabled.append((schema.name, table))
+            elif was and not now:
+                disabled.append((schema.name, table))
+    return enabled, disabled
+
+
+def _versioning_teardown_required_message(disabled: list[tuple[str, TableConfig]]) -> str:
+    tables = "\n".join(f"  {s}.{t.name}" for s, t in disabled)
+    return (
+        "The following tables lose their last versioned column:\n"
+        f"{tables}\n"
+        "Specify what happens to their versioning history:\n"
+        "  --keep-versioning / -k  archive the full history to tk_<schema>.<table>__history_<timestamp>\n"
+        "  --drop-versioning / -d  delete historical rows, keeping only current records"
+    )
+
+
 def _generate_migration_sql(
-    before:   GovernanceProject,
-    after:    GovernanceProject,
-    changes:  list[Change],
-    profile:  ConnectionProfile,
-    checksum: str,
-    yaml_str: str,
+    before:              GovernanceProject,
+    after:               GovernanceProject,
+    changes:             list[Change],
+    profile:             ConnectionProfile,
+    checksum:            str,
+    yaml_str:            str,
+    versioning_teardown: VersioningTeardown | None = None,
+    archive_suffix:      str = "",
 ) -> str:
     """Generate ordered, transactional migration SQL from a list of Changes.
 
@@ -154,15 +246,17 @@ def _generate_migration_sql(
       4. Drop triggers and views
       5. Schema additions / removals
       6. Table additions / removals
-      7. Column ALTER/ADD/DROP on shadow tables
-      8. Versioning column additions
-      9. Recreate views
-      10. Recreate triggers
-      11. Recreate indexes
-      12. Recreate FK constraints
-      13. Recreate RLS policies
-      14. Role and permission changes
-      15. Update __META__
+      7. Versioning teardown (before column changes, so a removed versioned
+         column is still present when its history is archived)
+      8. Column ALTER/ADD/DROP on shadow tables
+      9. Versioning setup
+      10. Recreate views
+      11. Recreate triggers
+      12. Recreate indexes
+      13. Recreate FK constraints
+      14. Recreate RLS policies
+      15. Role and permission changes
+      16. Update __META__
 
     Changes that cannot be safely automated (e.g. schema renames, PK changes)
     are emitted as prominently commented stubs that raise at runtime, forcing
@@ -190,8 +284,14 @@ def _generate_migration_sql(
     drop_indexes = _emit_drop_indexes(changes, before_table_map)
     drop_views   = _emit_drop_views(changes, before_schema_map)
     schema_ops   = _emit_schema_changes(changes)
+    enabled, disabled = _versioning_transitions(before, after)
+    if disabled and versioning_teardown is None:
+        raise MigrateError(_versioning_teardown_required_message(disabled))
+
     table_ops    = _emit_table_changes(changes, after_schema_map)
+    v_teardown   = _emit_versioning_teardown(disabled, versioning_teardown, archive_suffix)
     column_ops   = _emit_column_changes(changes, after_table_map)
+    v_setup      = _emit_versioning_setup(enabled)
     add_views    = _emit_add_views(changes, after)
     add_triggers = _emit_add_triggers(changes, after)
     add_indexes  = _emit_add_indexes(changes, after_table_map)
@@ -211,7 +311,9 @@ def _generate_migration_sql(
         ("DROP VIEWS & TRIGGERS",     drop_views),
         ("SCHEMA CHANGES",            schema_ops),
         ("TABLE CHANGES",             table_ops),
+        ("VERSIONING TEARDOWN",       v_teardown),
         ("COLUMN CHANGES",            column_ops),
+        ("VERSIONING SETUP",          v_setup),
         ("ADD VIEWS",                 add_views),
         ("ADD TRIGGERS",              add_triggers),
         ("ADD INDEXES",               add_indexes),
@@ -774,14 +876,88 @@ def _emit_column_changes(changes: list[Change], after_table_map: dict) -> str:
                         f"ALTER TABLE {tbl_ref} ALTER COLUMN {sql_safe_double_quote(col_name)} SET DEFAULT {c.after};"
                     )
             elif c.field in ("masking_strategy", "mask_config", "sensitive",
-                             "clearance", "is_subject_identifier", "versioned"):
+                             "clearance", "is_subject_identifier"):
                 # View-layer changes — handled by view recreation.
+                pass
+            elif c.field == "versioned":
+                # Storage changes only when the table's versioned status flips,
+                # which is decided per table by _versioning_transitions. Flips
+                # that leave the table versioned are view-layer only.
                 pass
             elif c.field == "description":
                 # Carried by the COMMENTS section, which replays every description.
                 pass
 
     return "\n".join(lines) + "\n" if lines else ""
+
+
+def _emit_versioning_setup(enabled: list[tuple[str, TableConfig]]) -> str:
+    """Convert tables that gained their first versioned column to versioned storage."""
+    lines: list[str] = []
+    for schema_name, table in enabled:
+        lines.append(f"-- Versioning enabled on {schema_name}.{table.name}")
+        lines.extend(_versioning_setup_lines(schema_name, table))
+        lines.append("")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _emit_versioning_teardown(
+    disabled:       list[tuple[str, TableConfig]],
+    mode:           VersioningTeardown | None,
+    archive_suffix: str,
+) -> str:
+    """Return tables that lost their last versioned column to plain storage.
+
+    The live shadow table keeps only current rows, loses __valid_from__ and
+    __valid_to__, and gets its primary key back. With mode 'keep' the whole
+    versioned table is copied to an archive table in the shadow schema first.
+    """
+    if not disabled:
+        return ""
+    if mode is None:
+        raise MigrateError(_versioning_teardown_required_message(disabled))
+
+    lines: list[str] = []
+    for schema_name, table in disabled:
+        shadow   = f"tk_{schema_name}"
+        shadow_q = sql_safe_double_quote(shadow)
+        tbl_ref  = f"{shadow_q}.{sql_safe_double_quote(table.name)}"
+
+        pk_cols = next((list(idx.columns) for idx in table.indexes if idx.primary_key), [])
+        if not pk_cols:
+            raise MigrateError(
+                f"Table {schema_name}.{table.name} has no primary key to restore after "
+                f"removing versioning. This should have been caught during validation."
+            )
+
+        if mode == "keep":
+            archive = f"{table.name}__history_{archive_suffix}"
+            if len(archive.encode()) > 63:
+                raise MigrateError(
+                    f"Archive table name '{archive}' exceeds PostgreSQL's 63-byte identifier "
+                    f"limit. Use --drop-versioning, or archive {schema_name}.{table.name} manually."
+                )
+            lines += [
+                f"-- Versioning removed from {schema_name}.{table.name} (--keep-versioning).",
+                f"-- Full history archived to {shadow}.{archive}. The archive is not governed:",
+                f"-- no view, grants, erasure, or retention apply to it.",
+                f"CREATE TABLE {shadow_q}.{sql_safe_double_quote(archive)} AS TABLE {tbl_ref};",
+            ]
+        else:
+            lines.append(
+                f"-- WARNING: Versioning removed from {schema_name}.{table.name} "
+                f"(--drop-versioning). Historical rows will be permanently deleted."
+            )
+
+        cols_sql = ", ".join(sql_safe_double_quote(c) for c in pk_cols)
+        lines += [
+            f"DELETE FROM {tbl_ref} WHERE __valid_to__ <> 'infinity'::timestamptz;",
+            f"DROP INDEX IF EXISTS {shadow_q}.{sql_safe_double_quote(f'idx_{table.name}_current')};",
+            f"ALTER TABLE {tbl_ref} DROP COLUMN __valid_from__, DROP COLUMN __valid_to__;",
+            f"ALTER TABLE {tbl_ref} ADD PRIMARY KEY ({cols_sql});",
+            "",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _emit_add_views(changes: list[Change], after: GovernanceProject) -> str:
@@ -978,11 +1154,13 @@ def _emit_role_changes(changes: list[Change], before: GovernanceProject, after: 
 
 
 def _migration_metadata(
-    after:           GovernanceProject,
-    profile:         ConnectionProfile,
-    source_checksum: str,
-    db_name:         str,
-    changes:         list[Change],
+    after:               GovernanceProject,
+    profile:             ConnectionProfile,
+    source_checksum:     str,
+    db_name:             str,
+    changes:             list[Change],
+    versioning_teardown: VersioningTeardown | None = None,
+    teardown_tables:     list[str] | None = None,
 ) -> dict:
     return {
         "artifact_type":   "migrate",
@@ -995,6 +1173,10 @@ def _migration_metadata(
         "source_checksum": source_checksum,
         "target_checksum": project_checksum(after),
         "change_count":    len(changes),
+        "versioning_teardown": (
+            {"mode": versioning_teardown, "tables": teardown_tables or []}
+            if versioning_teardown else None
+        ),
         "changes": [
             {
                 "kind":        c.kind,

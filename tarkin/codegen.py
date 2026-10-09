@@ -535,54 +535,73 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
                     f"__valid_from__/__valid_to__ columns. "
                     f"Existing data in these columns will be overwritten by Tarkin versioning."
                 )
-            if not has_from:
-                lines.append(
-                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
-                    f"ADD COLUMN __valid_from__ timestamptz NOT NULL DEFAULT now();"
-                )
-            if not has_to:
-                lines.append(
-                    f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} "
-                    f"ADD COLUMN __valid_to__ timestamptz NOT NULL DEFAULT 'infinity'::timestamptz;"
-                )
-
-            shadow_lit = sql_safe_escape_string(shadow)
-            table_lit  = sql_safe_escape_string(table.name)
-            lines.extend([
-                "DO $tk_outer$",
-                "DECLARE _pk_name text;",
-                "BEGIN",
-                "    SELECT conname INTO _pk_name FROM pg_constraint",
-                f"    WHERE conrelid = '{shadow}.{table.name}'::regclass AND contype = 'p';",
-                "    IF _pk_name IS NOT NULL THEN",
-                "        EXECUTE format('ALTER TABLE %I.%I DROP CONSTRAINT %I',",
-                f"                       '{shadow_lit}', '{table_lit}', _pk_name);",
-                "    END IF;",
-                "END;",
-                "$tk_outer$ LANGUAGE plpgsql;",
-            ])
-
-            pk_cols: list[str] = []
-            for idx in table.indexes:
-                if idx.primary_key:
-                    pk_cols = list(idx.columns)
-                    break
-            if not pk_cols:
-                raise ValueError(
-                    f"Versioned table {schema.name}.{table.name} has no primary key. "
-                    f"This should have been caught during validation and is a Tarkin bug. Please file a bug report."
-                )
-
-            cols_sql = ", ".join(sql_safe_double_quote(c) for c in pk_cols)
-            idx_name = sql_safe_double_quote(f"idx_{table.name}_current")
-            lines.append(
-                f"CREATE UNIQUE INDEX {idx_name}"
-                f"ON {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)} ({cols_sql}) "
-                f"WHERE __valid_to__ = 'infinity'::timestamptz;"
-            )
+            lines.extend(_versioning_setup_lines(
+                schema.name, table, add_from=not has_from, add_to=not has_to,
+            ))
             lines.append("")
 
     return "\n".join(lines)
+
+
+def _versioning_setup_lines(
+    schema_name: str,
+    table:       TableConfig,
+    add_from:    bool = True,
+    add_to:      bool = True,
+) -> list[str]:
+    """Convert a shadow table to versioned storage.
+
+    Adds __valid_from__/__valid_to__, drops the primary key, and replaces it
+    with a partial unique index over current rows. Shared by build (versioning
+    a table on first attach) and migrate (a table that gains its first
+    versioned column), so the two paths cannot drift.
+    """
+    shadow     = f"tk_{schema_name}"
+    tbl_ref    = f"{sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table.name)}"
+    shadow_lit = sql_safe_escape_string(shadow)
+    table_lit  = sql_safe_escape_string(table.name)
+
+    pk_cols = next((list(idx.columns) for idx in table.indexes if idx.primary_key), [])
+    if not pk_cols:
+        raise ValueError(
+            f"Versioned table {schema_name}.{table.name} has no primary key. "
+            f"This should have been caught during validation and is a Tarkin bug. Please file a bug report."
+        )
+
+    lines: list[str] = []
+    if add_from:
+        lines.append(
+            f"ALTER TABLE {tbl_ref} "
+            f"ADD COLUMN __valid_from__ timestamptz NOT NULL DEFAULT now();"
+        )
+    if add_to:
+        lines.append(
+            f"ALTER TABLE {tbl_ref} "
+            f"ADD COLUMN __valid_to__ timestamptz NOT NULL DEFAULT 'infinity'::timestamptz;"
+        )
+
+    lines.extend([
+        "DO $tk_outer$",
+        "DECLARE _pk_name text;",
+        "BEGIN",
+        "    SELECT conname INTO _pk_name FROM pg_constraint",
+        f"    WHERE conrelid = format('%I.%I', '{shadow_lit}', '{table_lit}')::regclass AND contype = 'p';",
+        "    IF _pk_name IS NOT NULL THEN",
+        "        EXECUTE format('ALTER TABLE %I.%I DROP CONSTRAINT %I',",
+        f"                       '{shadow_lit}', '{table_lit}', _pk_name);",
+        "    END IF;",
+        "END;",
+        "$tk_outer$ LANGUAGE plpgsql;",
+    ])
+
+    cols_sql = ", ".join(sql_safe_double_quote(c) for c in pk_cols)
+    idx_name = sql_safe_double_quote(f"idx_{table.name}_current")
+    lines.append(
+        f"CREATE UNIQUE INDEX {idx_name} "
+        f"ON {tbl_ref} ({cols_sql}) "
+        f"WHERE __valid_to__ = 'infinity'::timestamptz;"
+    )
+    return lines
 
 
 def _generate_new_generated_columns(project: GovernanceProject, current: GovernanceProject) -> str:

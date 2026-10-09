@@ -636,3 +636,116 @@ class TestMigrateFunction:
         assert "BEGIN;" in sql
         assert "COMMIT;" in sql
         assert 'ADD COLUMN "email"' in sql
+
+
+class TestVersioningTransitions:
+    """A table's storage changes only when its versioned status flips."""
+
+    @staticmethod
+    def _versioned(proj: GovernanceProject, versioned: bool) -> GovernanceProject:
+        out = proj.model_copy(deep=True)
+        out.schemas[0].tables[0].columns[1].versioned = versioned
+        return out
+
+    def _sql(self, before, after, **kw) -> str:
+        return _generate_migration_sql(
+            before, after, diff(before, after), _fake_profile(), "", "", **kw
+        )
+
+    def test_enabling_versioning_adds_storage(self) -> None:
+        before = _simple_project()
+        after  = self._versioned(before, True)
+        sql    = self._sql(before, after)
+        assert "VERSIONING SETUP" in sql
+        assert 'ADD COLUMN __valid_from__' in sql
+        assert 'ADD COLUMN __valid_to__' in sql
+        assert "DROP CONSTRAINT" in sql
+        assert 'CREATE UNIQUE INDEX "idx_users_current" ON "tk_public"."users"' in sql
+
+    def test_setup_runs_before_views(self) -> None:
+        """The _current view selects __valid_to__, so the column must exist first."""
+        before = _simple_project()
+        sql    = self._sql(before, self._versioned(before, True))
+        assert sql.index("VERSIONING SETUP") < sql.index("ADD VIEWS")
+
+    def test_adding_a_versioned_column_enables_versioning(self) -> None:
+        before = _simple_project()
+        after  = before.model_copy(deep=True)
+        after.schemas[0].tables[0].columns.append(_col("email", versioned=True))
+        sql = self._sql(before, after)
+        assert "VERSIONING SETUP" in sql
+        assert sql.index("COLUMN CHANGES") < sql.index("VERSIONING SETUP")
+
+    def test_flip_that_leaves_table_versioned_changes_no_storage(self) -> None:
+        before = _simple_project()
+        before.schemas[0].tables[0].columns.append(_col("email", versioned=True))
+        before = self._versioned(before, True)
+        after  = self._versioned(before, False)  # email still versioned
+        sql = self._sql(before, after)
+        assert "VERSIONING SETUP" not in sql
+        assert "VERSIONING TEARDOWN" not in sql
+
+    def test_disabling_without_mode_raises(self) -> None:
+        before = self._versioned(_simple_project(), True)
+        after  = self._versioned(before, False)
+        with pytest.raises(MigrateError, match="--keep-versioning"):
+            self._sql(before, after)
+
+    def test_removing_last_versioned_column_without_mode_raises(self) -> None:
+        before = self._versioned(_simple_project(), True)
+        after  = before.model_copy(deep=True)
+        del after.schemas[0].tables[0].columns[1]
+        with pytest.raises(MigrateError, match="lose their last versioned column"):
+            self._sql(before, after)
+
+    def test_drop_mode_deletes_history_and_restores_pk(self) -> None:
+        before = self._versioned(_simple_project(), True)
+        sql    = self._sql(before, self._versioned(before, False), versioning_teardown="drop")
+        assert "WHERE __valid_to__ <> 'infinity'::timestamptz;" in sql
+        assert 'DROP INDEX IF EXISTS "tk_public"."idx_users_current";' in sql
+        assert "DROP COLUMN __valid_from__, DROP COLUMN __valid_to__;" in sql
+        assert 'ADD PRIMARY KEY ("id");' in sql
+        assert "__history_" not in sql
+
+    def test_keep_mode_archives_before_deleting(self) -> None:
+        before = self._versioned(_simple_project(), True)
+        sql    = self._sql(
+            before, self._versioned(before, False),
+            versioning_teardown="keep", archive_suffix="20261009120000",
+        )
+        archive = 'CREATE TABLE "tk_public"."users__history_20261009120000" AS TABLE "tk_public"."users";'
+        assert archive in sql
+        assert sql.index(archive) < sql.index("DELETE FROM")
+
+    def test_teardown_runs_before_column_drop(self) -> None:
+        """Archiving after the drop would lose the removed column's history."""
+        before = self._versioned(_simple_project(), True)
+        after  = before.model_copy(deep=True)
+        del after.schemas[0].tables[0].columns[1]
+        sql = self._sql(before, after, versioning_teardown="keep", archive_suffix="x")
+        assert sql.index("VERSIONING TEARDOWN") < sql.index("COLUMN CHANGES")
+
+    def test_migrate_requires_mode_before_writing_artifact(self, tmp_path: Path) -> None:
+        before = self._versioned(_simple_project(), True)
+        after  = self._versioned(before, False)
+        with patch("tarkin.migrate._read_current_build") as mock_read:
+            mock_read.return_value = (before, "abc", "testdb")
+            with pytest.raises(MigrateError, match="--drop-versioning"):
+                migrate(after, _fake_profile(), output=tmp_path)
+        assert not list(tmp_path.glob("*.zip"))
+
+    def test_migrate_rejects_both_modes(self, tmp_path: Path) -> None:
+        with pytest.raises(MigrateError, match="both"):
+            migrate(_simple_project(), _fake_profile(), output=tmp_path,
+                    keep_versioning=True, drop_versioning=True)
+
+    def test_migrate_records_teardown_in_metadata(self, tmp_path: Path) -> None:
+        before = self._versioned(_simple_project(), True)
+        after  = self._versioned(before, False)
+        with patch("tarkin.migrate._read_current_build") as mock_read, \
+             patch("tarkin.migrate.pkg_version", return_value="0.0.0"):
+            mock_read.return_value = (before, "abc", "testdb")
+            zip_path = migrate(after, _fake_profile(), output=tmp_path, drop_versioning=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            meta = json.loads(zf.read("tarkin_build.json"))
+        assert meta["versioning_teardown"] == {"mode": "drop", "tables": ["public.users"]}
