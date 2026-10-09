@@ -403,7 +403,7 @@ def _generate_public_schema_grant_capture(project: GovernanceProject) -> str:
     schema no longer exists under its original name.
     """
     lines = [
-        "DO $$",
+        "DO $tk_outer$",
         "DECLARE",
         "    v_build_id bigint;",
         "BEGIN",
@@ -421,7 +421,7 @@ def _generate_public_schema_grant_capture(project: GovernanceProject) -> str:
                 f"VALUES (v_build_id, 'PUBLIC', '{sn}', NULL, NULL, '{priv}');"
             )
             lines.append(f"    END IF;")
-    lines += ["END;", "$$ LANGUAGE plpgsql;", ""]
+    lines += ["END;", "$tk_outer$ LANGUAGE plpgsql;", ""]
     return "\n".join(lines)
 
 
@@ -549,7 +549,7 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
             shadow_lit = sql_safe_escape_string(shadow)
             table_lit  = sql_safe_escape_string(table.name)
             lines.extend([
-                "DO $$",
+                "DO $tk_outer$",
                 "DECLARE _pk_name text;",
                 "BEGIN",
                 "    SELECT conname INTO _pk_name FROM pg_constraint",
@@ -559,7 +559,7 @@ def _generate_versioning_columns(project: GovernanceProject, current: Governance
                 f"                       '{shadow_lit}', '{table_lit}', _pk_name);",
                 "    END IF;",
                 "END;",
-                "$$ LANGUAGE plpgsql;",
+                "$tk_outer$ LANGUAGE plpgsql;",
             ])
 
             pk_cols: list[str] = []
@@ -1069,7 +1069,7 @@ def _generate_trigger_function(shadow: str, table: TableConfig) -> str:
         v_vals = insert_vals + ", now(), 'infinity'::timestamptz"
         body = f"""\
 CREATE OR REPLACE FUNCTION {fn_ref}()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql AS $tk_outer$
 BEGIN
     IF TG_OP = 'INSERT' THEN
 {fill_block}        INSERT INTO {tbl_ref} ({v_cols})
@@ -1092,12 +1092,12 @@ BEGIN
         RETURN OLD;
     END IF;
 END;
-$$;"""
+$tk_outer$;"""
     else:
         update_set = ", ".join(f"{quote(c)} = NEW.{quote(c)}" for c in writable_cols)
         body = f"""\
 CREATE OR REPLACE FUNCTION {fn_ref}()
-RETURNS trigger LANGUAGE plpgsql AS $$
+RETURNS trigger LANGUAGE plpgsql AS $tk_outer$
 BEGIN
     IF TG_OP = 'INSERT' THEN
 {fill_block}        INSERT INTO {tbl_ref} ({insert_cols})
@@ -1116,7 +1116,7 @@ BEGIN
         RETURN OLD;
     END IF;
 END;
-$$;"""
+$tk_outer$;"""
 
     return body
 
@@ -1383,7 +1383,7 @@ def _generate_grants(project: GovernanceProject) -> str:
         )
         lines += [
             "-- MAINTAIN grants (PostgreSQL 16+ only)",
-            "DO $$",
+            "DO $tk_outer$",
             "BEGIN",
             "    IF current_setting('server_version_num')::int >= 160000 THEN",
             f"        {grant_stmts}",
@@ -1392,7 +1392,7 @@ def _generate_grants(project: GovernanceProject) -> str:
             "found version %)', current_setting('server_version_num');",
             "    END IF;",
             "END;",
-            "$$ LANGUAGE plpgsql;",
+            "$tk_outer$ LANGUAGE plpgsql;",
             "",
         ]
 
@@ -1412,7 +1412,7 @@ def _generate_audit(project: GovernanceProject) -> str:
         f"-- Additive: merges with existing pgaudit settings rather than overwriting.",
         f"-- Pre-existing values are captured in __META__ for restoration on detach.",
         f"",
-        f"DO $$",
+        f"DO $tk_outer$",
         f"DECLARE",
         f"    _existing  text := current_setting('pgaudit.log', true);",
         f"    _new       text := '{levels}';",
@@ -1432,23 +1432,23 @@ def _generate_audit(project: GovernanceProject) -> str:
         f"        _merged",
         f"    );",
         f"END;",
-        f"$$ LANGUAGE plpgsql;",
+        f"$tk_outer$ LANGUAGE plpgsql;",
         f"",
-        f"DO $$",
+        f"DO $tk_outer$",
         f"BEGIN",
         f"    IF current_setting('pgaudit.log_catalog', true) <> 'on' THEN",
         f"        EXECUTE 'ALTER DATABASE {db_name} SET pgaudit.log_catalog = off';",
         f"    END IF;",
         f"END;",
-        f"$$ LANGUAGE plpgsql;",
+        f"$tk_outer$ LANGUAGE plpgsql;",
         f"",
-        f"DO $$",
+        f"DO $tk_outer$",
         f"BEGIN",
         f"    IF current_setting('pgaudit.log_relation', true) <> 'on' THEN",
         f"        EXECUTE 'ALTER DATABASE {db_name} SET pgaudit.log_relation = on';",
         f"    END IF;",
         f"END;",
-        f"$$ LANGUAGE plpgsql;",
+        f"$tk_outer$ LANGUAGE plpgsql;",
         f"",
     ]
 
@@ -1527,7 +1527,7 @@ RETURNS TABLE (
     erase_strategy text,
     rows_matched  bigint
 )
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql AS $tk_outer$
 DECLARE
     rec          __META__.tarkin_subject_identifiers%ROWTYPE;
     where_clause text;
@@ -1544,6 +1544,7 @@ BEGIN
 
     FOR rec IN
         SELECT * FROM __META__.tarkin_subject_identifiers
+        WHERE build_id = __META__.tarkin_latest_build_id()
     LOOP
         -- Build WHERE clause and corresponding parameter array dynamically.
         -- This avoids the previous hard cap of 8 positional parameters.
@@ -1560,7 +1561,7 @@ BEGIN
                 IF where_clause <> '' THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
-                where_clause := where_clause || format('%I = $%s::%s', col_name, clause_idx, col_type);
+                where_clause := where_clause || format('%I = ($1[%s])::%s', col_name, clause_idx, col_type);
             END IF;
         END LOOP;
 
@@ -1571,7 +1572,7 @@ BEGIN
         EXECUTE format(
             'SELECT count(*) FROM %I.%I WHERE %s',
             rec.shadow_schema, rec.shadow_table, where_clause
-        ) USING VARIADIC params
+        ) USING params
           INTO row_count;
 
         schema_name    := rec.schema_name;
@@ -1581,7 +1582,7 @@ BEGIN
         RETURN NEXT;
     END LOOP;
 END;
-$$;
+$tk_outer$;
 """.strip()
 
     apply_fn = f"""
@@ -1595,7 +1596,7 @@ RETURNS TABLE (
     erase_strategy text,
     rows_affected bigint
 )
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql AS $tk_outer$
 DECLARE
     rec          __META__.tarkin_subject_identifiers%ROWTYPE;
     where_clause text;
@@ -1616,6 +1617,7 @@ BEGIN
 
     FOR rec IN
         SELECT * FROM __META__.tarkin_subject_identifiers
+        WHERE build_id = __META__.tarkin_latest_build_id()
     LOOP
         where_clause := '';
         params       := ARRAY[]::text[];
@@ -1630,7 +1632,7 @@ BEGIN
                 IF where_clause <> '' THEN
                     where_clause := where_clause || ' AND ';
                 END IF;
-                where_clause := where_clause || format('%I = $%s::%s', col_name, clause_idx, col_type);
+                where_clause := where_clause || format('%I = ($1[%s])::%s', col_name, clause_idx, col_type);
             END IF;
         END LOOP;
 
@@ -1643,7 +1645,7 @@ BEGIN
                 'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
                  SELECT count(*) FROM deleted',
                 rec.shadow_schema, rec.shadow_table, where_clause
-            ) USING VARIADIC params
+            ) USING params
               INTO row_count;
 
         ELSIF rec.erase_strategy IN ('nullify', 'obfuscate') THEN
@@ -1666,15 +1668,15 @@ BEGIN
 
                     IF rec.erase_strategy = 'nullify' THEN
                         set_clause := set_clause || format(
-                            $$%I = CASE WHEN (SELECT is_nullable = 'YES'
+                            $tk_inner$%I = CASE WHEN (SELECT is_nullable = 'YES'
                                 FROM information_schema.columns
                                 WHERE table_schema = %L AND table_name = %L AND column_name = %L)
-                                THEN NULL ELSE '[ERASED]'::%s END$$,
+                                THEN NULL ELSE '[ERASED]'::%s END$tk_inner$,
                             col_name, rec.shadow_schema, rec.shadow_table, col_name, col_type
                         );
                     ELSE -- obfuscate
                         set_clause := set_clause || format(
-                            $$%I = (
+                            $tk_inner$%I = (
                                 SELECT CASE
                                     WHEN udt_name ILIKE 'text' OR udt_name ILIKE 'varchar'
                                       OR udt_name ILIKE 'bpchar'
@@ -1700,7 +1702,7 @@ BEGIN
                                 END::%s
                                 FROM information_schema.columns
                                 WHERE table_schema=%L AND table_name=%L AND column_name=%L
-                            )$$,
+                            )$tk_inner$,
                             col_name, col_name, col_name, col_name, col_name, col_name,
                             col_name, col_name, col_name, col_name, col_name,
                             col_type, rec.shadow_schema, rec.shadow_table, col_name
@@ -1714,14 +1716,14 @@ BEGIN
                     'WITH deleted AS (DELETE FROM %I.%I WHERE %s RETURNING 1)
                      SELECT count(*) FROM deleted',
                     rec.shadow_schema, rec.shadow_table, where_clause
-                ) USING VARIADIC params
+                ) USING params
                   INTO row_count;
             ELSE
                 EXECUTE format(
                     'WITH updated AS (UPDATE %I.%I SET %s WHERE %s RETURNING 1)
                      SELECT count(*) FROM updated',
                     rec.shadow_schema, rec.shadow_table, set_clause, where_clause
-                ) USING VARIADIC params
+                ) USING params
                   INTO row_count;
             END IF;
         END IF;
@@ -1741,7 +1743,7 @@ BEGIN
         RETURN NEXT;
     END LOOP;
 END;
-$$;
+$tk_outer$;
 """.strip()
 
     return check_fn + "\n\n" + apply_fn + "\n"
@@ -1850,7 +1852,12 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
             if mv_name not in tarkin_view_names:
                 moved_objects.append((schema.name, shadow, "materialized_view", mv_name))
 
-    lines = ["DO $$", "DECLARE", "    v_build_id bigint;", "BEGIN"]
+    lines = [
+        "DO $tk_outer$",
+        "DECLARE",
+        "    v_build_id bigint;",
+        "BEGIN"
+    ]
 
     lines += [
         "    -- The tarkin_builds row was inserted by the BUILD RECORD section.",
@@ -2007,7 +2014,10 @@ def _generate_meta_population(project: GovernanceProject, current: GovernancePro
             lines.append(f"    END IF;")
     lines.append("")
 
-    lines += ["END;", "$$;"]
+    lines += [
+        "END;",
+        "$tk_outer$;"
+    ]
     return "\n".join(lines)
 
 
@@ -2161,7 +2171,7 @@ def _generate_retention(project: GovernanceProject) -> str:
     sweep_fn = """
 CREATE OR REPLACE FUNCTION __META__.tarkin_erase_expired_records()
 RETURNS void
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql AS $tk_outer$
 DECLARE
     rec          __META__.tarkin_retention%ROWTYPE;
     shadow_schema text;
@@ -2175,7 +2185,10 @@ DECLARE
     j             int;
     row_count     bigint;
 BEGIN
-    FOR rec IN SELECT * FROM __META__.tarkin_retention LOOP
+    FOR rec IN
+        SELECT * FROM __META__.tarkin_retention
+        WHERE build_id = __META__.tarkin_latest_build_id()
+    LOOP
         shadow_schema := 'tk_' || rec.schema_name;
         shadow_table  := rec.table_name;
         where_clause  := '__expires_at__ <= now() AND __erase_on_expiry__ = true';
@@ -2204,13 +2217,13 @@ BEGIN
 
                     IF rec.erase_strategy = 'nullify' THEN
                         set_clause := set_clause || format(
-                            $$%I = CASE WHEN (SELECT is_nullable = 'YES' FROM information_schema.columns
+                            $tk_inner$%I = CASE WHEN (SELECT is_nullable = 'YES' FROM information_schema.columns
                                 WHERE table_schema = %L AND table_name = %L AND column_name = %L)
-                                THEN NULL ELSE '[ERASED]'::%s END$$,
+                                THEN NULL ELSE '[ERASED]'::%s END$tk_inner$,
                             col_name, shadow_schema, shadow_table, col_name, col_type);
                     ELSE -- obfuscate
                         set_clause := set_clause || format(
-                            $$%I = (SELECT CASE
+                            $tk_inner$%I = (SELECT CASE
                                 WHEN udt_name ILIKE 'text' OR udt_name ILIKE 'varchar' OR udt_name ILIKE 'bpchar'
                                     THEN encode(digest(%I::text, 'sha256'), 'hex')
                                 WHEN udt_name ILIKE 'uuid'
@@ -2230,7 +2243,7 @@ BEGIN
                                     THEN (get_byte(digest(%I::text,'sha256'),0)%%2=0)::text
                                 ELSE '[ERASED]'
                             END::%s FROM information_schema.columns
-                            WHERE table_schema=%L AND table_name=%L AND column_name=%L)$$,
+                            WHERE table_schema=%L AND table_name=%L AND column_name=%L)$tk_inner$,
                             col_name, col_name, col_name, col_name, col_name, col_name,
                             col_name, col_name, col_name, col_name, col_name,
                             col_type, shadow_schema, shadow_table, col_name);
@@ -2263,7 +2276,7 @@ BEGIN
         END IF;
     END LOOP;
 END;
-$$;
+$tk_outer$;
 """.strip()
 
     lines = [sweep_fn, ""]
@@ -2490,9 +2503,9 @@ RETURNS bigint
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT MAX(build_id) FROM __META__.tarkin_builds;
-$$;
+$tk_outer$;
 REVOKE ALL ON FUNCTION __META__.tarkin_latest_build_id() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION __META__.get_schemas()
@@ -2500,7 +2513,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2523,7 +2536,7 @@ AS $$
       AND rs.build_id  = __META__.tarkin_latest_build_id()
       AND rs.role_name = session_user
       AND rs.usage     = true;
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_schemas() TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_schemas() IS
     'Returns the schemas the calling role holds USAGE on, as json: name, clearance, audit_enabled, description.';
@@ -2533,7 +2546,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2563,7 +2576,7 @@ AS $$
       AND rt.select    = true
       AND t.clearance  <= r.clearance
       AND (p_schema IS NULL OR t.schema_name = p_schema);
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_tables(text) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_tables(text) IS
     'Returns the tables the calling role holds SELECT on at or below its clearance, as json: schema, name, clearance, audit_enabled, description. Optional argument filters by schema.';
@@ -2576,7 +2589,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2618,7 +2631,7 @@ AS $$
           )
       AND (p_schema IS NULL OR c.schema_name = p_schema)
       AND (p_table  IS NULL OR c.table_name  = p_table);
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_columns(text, text) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_columns(text, text) IS
     'Returns the columns the calling role can see, as json: schema, table, name, type, clearance, nullable, sensitive, masking_strategy, description. Sensitive columns appear only for roles with can_access_sensitive. A masking_strategy other than none means the value read through the view is masked, not the stored value. Optional arguments filter by schema and table.';
@@ -2628,7 +2641,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2660,7 +2673,7 @@ AS $$
             )
             OR r.name = session_user
           );
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_roles() TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_roles() IS
     'Returns role definitions as json: name, clearance, capability flags, member_of, description. Roles with can_admin see every role, while everyone else sees only their own record.';
@@ -2670,7 +2683,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         (
             SELECT json_build_object(
@@ -2693,7 +2706,7 @@ AS $$
             'message', 'No results found for get_build with parameters none'
         )
     );
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_build() TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_build() IS
     'Returns the governance build in effect, as json: build_id, built_at, tarkin_version, database_name, checksum. Call this to detect that the model changed under you. The governance YAML is never returned.';
@@ -2706,7 +2719,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2743,7 +2756,7 @@ AS $$
       AND t.clearance  <= r.clearance
       AND (p_schema IS NULL OR ret.schema_name = p_schema)
       AND (p_table  IS NULL OR ret.table_name  = p_table);
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_retention(text, text) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_retention(text, text) IS
     'Returns retention configuration, as json: schema, table, erase_strategy, retention_days. Rows older than retention_days may already have been erased, so do not assume historical completeness. Only tables enrolled in retention management appear.';
@@ -2755,7 +2768,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2786,7 +2799,7 @@ AS $$
               AND self.name      = session_user
               AND self.can_admin = true
           );
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_erasures(timestamptz) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_erasures(timestamptz) IS
     'Returns the erasure audit log, restricted to roles with can_admin, as json. The identifier values used to erase a subject are never returned. Optional argument bounds the log by timestamp.';
@@ -2798,7 +2811,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2842,7 +2855,7 @@ AS $$
           AND t.clearance  <= r.clearance
         GROUP BY e.schema_name, e.table_name, e.strategy
     ) x;
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_erasure_counts(timestamptz) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_erasure_counts(timestamptz) IS
     'Returns per-table erasure activity counts, as json: schema, table, strategy, operations, rows_affected, first_erasure, last_erasure. A table listed here is missing rows that once existed. Carries no identifiers, erased values, or actor names.';
@@ -2855,7 +2868,7 @@ RETURNS json
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
-AS $$
+AS $tk_outer$
     SELECT COALESCE(
         json_agg(
             json_build_object(
@@ -2898,7 +2911,7 @@ AS $$
       AND t.clearance  <= r.clearance
       AND (p_schema IS NULL OR s.name      = p_schema)
       AND (p_table  IS NULL OR p.tablename = p_table);
-$$;
+$tk_outer$;
 GRANT EXECUTE ON FUNCTION __META__.get_rls_policies(text, text) TO PUBLIC;
 COMMENT ON FUNCTION __META__.get_rls_policies(text, text) IS
     'Returns the row-level security policies in effect, as json: schema, table, policy, permissive, command, roles, using_expr, check_expr. Where a policy applies, a query returns only the rows its using_expr admits; a partial result is expected, not an error.';

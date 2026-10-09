@@ -67,7 +67,7 @@ def _call_function(
     """Execute a __META__ erase function and return rows as dicts."""
     engine = profile.engine()
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             try:
                 rows = conn.execute(
                     text(f"SELECT * FROM __META__.{function_name}(:cols, :vals)"),

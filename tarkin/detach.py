@@ -407,7 +407,7 @@ def _generate_detach_sql(
     if retention_tables:
         lines.append("-- Unschedule pg_cron retention job (if pg_cron is installed)")
         lines += [
-            "DO $$",
+            "DO $tk_outer$",
             "BEGIN",
             f"    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN",
             f"        PERFORM cron.unschedule(jobname)",
@@ -415,7 +415,7 @@ def _generate_detach_sql(
             f"        WHERE jobname LIKE 'tarkin_retention_%';",
             "    END IF;",
             "END;",
-            "$$ LANGUAGE plpgsql;",
+            "$tk_outer$ LANGUAGE plpgsql;",
             "",
         ]
         lines.append("-- Drop retention columns added by Tarkin")
@@ -488,7 +488,7 @@ def _generate_detach_sql(
     schema_array = "ARRAY[" + ", ".join(f"'{n}'" for n in original_schema_names) + "]"
     lines += [
         "-- Drop tarkin_rls_* policies and disable RLS on restored tables",
-        "DO $$",
+        "DO $tk_outer$",
         "DECLARE",
         "    r record;",
         "BEGIN",
@@ -506,7 +506,7 @@ def _generate_detach_sql(
         "            r.schemaname, r.tablename);",
         "    END LOOP;",
         "END;",
-        "$$ LANGUAGE plpgsql;",
+        "$tk_outer$ LANGUAGE plpgsql;",
         "",
     ]
 

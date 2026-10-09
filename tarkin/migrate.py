@@ -257,7 +257,7 @@ def _emit_migrate_meta_update(
     yaml_tag_open, yaml_tag_close = sql_safe_dollar_quote(yaml_str)
 
     parts: list[str] = [
-        "DO $$", "DECLARE",
+        "DO $tk_outer$", "DECLARE",
         "    v_prev_build_id bigint;",
         "    v_new_build_id  bigint;",
         "BEGIN",
@@ -421,7 +421,7 @@ def _emit_migrate_meta_update(
 
     parts.append("")
     parts.append("END;")
-    parts.append("$$ LANGUAGE plpgsql;")
+    parts.append("$tk_outer$ LANGUAGE plpgsql;")
     parts.append("")
     return "\n".join(parts)
 
@@ -456,7 +456,7 @@ def _emit_drop_rls(changes: list[Change]) -> str:
         shadow = f"tk_{schema_name}"
         lines += [
             f"-- Drop all tarkin_rls_* policies on {schema_name}.{table_name} for recreation",
-            f"DO $$",
+            f"DO $tk_outer$",
             f"DECLARE r record;",
             f"BEGIN",
             f"    FOR r IN SELECT policyname FROM pg_policies",
@@ -465,7 +465,7 @@ def _emit_drop_rls(changes: list[Change]) -> str:
             f"    LOOP",
             f"        EXECUTE format('DROP POLICY IF EXISTS %I ON {sql_safe_double_quote(schema_name)}.{sql_safe_double_quote(table_name)}', r.policyname);",
             f"    END LOOP;",
-            f"END; $$ LANGUAGE plpgsql;",
+            f"END; $tk_outer$ LANGUAGE plpgsql;",
             f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} DISABLE ROW LEVEL SECURITY;",
             f"ALTER TABLE {sql_safe_double_quote(shadow)}.{sql_safe_double_quote(table_name)} NO FORCE ROW LEVEL SECURITY;",
         ]
@@ -673,34 +673,6 @@ def _emit_table_changes(changes: list[Change], after_schema_map: dict) -> str:
                         f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
                         f"'{sh}', '{tn}', '{cn}');"
                     )
-
-            if id_cols and table.erase_strategy is not None:
-                sn        = sql_safe_escape_string(schema_name)
-                tn        = sql_safe_escape_string(table_name)
-                sh        = sql_safe_escape_string(shadow)
-                es        = sql_safe_escape_string(str(table.erase_strategy))
-                col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c2.name)}'" for c2 in id_cols) + "]"
-                col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c2.type)}'" for c2 in id_cols) + "]"
-                lines.append(
-                    f"INSERT INTO __META__.tarkin_subject_identifiers "
-                    f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
-                    f"identifier_cols, identifier_types, erase_strategy) "
-                    f"VALUES ("
-                    f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
-                    f"'{sn}', '{tn}', '{sh}', '{tn}', {col_names}, {col_types}, '{es}');"
-                )
-
-            if table.retention_days is not None and table.erase_strategy is not None:
-                sn = sql_safe_escape_string(schema_name)
-                tn = sql_safe_escape_string(table_name)
-                es = sql_safe_escape_string(str(table.erase_strategy))
-                lines.append(
-                    f"INSERT INTO __META__.tarkin_retention "
-                    f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
-                    f"VALUES ("
-                    f"(SELECT build_id FROM __META__.tarkin_builds ORDER BY built_at DESC LIMIT 1), "
-                    f"'{sn}', '{tn}', '{es}', {table.retention_days});"
-                )
 
             lines.append("")
 

@@ -266,14 +266,14 @@ class TestGenerateAudit:
         proj.database.audit_enabled = False
         sql  = _generate_audit(proj)
         assert "not enabled" in sql
-        assert "DO $$" not in sql
+        assert "DO $tk_outer$" not in sql
 
     def test_contains_pgaudit_log_merge_block(self) -> None:
         proj = _make_project()
         proj.database.audit_enabled = True
         proj.database.audit_logged = [AuditLogLevel.DDL, AuditLogLevel.WRITE]
         sql  = _generate_audit(proj)
-        assert "DO $$" in sql
+        assert "DO $tk_outer$" in sql
         assert "pgaudit.log" in sql
         assert "string_agg" in sql
         assert "ddl" in sql
@@ -853,10 +853,10 @@ _DISCOVERY_FUNCTIONS = (
 
 
 def _function_body(fn: str) -> str:
-    """Return the SQL between a function's CREATE and its closing $$."""
+    """Return the SQL between a function's CREATE and its closing $tk_outer$."""
     sql   = _generate_discovery_functions()
     start = sql.index(f"CREATE OR REPLACE FUNCTION __META__.{fn}(")
-    return sql[start:sql.index("$$;", start)]
+    return sql[start:sql.index("$tk_outer$;", start)]
 
 
 def _squash(sql: str) -> str:

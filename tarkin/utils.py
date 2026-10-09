@@ -231,35 +231,33 @@ def emit_per_build_inserts(project: GovernanceProject, build_id_expr: str) -> st
         shadow = f"tk_{schema.name}"
         for table in schema.tables:
             id_cols = [c for c in table.columns if c.is_subject_identifier]
-            if not id_cols or table.erase_strategy is None:
-                continue
-            sn        = sql_safe_escape_string(schema.name)
-            tn        = sql_safe_escape_string(table.name)
-            sh        = sql_safe_escape_string(shadow)
-            es        = sql_safe_escape_string(str(table.erase_strategy))
-            col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.name)}'" for c in id_cols) + "]"
-            col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.type)}'" for c in id_cols) + "]"
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_subject_identifiers "
-                f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
-                f"identifier_cols, identifier_types, erase_strategy) "
-                f"VALUES ({b}, '{sn}', '{tn}', '{sh}', '{tn}', "
-                f"{col_names}, {col_types}, '{es}');"
-            )
+            if id_cols and table.erase_strategy is not None:
+                sn        = sql_safe_escape_string(schema.name)
+                tn        = sql_safe_escape_string(table.name)
+                sh        = sql_safe_escape_string(shadow)
+                es        = sql_safe_escape_string(str(table.erase_strategy))
+                col_names = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.name)}'" for c in id_cols) + "]"
+                col_types = "ARRAY[" + ", ".join(f"'{sql_safe_escape_string(c.type)}'" for c in id_cols) + "]"
+                lines.append(
+                    f"    INSERT INTO __META__.tarkin_subject_identifiers "
+                    f"(build_id, schema_name, table_name, shadow_schema, shadow_table, "
+                    f"identifier_cols, identifier_types, erase_strategy) "
+                    f"VALUES ({b}, '{sn}', '{tn}', '{sh}', '{tn}', "
+                    f"{col_names}, {col_types}, '{es}');"
+                )
     lines.append("")
 
     for schema in project.schemas:
         for table in schema.tables:
-            if table.retention_days is None or table.erase_strategy is None:
-                continue
-            sn = sql_safe_escape_string(schema.name)
-            tn = sql_safe_escape_string(table.name)
-            es = sql_safe_escape_string(str(table.erase_strategy))
-            lines.append(
-                f"    INSERT INTO __META__.tarkin_retention "
-                f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
-                f"VALUES ({b}, '{sn}', '{tn}', '{es}', {table.retention_days});"
-            )
+            if table.retention_days is not None and table.erase_strategy is not None:
+                sn = sql_safe_escape_string(schema.name)
+                tn = sql_safe_escape_string(table.name)
+                es = sql_safe_escape_string(str(table.erase_strategy))
+                lines.append(
+                    f"    INSERT INTO __META__.tarkin_retention "
+                    f"(build_id, schema_name, table_name, erase_strategy, retention_days) "
+                    f"VALUES ({b}, '{sn}', '{tn}', '{es}', {table.retention_days});"
+                )
     lines.append("")
 
     return "\n".join(lines)
