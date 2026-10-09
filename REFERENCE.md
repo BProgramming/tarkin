@@ -237,15 +237,14 @@ Options:
 - `--reauth` | `-r`: if the connection fails on an IAM profile, prompt to re-authorize via AWS SSO before retrying
 - `--output` | `-o`: output directory (defaults to `out/`)
 - `--force` | `-f`: generate an artifact even when the model has not changed
-- `--keep-versioning` | `-k`: when a table loses its last versioned column, archive its full history to `tk_<schema>.<table>__history_<timestamp>`
-- `--drop-versioning` | `-d`: when a table loses its last versioned column, delete its historical rows, keeping only current records
+- `--drop-versioning` | `-d`: required when a table loses its last versioned column; deletes its historical rows, keeping only current records
 
 What it does:
 - Validates the target YAML
 - Reads the current build's YAML from `__META__.tarkin_builds` (most recent build)
 - Diffs the stored before-YAML against the target after-YAML
 - Raises `MigrateError` if no differences are detected
-- Raises `MigrateError` if a table loses its last versioned column and neither `--keep-versioning` nor `--drop-versioning` is given (or if both are)
+- Raises `MigrateError` if a table loses its last versioned column and `--drop-versioning` is not given
 - Generates ordered, transactional migration SQL in 16 sections:
   - Drop FK constraints for removed or modified FKs
   - Drop all `tarkin_rls_*` policies and disable RLS on tables whose RLS config changed
@@ -253,7 +252,7 @@ What it does:
   - Drop views and triggers for all tables in affected schemas
   - Schema changes: `CREATE` for added schemas (both public and `tk_`); `DROP CASCADE` with warning for removed schemas
   - Table changes: `CREATE` in shadow schema with column definitions and indexes for added tables; `DROP` with warning for removed tables
-  - Versioning teardown, for tables that lose their last versioned column: archive (with `--keep-versioning`), delete non-current rows, drop `idx_<table>_current` and the versioning columns, restore the primary key. Runs before column changes so a removed versioned column is still present when its history is archived
+  - Versioning teardown, for tables that lose their last versioned column: delete non-current rows, drop `idx_<table>_current` and the versioning columns, restore the primary key
   - Column changes: `ADD COLUMN` for new columns; `DROP COLUMN` with warning; `ALTER COLUMN TYPE` with `USING` cast and warning; `SET`/`DROP NOT NULL` (NOT NULL addition has warning); `SET`/`DROP DEFAULT`; view-layer-only changes (masking, clearance, etc.) are deferred to view recreation
   - Versioning setup, for existing tables that gain their first versioned column: add `__valid_from__`/`__valid_to__`, drop the primary key, create the partial unique index `idx_<table>_current`. Shares its code with `tarkin build`
   - Recreate views for all affected schemas using the after-state, including masking expressions, `security_invoker`, and `security_barrier`
@@ -268,7 +267,9 @@ What it does:
 
 Without `--force`, an empty changeset is an error. Parts of a migration are regenerated wholesale rather than diffed (the `__META__` update, the discovery functions, and the object comments carrying the YAML descriptions) so a database whose governance model is unchanged can still lag behind the codegen of the installed Tarkin version. `--force` is how it catches up without a detach and rebuild. The artifact is written for review and applied with `tarkin attach` like any other.
 
-Versioning is a property of a table's storage, so it changes only when a table's versioned status flips: gaining its first versioned column (whether an existing column is flipped or a versioned column is added) or losing its last (flipped off or removed). A flip that leaves the table versioned only regenerates its views and triggers. Removing versioning requires a choice because the history cannot stay in place: the unversioned trigger updates and deletes by primary key, so it would rewrite every historical row of the record it touched. `--keep-versioning` copies the whole versioned table, current and historical rows with their `__valid_from__`/`__valid_to__`, into an archive table in the shadow schema. The archive is not governed: it has no view or grants, and erasure and retention do not reach it. `--drop-versioning` is the same as `tarkin detach --drop-versioning`, scoped to the affected tables. The choice is recorded in the artifact metadata as `versioning_teardown`.
+Versioning is a property of a table's storage, so it changes only when a table's versioned status flips: gaining its first versioned column (whether an existing column is flipped or a versioned column is added) or losing its last (flipped off or removed). A flip that leaves the table versioned only regenerates its views and triggers. Removing versioning deletes the table's history, so it requires `--drop-versioning`. The deletion is the same as `tarkin detach --drop-versioning`, scoped to the affected tables, and the tables are recorded in the artifact metadata as `versioning_dropped`.
+
+Unlike detach, migrate has no `--keep-versioning`. Detach can leave history in place because Tarkin stops governing the table. Migrate keeps governing it, and history can't stay in the live table: the unversioned trigger updates and deletes by primary key, so it would rewrite every historical row of the record it touched. Moving the history to an archive table would leave data Tarkin doesn't govern, with no view and out of reach of erasure and retention. To keep history, leave at least one column versioned. Versioning is per table in storage, so one versioned column keeps the full history of every row under governance. An operator who wants an ungoverned copy can take one before migrating; that is a deliberate step outside Tarkin's guarantees.
 
 A forced migration writes a new `tarkin_builds` row, so `build_id` advances and `__META__.get_build()` reports the change even though the checksum is unchanged.
 

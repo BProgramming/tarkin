@@ -685,47 +685,35 @@ class TestVersioningTransitions:
         assert "VERSIONING SETUP" not in sql
         assert "VERSIONING TEARDOWN" not in sql
 
-    def test_disabling_without_mode_raises(self) -> None:
+    def test_disabling_without_drop_raises(self) -> None:
         before = self._versioned(_simple_project(), True)
         after  = self._versioned(before, False)
-        with pytest.raises(MigrateError, match="--keep-versioning"):
+        with pytest.raises(MigrateError, match="--drop-versioning"):
             self._sql(before, after)
 
-    def test_removing_last_versioned_column_without_mode_raises(self) -> None:
+    def test_error_points_to_keeping_a_column_versioned(self) -> None:
+        """There is no keep flag, so the error has to say how to keep history."""
+        before = self._versioned(_simple_project(), True)
+        with pytest.raises(MigrateError, match="keep at least one column versioned"):
+            self._sql(before, self._versioned(before, False))
+
+    def test_removing_last_versioned_column_without_drop_raises(self) -> None:
         before = self._versioned(_simple_project(), True)
         after  = before.model_copy(deep=True)
         del after.schemas[0].tables[0].columns[1]
         with pytest.raises(MigrateError, match="lose their last versioned column"):
             self._sql(before, after)
 
-    def test_drop_mode_deletes_history_and_restores_pk(self) -> None:
+    def test_drop_deletes_history_and_restores_pk(self) -> None:
         before = self._versioned(_simple_project(), True)
-        sql    = self._sql(before, self._versioned(before, False), versioning_teardown="drop")
+        sql    = self._sql(before, self._versioned(before, False), drop_versioning=True)
         assert "WHERE __valid_to__ <> 'infinity'::timestamptz;" in sql
         assert 'DROP INDEX IF EXISTS "tk_public"."idx_users_current";' in sql
         assert "DROP COLUMN __valid_from__, DROP COLUMN __valid_to__;" in sql
         assert 'ADD PRIMARY KEY ("id");' in sql
-        assert "__history_" not in sql
+        assert sql.index("DELETE FROM") < sql.index("ADD PRIMARY KEY")
 
-    def test_keep_mode_archives_before_deleting(self) -> None:
-        before = self._versioned(_simple_project(), True)
-        sql    = self._sql(
-            before, self._versioned(before, False),
-            versioning_teardown="keep", archive_suffix="20261009120000",
-        )
-        archive = 'CREATE TABLE "tk_public"."users__history_20261009120000" AS TABLE "tk_public"."users";'
-        assert archive in sql
-        assert sql.index(archive) < sql.index("DELETE FROM")
-
-    def test_teardown_runs_before_column_drop(self) -> None:
-        """Archiving after the drop would lose the removed column's history."""
-        before = self._versioned(_simple_project(), True)
-        after  = before.model_copy(deep=True)
-        del after.schemas[0].tables[0].columns[1]
-        sql = self._sql(before, after, versioning_teardown="keep", archive_suffix="x")
-        assert sql.index("VERSIONING TEARDOWN") < sql.index("COLUMN CHANGES")
-
-    def test_migrate_requires_mode_before_writing_artifact(self, tmp_path: Path) -> None:
+    def test_migrate_requires_drop_before_writing_artifact(self, tmp_path: Path) -> None:
         before = self._versioned(_simple_project(), True)
         after  = self._versioned(before, False)
         with patch("tarkin.migrate._read_current_build") as mock_read:
@@ -733,11 +721,6 @@ class TestVersioningTransitions:
             with pytest.raises(MigrateError, match="--drop-versioning"):
                 migrate(after, _fake_profile(), output=tmp_path)
         assert not list(tmp_path.glob("*.zip"))
-
-    def test_migrate_rejects_both_modes(self, tmp_path: Path) -> None:
-        with pytest.raises(MigrateError, match="both"):
-            migrate(_simple_project(), _fake_profile(), output=tmp_path,
-                    keep_versioning=True, drop_versioning=True)
 
     def test_migrate_records_teardown_in_metadata(self, tmp_path: Path) -> None:
         before = self._versioned(_simple_project(), True)
@@ -748,4 +731,4 @@ class TestVersioningTransitions:
             zip_path = migrate(after, _fake_profile(), output=tmp_path, drop_versioning=True)
         with zipfile.ZipFile(zip_path) as zf:
             meta = json.loads(zf.read("tarkin_build.json"))
-        assert meta["versioning_teardown"] == {"mode": "drop", "tables": ["public.users"]}
+        assert meta["versioning_dropped"] == ["public.users"]
